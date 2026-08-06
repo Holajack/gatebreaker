@@ -1,4 +1,6 @@
 import { GATES, SKILLS, STATS, xpForLevel, rankOf, derive } from '../game/config.js';
+import { allocate, effectiveStat } from '../game/progression.js';
+import { rosterSummary } from '../game/shadows.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -110,6 +112,7 @@ export class UI {
     if (!this.game) return;
     const d = derive(this.save);
     const s = this.save;
+    const roster = rosterSummary(s);
     $('pauseStats').innerHTML = `
       <div class="row"><span>Breaker</span><b>LV ${s.level} · ${rankOf(s.level)}-grade</b></div>
       <div class="row"><span>Attack</span><b>${Math.round(d.atk)}</b></div>
@@ -117,7 +120,8 @@ export class UI {
       <div class="row"><span>Mana</span><b>${d.maxMp}</b></div>
       <div class="row"><span>Crit</span><b>${(d.crit * 100).toFixed(1)}%</b></div>
       <div class="row"><span>Unspent points</span><b>${s.points}</b></div>
-      <div class="row"><span>Cinderbound</span><b>${this.game.shadows.length}</b></div>
+      <div class="row"><span>Cinderbound</span><b>${this.game.shadows.length} afield · ${roster.count}/${roster.capacity} bound</b></div>
+      <div class="row"><span>Strongest</span><b>${roster.strongest ? roster.strongest.name : '—'}</b></div>
       <div class="row"><span>Total kills</span><b>${s.totalKills}</b></div>
     `;
     this.show('pause');
@@ -146,13 +150,13 @@ export class UI {
       row.className = 'stat-row';
       row.innerHTML = `
         <span class="lbl"><b>${st.name}</b><small>${st.desc}</small></span>
-        <span class="val">${this.save.stats[st.key]}</span>
+        <span class="val">${effectiveStat(this.save, st.key)}</span>
         <button class="plus" ${this.save.points > 0 ? '' : 'disabled'}>+</button>
       `;
       row.querySelector('.plus').addEventListener('click', () => {
-        if (this.save.points <= 0) return;
-        this.save.points--;
-        this.save.stats[st.key]++;
+        // progression.allocate is the single place allocation happens; this
+        // panel used to decrement save.points and bump save.stats by hand.
+        if (!allocate(this.save, st.key)) return;
         this.audio.ui();
         if (this.game) this.game.refreshDerived();
         this.onStatChange?.();
@@ -232,7 +236,8 @@ export class UI {
     $('hudLevel').textContent = `LV ${s.level}`;
     const rank = rankOf(s.level);
     const badge = $('hudRank');
-    badge.textContent = rank;
+    // SOVEREIGN sits above the published ladder and does not fit the badge.
+    badge.textContent = rank === 'SOVEREIGN' ? 'SOV' : rank;
     badge.className = `rank-badge rank-${rank}`;
 
     const points = $('pointsBadge');

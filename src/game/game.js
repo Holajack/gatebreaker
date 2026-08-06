@@ -1,18 +1,29 @@
 import * as THREE from 'three';
 import { World, mulberry32 } from './world.js';
 import { Effects } from './effects.js';
-import { makeHumanoid, makeHealthBar, setHealthBar, animateRig, makeGroundRing } from './entities.js';
 import {
-  GATES, ENEMY_TYPES, BOSSES, SKILLS, derive, scaleEnemy, xpForLevel,
-  POINTS_PER_LEVEL, rankOf,
+  makeHumanoid, makeHealthBar, setHealthBar, animateRig, makeGroundRing, disposeObject3D,
+} from './entities.js';
+import {
+  GATES, ENEMY_TYPES, BOSSES, SKILLS, derive, scaleEnemy, rankOf,
 } from './config.js';
+import {
+  grantXp, shadowFieldCapacity, extractionChance,
+  MAX_EXTRACT_ATTEMPTS, CORPSE_WINDOW,
+} from './progression.js';
+import {
+  autoDeploy, deployedRecords, addShadow, makeShadow, releaseWeakest,
+  shadowCombat, rosterSummary,
+} from './shadows.js';
 import { Glow, GLOW_LAYER } from '../render/glow.js';
 import { Quality } from '../core/quality.js';
 import { attachBody, applyKnockback, FLAT_GROUND } from './physics.js';
 
-// Live soldier cap. Matches the between-run retention cap so the pause screen
-// can never promise more than you actually keep.
-const MAX_BOUND = 6;
+// How hard a corpse resists extraction. progression.extractionChance takes this
+// as its tierWeight. Provisional home: difficulty.js owns enemy classification
+// once step 11 lands, and this table moves there wholesale.
+const TIER_WEIGHT = { brute: 'elite', lancer: 'elite', howler: 'elite' };
+const tierWeightOf = (e) => (e.isBoss ? 'boss' : TIER_WEIGHT[e.key] || 'trash');
 
 const tmpV = new THREE.Vector3();
 const tmpV2 = new THREE.Vector3();
@@ -46,7 +57,10 @@ export class Game {
     this.renderer.toneMappingExposure = 1.25;
 
     this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 400);
+    // near 1.0, not 0.1: the camera sits ~15.6 units out and nothing is ever
+    // inside the first metre, so a 4000:1 far/near ratio spent most of the
+    // depth buffer's precision on empty space and z-fought the arena props.
+    this.camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 1.0, 400);
     this.camOffset = new THREE.Vector3(0, 11, 11);
     this.camLook = new THREE.Vector3();
     this.camPos = new THREE.Vector3();
@@ -59,7 +73,19 @@ export class Game {
 
     // A backgrounded WebView can lose the GL context outright. Without
     // preventDefault it never restores at all.
-    canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); this.pause(true); });
+    this._lostContext = false;
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this._lostContext = true;
+      this.pause(true);
+    });
+    // ...and without this half, restoring leaves a dead canvas: three re-inits
+    // its own GL state but every buffer and render target the game uploaded is
+    // gone. Android WebViews drop the context on backgrounding routinely, so
+    // the old one-sided handler meant a phone call froze the game permanently.
+    canvas.addEventListener('webglcontextrestored', () => {
+      this._restoreContext();
+    });
 
     this.enemies = [];
     this.shadows = [];
@@ -113,6 +139,22 @@ export class Game {
     this.fx?.setBudget(Math.round(420 * t.particleScale));
   }
 
+  _restoreContext() {
+    // Re-push everything that lives outside three's own state tracking, then
+    // rebuild the arena — its geometry was uploaded to a context that no longer
+    // exists. The seed is kept, so the player lands in the same rift they left.
+    this.renderer.shadowMap.needsUpdate = true;
+    this._applyQuality(this.quality.current);
+    this.resize();
+    if (this.gate) this.world.build(this.gate, this.seed);
+    // Only auto-resume the pause WE forced. A player who paused deliberately
+    // and then took a phone call should still come back to the pause screen.
+    if (this._lostContext) {
+      this._lostContext = false;
+      this.pause(false);
+    }
+  }
+
   // ---------------------------------------------------------------- player
   _buildPlayer() {
     const mesh = makeHumanoid({
@@ -144,6 +186,11 @@ export class Game {
     this._arenaResolve = (pos, radius, vel) => this.world.resolve(pos, radius, vel);
     attachBody(this.player, { radius: 0.6, maxSpeed: this.derived.speed });
     this.player.body.setEnvironment(FLAT_GROUND, this._arenaResolve);
+  }
+
+  /** Shadows allowed on the field at once, clamped by the live quality tier. */
+  fieldCapacity() {
+    return shadowFieldCapacity(this.save, this.quality.current);
   }
 
   refreshDerived(fill = false) {
@@ -196,8 +243,13 @@ export class Game {
     this.pointsGained = 0;
     this.levelUpDilation = 0;
 
-    // Carry retained soldiers into the new rift.
-    for (let i = 0; i < this.save.shadows; i++) this._spawnShadow(this.world.randomSpawn(this.rnd, this.player.pos, 4), true);
+    // Carry the deployed roster into the new rift. The field cap is a draw-call
+    // budget, so the quality tier gets the final word on how many come along.
+    const cap = this.fieldCapacity();
+    autoDeploy(this.save, cap);
+    for (const rec of deployedRecords(this.save)) {
+      this._spawnShadow(this.world.randomSpawn(this.rnd, this.player.pos, 4), true, rec);
+    }
 
     this.state = 'playing';
     this.audio.music(true);
@@ -206,10 +258,13 @@ export class Game {
     this._spawnWave();
   }
 
-  clearEntities() {
+  // `dispose` is only ever turned off when a caller intends to re-parent the
+  // meshes; scene.remove alone orphaned every geometry and material an entity
+  // owned, which is what killed long S-rank runs on Android.
+  clearEntities({ dispose = true } = {}) {
     [...this.enemies, ...this.shadows, ...this.projectiles, ...this.corpses, ...this.pickups].forEach((e) => {
-      if (e.mesh) this.scene.remove(e.mesh);
-      if (e.bar) this.scene.remove(e.bar);
+      if (e.mesh) { this.scene.remove(e.mesh); if (dispose) disposeObject3D(e.mesh); }
+      if (e.bar) { this.scene.remove(e.bar); if (dispose) disposeObject3D(e.bar); }
     });
     this.enemies.length = 0;
     this.shadows.length = 0;
@@ -295,7 +350,9 @@ export class Game {
 
     const scaled = Math.floor(b.hp * (1 + (this.save.level - this.gate.reqLevel) * 0.04));
     this.boss = {
-      key: 'boss', base: b, level: this.gate.enemyLevel + 5, mesh, bar,
+      // GATES carries an explicit bossLevel now — roughly a full rank above the
+      // gate's trash, which the old enemyLevel+5 only approximated at E rank.
+      key: 'boss', base: b, level: this.gate.bossLevel, mesh, bar,
       pos: pos.clone(), vel: new THREE.Vector3(), yaw: 0,
       hp: scaled, maxHp: scaled, atk: b.atk,
       xp: Math.floor(b.xp * (1 + Math.max(0, this.save.level - this.gate.reqLevel) * 0.04)),
@@ -316,27 +373,33 @@ export class Game {
     this.ui.setObjective('BOSS', '');
   }
 
-  _spawnShadow(pos, silent = false) {
-    if (this.shadows.length >= MAX_BOUND) return;
+  // `record` is the roster entry this field instance represents. Its grade and
+  // the owner's INT decide the numbers, so a shadow you kept and promoted is
+  // still worth fielding forty levels later.
+  _spawnShadow(pos, silent = false, record = null) {
+    if (this.shadows.length >= this.fieldCapacity()) return null;
+    const rec = record || makeShadow(this.save, { type: 'grunt', level: this.save.level });
+    const c = shadowCombat(this.save, rec);
     const mesh = makeHumanoid({
       color: 0x1a2740, glow: 0x35e6ff, accent: 0x0b1220,
-      weapon: 'sword', scale: 0.95, ghost: true, cloak: true,
+      weapon: 'sword', scale: 0.95 * c.scale, ghost: true, cloak: true,
     });
-    mesh.add(makeGroundRing(0x35e6ff, 0.85, 0.6));
+    mesh.add(makeGroundRing(0x35e6ff, 0.85 * c.scale, 0.6));
     mesh.position.copy(pos);
     this.scene.add(mesh);
-    const power = 1 + this.save.level * 0.08;
     this.shadows.push({
+      rec,
       mesh, pos: pos.clone(), vel: new THREE.Vector3(), yaw: 0,
-      radius: 0.5, speed: 5.4,
-      hp: 40 + this.save.level * 6, maxHp: 40 + this.save.level * 6,
-      atk: this.derived.atk * 0.42 * power / (1 + this.save.level * 0.08),
-      attackCd: 0, swing: 0, target: null, life: 0,
+      radius: c.radius, speed: c.speed,
+      hp: c.hp, maxHp: c.hp,
+      atk: c.atk,
+      attackCd: 0, swing: 0, target: null, life: 0, kills: 0,
     });
     if (!silent) {
       this.fx.ring(pos, 0x35e6ff, 4, 0.6);
       this.fx.burst(pos.clone().setY(0.8), 22, 0x35e6ff, { speed: 6, up: 5 });
     }
+    return rec;
   }
 
   // -------------------------------------------------------------- combat
@@ -393,6 +456,8 @@ export class Game {
 
     this.scene.remove(e.mesh);
     this.scene.remove(e.bar);
+    disposeObject3D(e.mesh);
+    disposeObject3D(e.bar);   // hands the pooled bar slot straight back
     const idx = this.enemies.indexOf(e);
     if (idx >= 0) this.enemies.splice(idx, 1);
 
@@ -413,7 +478,13 @@ export class Game {
     corpseMesh.rotation.x = -Math.PI / 2.4;
     corpseMesh.position.y = 0.25;
     this.scene.add(corpseMesh);
-    this.corpses.push({ mesh: corpseMesh, pos: e.pos.clone(), life: 14 });
+    // enemyLevel/tierWeight/attempts are what extractionChance reads; the life
+    // and the chance decay share CORPSE_WINDOW so a corpse that still looks
+    // raiseable still is one.
+    this.corpses.push({
+      mesh: corpseMesh, pos: e.pos.clone(), life: CORPSE_WINDOW,
+      type: e.key, enemyLevel: e.level, tierWeight: tierWeightOf(e), attempts: 0,
+    });
 
     if (this.killed >= this.gate.enemies && !this.bossActive) {
       this._spawnBoss();
@@ -449,17 +520,14 @@ export class Game {
 
   gainXp(amount) {
     this.xpEarned += amount;
-    this.save.xp += amount;
     const fromLevel = this.save.level;
-    let leveled = 0;
-    while (this.save.xp >= xpForLevel(this.save.level)) {
-      this.save.xp -= xpForLevel(this.save.level);
-      this.save.level++;
-      this.save.points += POINTS_PER_LEVEL;
-      leveled++;
-    }
+    // progression.grantXp owns the level loop: it is the only place that also
+    // increments save.autoStats, and the +1-to-every-stat grant silently never
+    // happened while this method open-coded the loop itself.
+    const r = grantXp(this.save, amount);
+    const leveled = r.levelsGained;
     if (leveled > 0) {
-      const gained = leveled * POINTS_PER_LEVEL;
+      const gained = r.pointsGained;
       this.levelsGained += leveled;
       this.pointsGained += gained;
       // refreshDerived now credits the max-health delta itself.
@@ -605,28 +673,58 @@ export class Game {
     p.invuln = Math.max(p.invuln, 0.3);
   }
 
+  // Extraction is free — the cost is the corpse decaying and the three-attempt
+  // limit, not mana. A failed attempt burns one of the three and leaves the
+  // corpse standing, so Bind is a gamble you can press again, not a tax.
   _trySummon() {
     const p = this.player;
     const sk = SKILLS.summon;
     if (p.cds.summon > 0) return;
     if (this.save.level < sk.unlockLevel) return this.ui.toast(`BIND UNLOCKS AT LEVEL ${sk.unlockLevel}`);
-    if (p.mp < sk.mp) return this.ui.toast('NOT ENOUGH MANA');
 
-    const inRange = this.corpses.filter((c) => c.pos.distanceTo(p.pos) < 14);
+    const room = this.fieldCapacity() - this.shadows.length;
+    if (room <= 0) return this.ui.toast('YOUR COMPANY IS AT FULL STRENGTH');
+
+    const inRange = this.corpses.filter((c) => (
+      c.attempts < MAX_EXTRACT_ATTEMPTS && c.pos.distanceTo(p.pos) < 14
+    ));
     if (inRange.length === 0) return this.ui.toast('NO FALLEN NEARBY');
 
-    p.mp -= sk.mp;
     p.cds.summon = sk.cd;
-    const take = inRange.slice(0, sk.maxShadows);
-    take.forEach((c) => {
-      this._spawnShadow(c.pos.clone());
+    let raised = 0;
+    let failed = 0;
+    let rosterFull = false;
+
+    for (const c of inRange.slice(0, room)) {
+      const chance = extractionChance(this.save, {
+        enemyLevel: c.enemyLevel,
+        tierWeight: c.tierWeight,
+        secondsSinceDeath: CORPSE_WINDOW - c.life,
+        attemptIndex: c.attempts,
+      });
+      c.attempts++;
+      if (Math.random() >= chance) {
+        failed++;
+        this.fx.burst(c.pos.clone().setY(0.9), 8, 0x35e6ff, { speed: 3, up: 2, life: 0.3 });
+        continue;
+      }
+      const rec = makeShadow(this.save, { type: c.type, level: c.enemyLevel });
+      const { added } = addShadow(this.save, rec);
+      if (!added) { rosterFull = true; break; }
+      this._spawnShadow(c.pos.clone(), false, rec);
+      raised++;
       this.scene.remove(c.mesh);
+      disposeObject3D(c.mesh);
       const i = this.corpses.indexOf(c);
       if (i >= 0) this.corpses.splice(i, 1);
-    });
+    }
+
     this.audio.bind();
-    this.ui.toast(`BIND  ·  ${take.length} CINDERBOUND RAISED`, 'gold');
     this.fx.ring(p.pos, 0x35e6ff, 14, 0.7);
+    if (rosterFull) this.ui.toast('YOUR ARMY WILL HOLD NO MORE', 'danger');
+    else if (raised > 0) this.ui.toast(`BIND  ·  ${raised} CINDERBOUND RAISED`, 'gold');
+    else this.ui.toast(`BIND FAILED  ·  ${failed} RESISTED`);
+    this.onSave();
   }
 
   // ------------------------------------------------------------ helpers
@@ -1017,6 +1115,7 @@ export class Game {
       if (s.hp <= 0) {
         this.fx.burst(s.pos.clone().setY(1), 20, 0x35e6ff, { speed: 6, up: 4, life: 0.7 });
         this.scene.remove(s.mesh);
+        disposeObject3D(s.mesh);
         this.shadows.splice(i, 1);
         continue;
       }
@@ -1034,7 +1133,11 @@ export class Game {
         else if (s.attackCd <= 0) {
           s.attackCd = 0.85;
           s.swing = 0.3;
-          this._damageEnemy(target, s.atk * (1 + this.save.level * 0.08));
+          // s.atk already carries grade, owner level and INT via shadowCombat;
+          // the old extra level multiplier here double-dipped.
+          const before = target.hp;
+          this._damageEnemy(target, s.atk);
+          if (before > 0 && target.hp <= 0) s.kills++;
         }
       } else {
         // No targets: fall in behind the player.
@@ -1118,11 +1221,13 @@ export class Game {
         this.fx.burst(it.mesh.position.clone(), 12, it.kind === 'hp' ? 0xff4d6d : 0x22d3ee, { speed: 4, up: 3, life: 0.4 });
         this.audio.tone({ freq: 880, type: 'sine', gain: 0.12, decay: 0.18, sweep: 1300 });
         this.scene.remove(it.mesh);
+        disposeObject3D(it.mesh);
         this.pickups.splice(i, 1);
         continue;
       }
       if (it.life <= 0) {
         this.scene.remove(it.mesh);
+        disposeObject3D(it.mesh);
         this.pickups.splice(i, 1);
       }
     }
@@ -1132,7 +1237,7 @@ export class Game {
     for (let i = this.corpses.length - 1; i >= 0; i--) {
       const c = this.corpses[i];
       c.life -= dt;
-      const k = Math.max(0, Math.min(1, c.life / 14));
+      const k = Math.max(0, Math.min(1, c.life / CORPSE_WINDOW));
       c.mesh.traverse((o) => {
         if (o.isMesh && o.material.transparent) o.material.opacity = 0.62 * k;
       });
@@ -1140,6 +1245,7 @@ export class Game {
       c.mesh.position.y = 0.25 - (1 - k) * 1.2;
       if (c.life <= 0) {
         this.scene.remove(c.mesh);
+        disposeObject3D(c.mesh);
         this.corpses.splice(i, 1);
       }
     }
@@ -1186,7 +1292,11 @@ export class Game {
     const prev = this.save.cleared[rank];
     const isBest = prev == null || t < prev;
     if (isBest) this.save.cleared[rank] = t;
-    this.save.shadows = Math.min(6, this.shadows.length);
+    // The roster persists on its own now. Only per-shadow bookkeeping is
+    // written back — the old `save.shadows = <count>` overwrote the whole
+    // roster object with a number and wiped the army on every clear.
+    this._commitShadowKills();
+    const roster = rosterSummary(this.save);
     this.onSave();
     this.ui.showHud(false);
     this.ui.showResults({
@@ -1201,15 +1311,28 @@ export class Game {
         ['Levels gained', this.levelsGained ? `+${this.levelsGained}` : 'none'],
         ['Stat points earned', this.pointsGained ? `+${this.pointsGained}` : 'none'],
         ['Breaker level', `${this.save.level}  (${rankOf(this.save.level)}-grade)`],
-        ['Soldiers retained', String(this.save.shadows)],
+        ['Company', `${roster.count} / ${roster.capacity} bound`],
       ],
     });
+  }
+
+  // Field kills belong to the roster record, not to the throwaway field entity,
+  // or every run would reset the army's service history.
+  _commitShadowKills() {
+    for (const s of this.shadows) {
+      if (s.rec && s.kills) s.rec.kills += s.kills;
+      s.kills = 0;
+    }
   }
 
   _fail() {
     this.state = 'over';
     this.save.deaths++;
-    this.save.shadows = Math.max(0, Math.floor(this.shadows.length / 2));
+    this._commitShadowKills();
+    // Death releases the weakest quarter by grade. Losing an irreplaceable
+    // named shadow to one bad run is the fastest way to stop a player taking
+    // risks, so releaseWeakest never touches the top of the roster.
+    const lost = releaseWeakest(this.save, Math.floor(this.save.shadows.roster.length / 4));
     this.onSave();
     this.audio.music(false);
     this.audio.gameOver();
@@ -1229,7 +1352,7 @@ export class Game {
         ['Essence kept', `${this.xpEarned} XP`],
         ['Levels gained', this.levelsGained ? `+${this.levelsGained}` : 'none'],
         ['Stat points earned', this.pointsGained ? `+${this.pointsGained}` : 'none'],
-        ['Soldiers lost', 'half your company'],
+        ['Soldiers lost', lost.length ? `${lost.length} released` : 'none'],
       ],
     });
   }

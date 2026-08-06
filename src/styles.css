@@ -159,6 +159,8 @@ kbd{
 .rank-B{background:rgba(124,92,255,.25);color:#a78bfa}
 .rank-A{background:rgba(255,194,75,.2);color:var(--gold)}
 .rank-S{background:rgba(255,77,109,.24);color:var(--danger)}
+/* Above the published ladder — level 71+. */
+.rank-SOVEREIGN{background:rgba(255,194,75,.28);color:var(--gold);letter-spacing:.02em}
 
 /* ---------- HUD ---------- */
 #hud{position:fixed;inset:0;z-index:10;pointer-events:none}

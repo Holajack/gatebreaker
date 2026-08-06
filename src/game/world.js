@@ -44,6 +44,10 @@ export class World {
     this._disposables.forEach((d) => d.dispose?.());
     this._disposables.length = 0;
     if (this.envRT) { this.envRT.dispose(); this.envRT = null; }
+    // The key light's depth map is a render target, not a mesh resource, so the
+    // isMesh traversal above never saw it — one leaked depth texture per gate.
+    this.key?.shadow?.map?.dispose();
+    if (this.key?.shadow) this.key.shadow.map = null;
     this.scene.environment = null;
     this.sky = null;
     this.key = null;

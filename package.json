@@ -8,7 +8,14 @@
     "build": "vite build",
     "preview": "vite preview",
     "sync": "cap sync android",
-    "apk": "npm run build && cap sync android && cd android && ./gradlew assembleDebug"
+    "apk": "npm run build && cap sync android && cd android && ./gradlew assembleDebug",
+    "smoke": "node tools/smoke.mjs",
+    "test:city": "node tools/city-test.mjs",
+    "test:progression": "node tools/progression-test.mjs",
+    "test:frameclock": "node tools/frameclock-test.mjs",
+    "test:entities": "node tools/entity-test.mjs",
+    "test:biomes": "node tools/biome-test.mjs",
+    "test:shadows": "node tools/shadow-test.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^6.2.0",

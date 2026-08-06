@@ -1,0 +1,225 @@
+import * as THREE from 'three';
+import { GLOW_LAYER } from './glow.js';
+
+// Instanced pool for the two flat decals every character carries: the ground
+// ring under its feet and the billboarded health bar over its head.
+//
+// Those used to be three Meshes per character (ring, bar background, bar fill),
+// so a full S-rank field paid ~66 draw calls for nothing but readability aids.
+// Here the whole scene's rings are one InstancedMesh and the whole scene's bars
+// are two more, so the cost is 3 draws total no matter how many characters are
+// alive.
+//
+// Handles are opaque integers. Rings and bars live in separate instance arrays,
+// so the kind is packed into the high bits rather than kept in a side table.
+
+const KIND_SHIFT = 16;
+const KIND_MASK = 0xffff;
+const RING = 0;
+const BAR = 1;
+
+// The ring material carries one opacity for every instance, so per-ring alpha
+// is folded into the instance colour instead (see acquireRing). This is the
+// alpha the folding is relative to.
+export const RING_OPACITY = 0.8;
+
+const BAR_BG_H = 0.13;
+const BAR_FILL_H = 0.1;
+const BAR_BG_COLOR = 0x0a0a12;
+
+const _m = new THREE.Matrix4();
+const _p = new THREE.Vector3();
+const _q = new THREE.Quaternion();
+const _s = new THREE.Vector3();
+const _off = new THREE.Vector3();
+const _c = new THREE.Color();
+const HIDDEN = new THREE.Matrix4().makeScale(0, 0, 0);
+
+export class DecalPool {
+  constructor(scene, { rings = 64, bars = 64 } = {}) {
+    this.scene = scene;
+    this.ringCap = rings;
+    this.barCap = bars;
+
+    // Optional hook for the deprecated makeGroundRing/makeHealthBar shims in
+    // entities.js: they push proxy transforms in here just before the flush.
+    this.onBeforeUpdate = null;
+
+    const ringGeo = new THREE.RingGeometry(0.72, 1, 28);
+    ringGeo.rotateX(-Math.PI / 2);
+    this.ringMesh = new THREE.InstancedMesh(ringGeo, new THREE.MeshBasicMaterial({
+      transparent: true, opacity: RING_OPACITY, side: THREE.DoubleSide, depthWrite: false,
+    }), rings);
+    this.ringMesh.layers.enable(GLOW_LAYER);
+
+    const quad = new THREE.PlaneGeometry(1, 1);
+    // Two meshes, not one: the background is alpha-blended and the fill is not,
+    // which is what puts the fill in the opaque pass and the darkened backdrop
+    // over the top of it. Merging them would change how the bar reads.
+    this.barFill = new THREE.InstancedMesh(quad, new THREE.MeshBasicMaterial({
+      depthTest: false,
+    }), bars);
+    this.barBg = new THREE.InstancedMesh(quad, new THREE.MeshBasicMaterial({
+      color: BAR_BG_COLOR, transparent: true, opacity: 0.75, depthTest: false,
+    }), bars);
+    this.barFill.renderOrder = 999;
+    this.barBg.renderOrder = 999;
+
+    for (const m of [this.ringMesh, this.barFill, this.barBg]) {
+      // Always in the render list: onBeforeRender is what drives update(), and a
+      // culled pool would silently stop syncing.
+      m.frustumCulled = false;
+      scene.add(m);
+    }
+    // Either pass will do; the glow pass runs first, so the ring gets there
+    // before the main pass either way.
+    this.ringMesh.onBeforeRender = (r, s, cam) => this.update(cam);
+    this.barBg.onBeforeRender = (r, s, cam) => this.update(cam);
+
+    this.ringActive = new Uint8Array(rings);
+    this.ringRadius = new Float32Array(rings);
+    this.barActive = new Uint8Array(bars);
+    this.barWidth = new Float32Array(bars);
+    // x, y, z, ratio, visible — bars are rebuilt every frame because their
+    // orientation comes from the camera, not from the caller.
+    this.barState = new Float32Array(bars * 5);
+
+    for (let i = 0; i < rings; i++) this.ringMesh.setMatrixAt(i, HIDDEN);
+    for (let i = 0; i < bars; i++) { this.barFill.setMatrixAt(i, HIDDEN); this.barBg.setMatrixAt(i, HIDDEN); }
+    // Allocated up front rather than lazily by the first setColorAt: adding
+    // instanceColor to a live mesh changes the program cache key and costs a
+    // shader recompile mid-run.
+    this.ringMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(rings * 3), 3);
+    this.barFill.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(bars * 3), 3);
+  }
+
+  /** @returns {number} handle, or -1 when the pool is full. */
+  acquireRing(color, radius = 0.8, opacity = RING_OPACITY) {
+    const i = this.ringActive.indexOf(0);
+    if (i < 0) return -1;
+    this.ringActive[i] = 1;
+    this.ringRadius[i] = radius;
+    // Per-instance alpha is not available on a shared material, so dim the
+    // colour instead. Against this game's near-black arenas the two are close
+    // enough to be indistinguishable, and it dims the bloom by the same factor.
+    _c.setHex(color).multiplyScalar(Math.min(1, opacity / RING_OPACITY));
+    this.ringMesh.setColorAt(i, _c);
+    this.ringMesh.instanceColor.needsUpdate = true;
+    this.ringMesh.setMatrixAt(i, HIDDEN);
+    return (RING << KIND_SHIFT) | i;
+  }
+
+  /** @returns {number} handle, or -1 when the pool is full. */
+  acquireBar(color, width = 1.2) {
+    const i = this.barActive.indexOf(0);
+    if (i < 0) return -1;
+    this.barActive[i] = 1;
+    this.barWidth[i] = width;
+    this.barState[i * 5 + 3] = 1;
+    this.barState[i * 5 + 4] = 0;
+    this.barFill.setColorAt(i, _c.setHex(color));
+    this.barFill.instanceColor.needsUpdate = true;
+    this.barFill.setMatrixAt(i, HIDDEN);
+    this.barBg.setMatrixAt(i, HIDDEN);
+    return (BAR << KIND_SHIFT) | i;
+  }
+
+  /**
+   * Rings inherit the character's scale in the old parented-mesh layout, and
+   * that scale is only knowable once the character has a world matrix — hence a
+   * setter rather than a fixed radius from acquire time.
+   */
+  setRingRadius(handle, radius) {
+    const i = this._slot(handle, RING);
+    if (i < 0) return;
+    this.ringRadius[i] = radius;
+  }
+
+  setRing(handle, x, y, z, visible = true) {
+    const i = this._slot(handle, RING);
+    if (i < 0) return;
+    if (!visible) {
+      this.ringMesh.setMatrixAt(i, HIDDEN);
+    } else {
+      const r = this.ringRadius[i];
+      _m.compose(_p.set(x, y, z), _q.identity(), _s.set(r, 1, r));
+      this.ringMesh.setMatrixAt(i, _m);
+    }
+  }
+
+  setBar(handle, x, y, z, ratio = 1, visible = true) {
+    const i = this._slot(handle, BAR);
+    if (i < 0) return;
+    const o = i * 5;
+    this.barState[o] = x; this.barState[o + 1] = y; this.barState[o + 2] = z;
+    this.barState[o + 3] = ratio;
+    this.barState[o + 4] = visible ? 1 : 0;
+  }
+
+  release(handle) {
+    if (handle == null || handle < 0) return;
+    const kind = handle >> KIND_SHIFT;
+    const i = handle & KIND_MASK;
+    if (kind === RING) {
+      if (i >= this.ringCap) return;
+      this.ringActive[i] = 0;
+      this.ringMesh.setMatrixAt(i, HIDDEN);
+    } else {
+      if (i >= this.barCap) return;
+      this.barActive[i] = 0;
+      this.barState[i * 5 + 4] = 0;
+      this.barFill.setMatrixAt(i, HIDDEN);
+      this.barBg.setMatrixAt(i, HIDDEN);
+    }
+  }
+
+  /** Flush pending instance data. Driven by the pool's own onBeforeRender. */
+  update(camera) {
+    if (this.onBeforeUpdate) this.onBeforeUpdate(camera);
+    if (camera) _q.copy(camera.quaternion); else _q.identity();
+
+    for (let i = 0; i < this.barCap; i++) {
+      if (!this.barActive[i]) continue;
+      const o = i * 5;
+      if (!this.barState[o + 4]) {
+        this.barFill.setMatrixAt(i, HIDDEN);
+        this.barBg.setMatrixAt(i, HIDDEN);
+        continue;
+      }
+      const w = this.barWidth[i];
+      const x = this.barState[o], y = this.barState[o + 1], z = this.barState[o + 2];
+      const r = Math.max(0, Math.min(1, this.barState[o + 3])) || 0.0001;
+      _m.compose(_p.set(x, y, z), _q, _s.set(w, BAR_BG_H, 1));
+      this.barBg.setMatrixAt(i, _m);
+      // Scaling a centred quad shrinks both ends; shift left so it drains
+      // rightward, exactly as the old two-mesh bar did.
+      _off.set(-(w * (1 - r)) / 2, 0, 0.01).applyQuaternion(_q);
+      _m.compose(_p.set(x + _off.x, y + _off.y, z + _off.z), _q, _s.set(w * r, BAR_FILL_H, 1));
+      this.barFill.setMatrixAt(i, _m);
+    }
+
+    // Three 4 KB buffers; cheaper to re-upload unconditionally than to track
+    // which of ~40 decals moved this frame.
+    this.ringMesh.instanceMatrix.needsUpdate = true;
+    this.barFill.instanceMatrix.needsUpdate = true;
+    this.barBg.instanceMatrix.needsUpdate = true;
+  }
+
+  dispose() {
+    for (const m of [this.ringMesh, this.barFill, this.barBg]) {
+      m.parent?.remove(m);
+      m.geometry.dispose();
+      m.material.dispose();
+      m.dispose();
+    }
+    this.scene = null;
+  }
+
+  _slot(handle, kind) {
+    if (handle == null || handle < 0) return -1;
+    if ((handle >> KIND_SHIFT) !== kind) return -1;
+    const i = handle & KIND_MASK;
+    const cap = kind === RING ? this.ringCap : this.barCap;
+    return i < cap ? i : -1;
+  }
+}

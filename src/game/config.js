@@ -1,55 +1,103 @@
 // Balance tables and content definitions for Gatebreaker: Rift Ascension.
 // Everything the designer would want to tune lives here.
+//
+// This file is deliberately THREE-free and side-effect free so the headless
+// progression test can import it in Node.
 
 export const RANKS = ['E', 'D', 'C', 'B', 'A', 'S'];
 
+export const LEVEL_CAP = 100;
+
+// 5 spendable points per level, PLUS an automatic +1 to every stat. The auto
+// grant is what makes early levels read as the body changing rather than a
+// number going up, so it is not optional flavour — progression.js maintains
+// `save.autoStats` as the "levels gained" counter that feeds it.
+export const POINTS_PER_LEVEL = 5;
+export const AUTO_STAT_PER_LEVEL = 1;
+
+// One daily objective, three points. Local-date keyed; the game never talks to
+// a server so there is nothing else it could key on.
+export const DAILY_CONTRACT_POINTS = 3;
+
+// --- Stats. Fixed key order: the UI, the save schema and the tests all rely
+// on it, so never reorder this array. ---
+export const STATS = [
+  { key: 'str', name: 'STRENGTH',   desc: '+2.4 attack power, +0.6% attack speed' },
+  { key: 'agi', name: 'AGILITY',    desc: '+0.09 move speed, +0.55% crit, +4ms dodge window' },
+  { key: 'vit', name: 'VITALITY',   desc: '+11 max health, +0.18% damage reduction' },
+  { key: 'int', name: 'INTELLECT',  desc: '+7 max mana, +0.45% cooldown cut, bigger shadow army' },
+  { key: 'per', name: 'PERCEPTION', desc: '+1.2% damage floor, earlier enemy tells, +0.4% extraction' },
+];
+
+// Per-point rates and their hard caps. Every derived number in derive() reads
+// from here so a designer never has to hunt through formulas.
+export const STAT_RATES = {
+  str: { atk: 2.4, atkSpeed: 0.006, atkSpeedCap: 0.30 },
+  agi: { speed: 0.09, crit: 0.0055, critCap: 0.55, critDmg: 0.0035, dodgeWindowMs: 4, dodgeBaseMs: 110, dodgeCapMs: 260 },
+  vit: { hp: 11, regen: 0.05, dr: 0.0018, drCap: 0.45 },
+  int: { mp: 7, mpRegen: 0.16, cdr: 0.0045, cdrCap: 0.40, shadowDmg: 0.011 },
+  per: { floor: 0.012, floorBase: 0.55, floorCap: 0.92, tellMs: 8, tellBaseMs: 120, tellCapMs: 520, extract: 0.004 },
+};
+
 export const GATES = [
   {
-    rank: 'E', name: 'FRACTURED HOLLOW', biome: 'hollow',
-    enemies: 10, waveSize: 3, enemyLevel: 1, arena: 46,
+    rank: 'E', name: 'THE WARREN', biome: 'warren',
+    enemies: 12, waveSize: 3, enemyLevel: 2, bossLevel: 6, arena: 46,
     boss: 'warden', reqLevel: 1,
     blurb: 'A shallow tear. Good place to learn which end of the blade cuts.',
   },
   {
-    rank: 'D', name: 'ASHEN CATACOMB', biome: 'catacomb',
-    enemies: 16, waveSize: 4, enemyLevel: 4, arena: 52,
-    boss: 'gravelord', reqLevel: 4,
+    rank: 'D', name: 'THE OSSUARY', biome: 'ossuary',
+    enemies: 18, waveSize: 4, enemyLevel: 7, bossLevel: 12, arena: 52,
+    boss: 'gravelord', reqLevel: 5,
     blurb: 'The dead here were buried standing up. They still are.',
   },
   {
-    rank: 'C', name: 'GLACIER SPIRE', biome: 'glacier',
-    enemies: 24, waveSize: 7, enemyLevel: 9, arena: 58,
-    boss: 'frostcaller', reqLevel: 9,
+    rank: 'C', name: 'DEEPGLASS CAVERN', biome: 'deepglass',
+    enemies: 26, waveSize: 6, enemyLevel: 14, bossLevel: 21, arena: 58,
+    boss: 'frostcaller', reqLevel: 11,
     blurb: 'Cold enough that blood freezes before it finishes falling.',
   },
   {
-    rank: 'B', name: 'EMBER THRONE', biome: 'ember',
-    enemies: 30, waveSize: 8, enemyLevel: 16, arena: 64,
-    boss: 'infernus', reqLevel: 16,
+    rank: 'B', name: 'EMBERFALL', biome: 'emberfall',
+    enemies: 32, waveSize: 7, enemyLevel: 24, bossLevel: 33, arena: 64,
+    boss: 'infernus', reqLevel: 19,
     blurb: 'Something enormous is sitting on a chair of molten iron.',
   },
   {
-    rank: 'A', name: 'VOIDWEAVE DEPTHS', biome: 'void',
-    enemies: 36, waveSize: 9, enemyLevel: 25, arena: 70,
-    boss: 'weaver', reqLevel: 25,
+    rank: 'A', name: 'THE RIVEN WASTE', biome: 'rivenwaste',
+    enemies: 38, waveSize: 8, enemyLevel: 37, bossLevel: 49, arena: 70,
+    boss: 'weaver', reqLevel: 29,
     blurb: 'Geometry stops agreeing with itself past the threshold.',
   },
   {
-    rank: 'S', name: 'MONARCH\'S REACH', biome: 'monarch',
-    enemies: 44, waveSize: 10, enemyLevel: 36, arena: 76,
-    boss: 'monarch', reqLevel: 36,
+    rank: 'S', name: 'ARCHON\'S REACH', biome: 'archonreach',
+    enemies: 46, waveSize: 9, enemyLevel: 54, bossLevel: 70, arena: 76,
+    boss: 'archon', reqLevel: 42,
     blurb: 'No hunter has walked back out. The record is unbroken.',
   },
 ];
 
+// Chance a B+ gate rolls an off-canon "anomaly" biome instead of its own.
+export const ANOMALY_CHANCE = { E: 0, D: 0, C: 0, B: 0.14, A: 0.20, S: 0.26 };
+
+// Palettes. Keyed by the new biome ids; the pre-rename keys are kept as
+// aliases below because world.js looks these up by gate.biome at runtime and
+// a stale save or an in-flight branch must not hand it `undefined`.
 export const BIOMES = {
-  hollow:   { fog: 0x0a0d1c, ground: 0x1a1f38, accent: 0x7c5cff, sky: 0x05060d, pillar: 0x2a3050 },
-  catacomb: { fog: 0x140f14, ground: 0x2a2028, accent: 0xc2703a, sky: 0x0b0709, pillar: 0x3d2f36 },
-  glacier:  { fog: 0x0b1a26, ground: 0x1d3a4d, accent: 0x66e0ff, sky: 0x061219, pillar: 0x2d5570 },
-  ember:    { fog: 0x1c0a06, ground: 0x36150d, accent: 0xff6b2b, sky: 0x120503, pillar: 0x4d1f12 },
-  void:     { fog: 0x0d0618, ground: 0x1c1030, accent: 0xb14bff, sky: 0x070312, pillar: 0x2c1a4a },
-  monarch:  { fog: 0x18050f, ground: 0x2e0a1c, accent: 0xff2d6b, sky: 0x0e0208, pillar: 0x45102a },
+  warren:      { fog: 0x0a0d1c, ground: 0x1a1f38, accent: 0x7c5cff, sky: 0x05060d, pillar: 0x2a3050, detail: 0x3a4468 },
+  ossuary:     { fog: 0x140f14, ground: 0x2a2028, accent: 0xc2703a, sky: 0x0b0709, pillar: 0x3d2f36, detail: 0x5a4238 },
+  deepglass:   { fog: 0x0b1a26, ground: 0x1d3a4d, accent: 0x66e0ff, sky: 0x061219, pillar: 0x2d5570, detail: 0x8ff0ff },
+  emberfall:   { fog: 0x1c0a06, ground: 0x36150d, accent: 0xff6b2b, sky: 0x120503, pillar: 0x4d1f12, detail: 0xffb067 },
+  rivenwaste:  { fog: 0x0d0618, ground: 0x1c1030, accent: 0xb14bff, sky: 0x070312, pillar: 0x2c1a4a, detail: 0xd08aff },
+  archonreach: { fog: 0x18050f, ground: 0x2e0a1c, accent: 0xff2d6b, sky: 0x0e0208, pillar: 0x45102a, detail: 0xff7a9e },
 };
+// Legacy ids from the pre-rename table, so an old gate record still resolves.
+BIOMES.hollow = BIOMES.warren;
+BIOMES.catacomb = BIOMES.ossuary;
+BIOMES.glacier = BIOMES.deepglass;
+BIOMES.ember = BIOMES.emberfall;
+BIOMES.void = BIOMES.rivenwaste;
 
 // --- Enemy archetypes. `s` values are multipliers scaled by enemy level. ---
 export const ENEMY_TYPES = {
@@ -69,6 +117,17 @@ export const ENEMY_TYPES = {
     name: 'Hexcaster', hp: 30, atk: 8, speed: 2.6, range: 15, attackCd: 2.6,
     xp: 24, scale: 0.95, color: 0x2f7d8c, glow: 0x5ff0ff, ai: 'ranged',
   },
+  // B+ archetypes. The lancer punishes standing still, the howler punishes
+  // ignoring target priority — both only appear once the player has a dodge
+  // window worth using.
+  lancer: {
+    name: 'Riftlancer', hp: 52, atk: 19, speed: 4.6, range: 3.2, attackCd: 3.0,
+    xp: 34, scale: 1.1, color: 0x3a4d8a, glow: 0x8ad0ff, ai: 'charge',
+  },
+  howler: {
+    name: 'Howler', hp: 64, atk: 7, speed: 3.0, range: 12, attackCd: 4.0,
+    xp: 40, scale: 1.15, color: 0x6a2f5a, glow: 0xff7ad0, ai: 'support',
+  },
 };
 
 export const BOSSES = {
@@ -77,45 +136,73 @@ export const BOSSES = {
   frostcaller:{ name: 'FROSTCALLER',     hp: 1650,  atk: 36, speed: 3.4, scale: 2.6, color: 0x2f6d8c, glow: 0x8ff0ff, xp: 900 },
   infernus:   { name: 'INFERNUS',        hp: 2900,  atk: 52, speed: 3.6, scale: 2.9, color: 0x8a2f14, glow: 0xff8340, xp: 1700 },
   weaver:     { name: 'THE VOIDWEAVER',  hp: 5200,  atk: 74, speed: 3.8, scale: 3.0, color: 0x5a2a8c, glow: 0xd08aff, xp: 3200 },
-  monarch:    { name: 'THE RIFT MONARCH',hp: 9800,  atk: 104, speed: 4.0, scale: 3.4, color: 0x8c1440, glow: 0xff5c8a, xp: 6800 },
+  archon:     { name: 'THE RIFT ARCHON', hp: 9800,  atk: 104, speed: 4.0, scale: 3.4, color: 0x8c1440, glow: 0xff5c8a, xp: 6800 },
 };
 
 // --- Skills ---
+// summon has no maxShadows any more: how many shadows exist and how many stand
+// on the field are both progression.js's call now.
 export const SKILLS = {
   attack: { name: 'Strike',  cd: 0.40, mp: 0,  dmg: 1.00, unlockLevel: 1 },
   dash:   { name: 'Dash',    cd: 1.60, mp: 0,  dmg: 0,    unlockLevel: 1, iframes: 0.34, distance: 7.5 },
   slash:  { name: 'Ruin',    cd: 4.20, mp: 12, dmg: 2.30, unlockLevel: 3,  range: 8.0, arc: Math.PI * 0.75 },
   nova:   { name: 'Nova',    cd: 8.50, mp: 26, dmg: 3.40, unlockLevel: 7,  radius: 9.0 },
-  summon: { name: 'Bind',    cd: 13.0, mp: 30, dmg: 0,    unlockLevel: 12, maxShadows: 3 },
+  summon: { name: 'Bind',    cd: 13.0, mp: 0,  dmg: 0,    unlockLevel: 12 },
 };
 
-// --- Stats ---
-export const STATS = [
-  { key: 'str', name: 'STRENGTH',  desc: '+2.4 attack power' },
-  { key: 'agi', name: 'AGILITY',   desc: '+0.11 move speed, +0.7% crit' },
-  { key: 'vit', name: 'VITALITY',  desc: '+11 max health' },
-  { key: 'int', name: 'INTELLECT', desc: '+7 max mana, +2.5% skill damage' },
+// --- Shadow grades. Original naming built from the game's own "Cinderbound"
+// lexicon. shadows.js re-exports this as GRADES. ---
+export const SHADOW_GRADES = [
+  { name: 'CINDER',      mul: 0.55, maxCount: Infinity },
+  { name: 'THRALL',      mul: 0.75, maxCount: Infinity },
+  { name: 'SOLDIER',     mul: 1.00, maxCount: Infinity },
+  { name: 'VANGUARD',    mul: 1.35, maxCount: 24 },
+  { name: 'CHAMPION',    mul: 1.80, maxCount: 8 },
+  { name: 'WARLORD',     mul: 2.50, maxCount: 3 },
+  { name: 'ASHEN FIRST', mul: 4.00, maxCount: 1 },
 ];
 
-export const POINTS_PER_LEVEL = 3;
-
+// XP required to go FROM `level` to the next one. Sub-exponential on purpose:
+// the exponential *feel* of the genre comes from enemy rank tiering, not from
+// the player curve, and an exponential curve here makes L60-100 unplayable.
 export function xpForLevel(level) {
-  return Math.floor(46 * Math.pow(level, 1.36));
+  return Math.floor(52 * Math.pow(level, 1.42));
 }
 
-// Derived player numbers from base + allocated stats.
+// Derived player numbers from base + allocated + auto-granted stats.
 export function derive(save) {
-  const { str, agi, vit, int: intel } = save.stats;
+  // The +1-per-level auto grant applies to every stat, so it is added here
+  // rather than being written into save.stats (which stays "what you spent").
+  const auto = save.autoStats || 0;
+  const s = save.stats || {};
+  const str = (s.str || 0) + auto;
+  const agi = (s.agi || 0) + auto;
+  const vit = (s.vit || 0) + auto;
+  const intel = (s.int || 0) + auto;
+  const per = (s.per || 0) + auto;
   const lv = save.level;
+  const R = STAT_RATES;
   return {
-    maxHp: Math.floor(130 + vit * 11 + (lv - 1) * 9),
-    maxMp: Math.floor(50 + intel * 7 + (lv - 1) * 3),
-    atk: 13 + str * 2.4 + (lv - 1) * 1.6,
-    speed: 6.0 + agi * 0.11,
-    crit: Math.min(0.6, 0.05 + agi * 0.007),
+    maxHp: Math.floor(130 + vit * R.vit.hp + (lv - 1) * 9),
+    maxMp: Math.floor(50 + intel * R.int.mp + (lv - 1) * 3),
+    atk: 13 + str * R.str.atk + (lv - 1) * 1.6,
+    speed: 6.0 + agi * R.agi.speed,
+    crit: Math.min(R.agi.critCap, 0.05 + agi * R.agi.crit),
+    critDmg: 1.5 + agi * R.agi.critDmg,
+    atkSpeed: Math.min(R.str.atkSpeedCap, str * R.str.atkSpeed),
     skillMul: 1 + intel * 0.025,
-    hpRegen: 0.6 + vit * 0.05,
-    mpRegen: 2.2 + intel * 0.16,
+    cdr: Math.min(R.int.cdrCap, intel * R.int.cdr),
+    dr: Math.min(R.vit.drCap, vit * R.vit.dr),
+    hpRegen: 0.6 + vit * R.vit.regen,
+    mpRegen: 2.2 + intel * R.int.mpRegen,
+    // Perception compresses the low end of the damage roll upward instead of
+    // raising the ceiling — nothing else in the game does this.
+    dmgFloor: Math.min(R.per.floorCap, R.per.floorBase + per * R.per.floor),
+    tellLeadMs: Math.min(R.per.tellCapMs, R.per.tellBaseMs + per * R.per.tellMs),
+    // Agility is felt in the hands, not read on a panel: it widens the window
+    // in which a dodge counts as perfect. Seconds, because the sim runs in dt.
+    dodgeWindow: Math.min(R.agi.dodgeCapMs, R.agi.dodgeBaseMs + agi * R.agi.dodgeWindowMs) / 1000,
+    shadowDmgMul: 1 + intel * R.int.shadowDmg,
   };
 }
 
@@ -129,11 +216,19 @@ export function scaleEnemy(base, level) {
   };
 }
 
+// The world's opinion of you. S lands at 53 rather than 40 so it stops
+// colliding with the level-40 class trial, and SOVEREIGN sits above the
+// published ladder entirely.
 export function rankOf(level) {
-  if (level >= 40) return 'S';
-  if (level >= 28) return 'A';
-  if (level >= 18) return 'B';
-  if (level >= 10) return 'C';
-  if (level >= 5) return 'D';
+  if (level >= 71) return 'SOVEREIGN';
+  if (level >= 53) return 'S';
+  if (level >= 37) return 'A';
+  if (level >= 25) return 'B';
+  if (level >= 16) return 'C';
+  if (level >= 8) return 'D';
   return 'E';
+}
+
+export function gateIndexOfRank(rank) {
+  return GATES.findIndex((g) => g.rank === rank);
 }

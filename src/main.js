@@ -4,6 +4,7 @@ import * as Save from './core/save.js';
 import { UI } from './ui/ui.js';
 import { Game } from './game/game.js';
 import { loadHdri } from './render/env.js';
+import { FrameClock } from './core/frameclock.js';
 
 const canvas = document.getElementById('scene');
 const audio = new Audio();
@@ -96,25 +97,18 @@ const bootTimer = setInterval(() => {
   }
 }, 260);
 
-// Mid-range Androids ship 90Hz and 120Hz panels, so requestAnimationFrame
-// fires far faster than 60. Without this cap the frame budget looks like
-// 8.3ms instead of 16.6ms and the quality governor concludes the device is
-// slow, degrading visuals for no reason.
-const TARGET_DT = 1 / 60;
-let last = performance.now();
-let acc = 0;
-
-function frame(now) {
-  // Schedule first, so a throw inside update() can't kill the loop.
-  requestAnimationFrame(frame);
-  acc += (now - last) / 1000;
-  last = now;
-  if (acc < TARGET_DT - 0.0015) return;
-  const dt = Math.min(acc, 0.05);
-  acc = 0;
-  game.update(dt);
-}
-requestAnimationFrame(frame);
+// Mid-range Androids ship 72/90/120/144 Hz panels, so requestAnimationFrame
+// fires far faster than 60. FrameClock measures the real panel rate and paces
+// against it; the old inline accumulator here aliased 90 Hz down to 45 fps,
+// which the quality governor then read as a slow device.
+const clock = new FrameClock({
+  targetFps: 60,
+  onFrame: (dt) => game.update(dt),
+});
+// Keep the governor's thresholds on the same target the clock is pacing to.
+game.quality?.setTargetFps(clock.targetFps);
+clock.start();
 
 // Exposed for automated smoke tests; harmless in production.
 window.__game = game;
+window.__clock = clock;

@@ -37,15 +37,18 @@ function mulberry32(seed) {
 const _geoCache = new Map();
 const _matCache = new Map();
 
+// `shared` is the flag Game.clearEntities honours: entity teardown disposes
+// anything it reaches that is NOT marked, so an unmarked cache entry would be
+// freed out from under every other weapon still holding it.
 function cachedGeo(key, build) {
   let g = _geoCache.get(key);
-  if (g === undefined) { g = build(); _geoCache.set(key, g); }
+  if (g === undefined) { g = build(); g.userData.shared = true; _geoCache.set(key, g); }
   return g;
 }
 
 function cachedMat(key, build) {
   let m = _matCache.get(key);
-  if (m === undefined) { m = build(); _matCache.set(key, m); }
+  if (m === undefined) { m = build(); m.userData.shared = true; _matCache.set(key, m); }
   return m;
 }
 
@@ -183,7 +186,7 @@ export const AFFIXES = {
 
 const AFFIX_KEYS = Object.keys(AFFIXES);
 
-const TITLES = ['the Hollow', 'Ash', 'the Long Night', 'Broken Grades', 'the Monarch', 'Nine Gates'];
+const TITLES = ['the Hollow', 'Ash', 'the Long Night', 'Broken Grades', 'the Archon', 'Nine Gates'];
 
 // --------------------------------------------------------------- weapon table
 //

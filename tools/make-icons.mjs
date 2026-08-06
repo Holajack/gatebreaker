@@ -1,12 +1,11 @@
 // Renders the launcher icons and splash screens with headless Chromium, so the
 // repo carries no binary art that has to be hand-maintained. Re-run after
 // changing the mark: `node tools/make-icons.mjs`
-import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
+import { launchBrowser } from './_harness.mjs';
 
 const RES = path.resolve('android/app/src/main/res');
-const CHROME = '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 
 // The rift mark: a gate ring with a blade through it.
 const mark = (size, { bleed = false } = {}) => `
@@ -39,7 +38,7 @@ const DENSITIES = [
   ['xxhdpi', 144, 324], ['xxxhdpi', 192, 432],
 ];
 
-const browser = await chromium.launch({ executablePath: CHROME, args: ['--no-sandbox', '--use-gl=swiftshader', '--enable-unsafe-swiftshader'] });
+const browser = await launchBrowser();
 const page = await browser.newPage();
 
 // Chromium refuses viewports smaller than its minimum window size, so render
