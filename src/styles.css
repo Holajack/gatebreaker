@@ -28,6 +28,11 @@
   --edge:rgba(124,92,255,.35);
   --safe-b:env(safe-area-inset-bottom,0px);
   --safe-t:env(safe-area-inset-top,0px);
+  /* The game is locked to landscape, so a phone's camera cutout lands on a LEFT
+     or RIGHT edge, not the top. Only top/bottom were handled, which put the HUD
+     under the notch on every cutout phone held in the usual orientation. */
+  --safe-l:env(safe-area-inset-left,0px);
+  --safe-r:env(safe-area-inset-right,0px);
 }
 
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -51,7 +56,7 @@ kbd{
 .screen{
   position:fixed;inset:0;z-index:20;
   display:flex;align-items:center;justify-content:center;
-  padding:calc(24px + var(--safe-t)) 20px calc(24px + var(--safe-b));
+  padding:calc(24px + var(--safe-t)) calc(20px + var(--safe-r)) calc(24px + var(--safe-b)) calc(20px + var(--safe-l));
 }
 .screen.overlay{background:rgba(3,4,10,.86);backdrop-filter:blur(10px)}
 .hidden{display:none !important}
@@ -165,7 +170,7 @@ kbd{
 /* ---------- HUD ---------- */
 #hud{position:fixed;inset:0;z-index:10;pointer-events:none}
 .hud-top{
-  position:absolute;top:calc(10px + var(--safe-t));left:12px;right:12px;
+  position:absolute;top:calc(10px + var(--safe-t));left:calc(12px + var(--safe-l));right:calc(12px + var(--safe-r));
   display:flex;gap:12px;align-items:flex-start;
 }
 .vitals{width:min(230px,46vw)}
@@ -204,14 +209,14 @@ kbd{
 .hud-bottom{
   position:absolute;left:0;right:0;bottom:calc(14px + var(--safe-b));
   display:flex;align-items:flex-end;justify-content:flex-end;
-  padding:0 18px;gap:10px;
+  padding:0 calc(18px + var(--safe-r)) 0 calc(18px + var(--safe-l));gap:10px;
 }
 /* The whole lower-left quadrant is live: a touch anywhere in here places the
    stick under that finger. Sits below the skill buttons in the stack so a
    thumb that clips the zone edge still reaches them. */
 .stick-zone{
   pointer-events:auto;position:absolute;
-  left:0;bottom:0;top:92px;width:58%;
+  left:var(--safe-l);bottom:0;top:92px;width:58%;
   touch-action:none;z-index:1;
 }
 .stick{
@@ -361,7 +366,7 @@ kbd{
 /* ---------- landscape: phones are short, so compact the HUD ---------- */
 @media (orientation:landscape){
   .vitals{width:min(212px,24vw)}
-  .hud-bottom{bottom:calc(10px + var(--safe-b));padding:0 22px}
+  .hud-bottom{bottom:calc(10px + var(--safe-b));padding:0 calc(22px + var(--safe-r)) 0 calc(22px + var(--safe-l))}
   .stick{width:112px;height:112px}
   .stick i{width:48px;height:48px;margin:-24px 0 0 -24px}
   .stick-zone{top:76px;width:52%}
