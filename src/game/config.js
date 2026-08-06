@@ -33,7 +33,11 @@ export const STATS = [
 // from here so a designer never has to hunt through formulas.
 export const STAT_RATES = {
   str: { atk: 2.4, atkSpeed: 0.006, atkSpeedCap: 0.30 },
-  agi: { speed: 0.09, crit: 0.0055, critCap: 0.55, critDmg: 0.0035, dodgeWindowMs: 4, dodgeBaseMs: 110, dodgeCapMs: 260 },
+  // speedCap is the ceiling on the AGILITY BONUS, not on total speed. Every
+  // other stat here is capped; speed was the one that was not, and once the
+  // level-up grant went to 5 points + 1 auto it ran to 60 u/s at cap — ten
+  // times base, far past what the camera and the walk cycle can carry.
+  agi: { speed: 0.09, speedCap: 4.2, crit: 0.0055, critCap: 0.55, critDmg: 0.0035, dodgeWindowMs: 4, dodgeBaseMs: 110, dodgeCapMs: 260 },
   vit: { hp: 11, regen: 0.05, dr: 0.0018, drCap: 0.45 },
   int: { mp: 7, mpRegen: 0.16, cdr: 0.0045, cdrCap: 0.40, shadowDmg: 0.011 },
   per: { floor: 0.012, floorBase: 0.55, floorCap: 0.92, tellMs: 8, tellBaseMs: 120, tellCapMs: 520, extract: 0.004 },
@@ -186,7 +190,10 @@ export function derive(save) {
     maxHp: Math.floor(130 + vit * R.vit.hp + (lv - 1) * 9),
     maxMp: Math.floor(50 + intel * R.int.mp + (lv - 1) * 3),
     atk: 13 + str * R.str.atk + (lv - 1) * 1.6,
-    speed: 6.0 + agi * R.agi.speed,
+    // Smooth approach to the cap rather than a hard clamp, so a point of
+    // agility is never worthless — it just buys less speed and more dodge
+    // window the further in you go.
+    speed: 6.0 + R.agi.speedCap * (1 - Math.exp(-agi * R.agi.speed / R.agi.speedCap)),
     crit: Math.min(R.agi.critCap, 0.05 + agi * R.agi.crit),
     critDmg: 1.5 + agi * R.agi.critDmg,
     atkSpeed: Math.min(R.str.atkSpeedCap, str * R.str.atkSpeed),

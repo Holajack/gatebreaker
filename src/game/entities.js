@@ -431,14 +431,21 @@ export function animateRig(root, { moving, speed, t, attackPhase = 0, hurt = 0, 
     legL.rotation.x = 0.1;
     legR.rotation.x = -0.1;
   } else if (moving) {
-    const cyc = t * (5 + speed * 0.9);
-    const amp = Math.min(1, 0.35 + speed * 0.08);
+    // Stride FREQUENCY saturates, stride LENGTH keeps growing. Frequency used
+    // to be `5 + speed * 0.9`, so speed fed the leg cycle without limit — a
+    // fast hunter hit ~5 strides/sec, which reads as broken legs rather than
+    // sprinting. Real gait does the opposite: past a jog you cover ground by
+    // reaching further, not by cycling faster. Capping here also keeps enemies
+    // and shadows sane whatever speed the caller hands us.
+    const gait = Math.min(1, Math.max(0, speed / 11));
+    const cyc = t * (5.0 + gait * 4.4);   // 0.80 -> 1.50 strides/sec
+    const amp = 0.55 + gait * 0.62;       // longer reach instead
     legL.rotation.x = Math.sin(cyc) * 0.85 * amp;
     legR.rotation.x = -Math.sin(cyc) * 0.85 * amp;
     armL.rotation.x = -Math.sin(cyc) * 0.65 * amp;
     armR.rotation.x = Math.sin(cyc) * 0.65 * amp;
-    body.position.y = Math.abs(Math.sin(cyc)) * 0.07;
-    body.rotation.y = Math.sin(cyc) * 0.06;
+    body.position.y = Math.abs(Math.sin(cyc)) * (0.04 + gait * 0.05);
+    body.rotation.y = Math.sin(cyc) * (0.04 + gait * 0.04);
     body.rotation.z = 0;
   } else {
     const idle = Math.sin(t * 1.8);
