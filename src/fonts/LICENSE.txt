@@ -1,0 +1,14 @@
+Rajdhani
+Copyright (c) Indian Type Foundry
+Licensed under the SIL Open Font License, Version 1.1.
+
+https://openfontlicense.org
+https://fonts.google.com/specimen/Rajdhani
+
+Bundled here (latin subset, weights 500/600/700) rather than loaded from a CDN,
+because the game must run with no network access at all.
+
+The OFL permits bundling, modification and redistribution, including in
+commercial products. The only restrictions are that the font itself may not be
+sold on its own, and that any modified version must not use the reserved font
+name.

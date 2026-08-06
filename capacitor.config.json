@@ -1,0 +1,19 @@
+{
+  "appId": "com.gatebreaker.riftascension",
+  "appName": "Gatebreaker",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#05060d"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 900,
+      "backgroundColor": "#05060d",
+      "androidSpinnerStyle": "small",
+      "showSpinner": false,
+      "splashFullScreen": true,
+      "splashImmersive": true
+    }
+  }
+}

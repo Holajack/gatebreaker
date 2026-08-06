@@ -1,0 +1,104 @@
+name: Build Gatebreaker APK
+
+# The APK is built here rather than in the dev container because the Android
+# SDK, aapt2 and the AndroidX artifacts all live on dl.google.com, which the
+# container's egress policy blocks. GitHub runners ship the SDK preinstalled.
+
+on:
+  push:
+    branches: ['main']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Needed to publish the APK as a release asset.
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # Gradle 8.2 (the Capacitor 6 wrapper) supports Java 17, not 21.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web bundle
+        run: npm run build
+
+      - name: Sync Capacitor Android project
+        run: npx cap sync android
+
+      - name: Build debug APK
+        run: |
+          chmod +x android/gradlew
+          cd android && ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             "out/gatebreaker-${GITHUB_SHA::7}.apk"
+          ls -lh out/
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: gatebreaker-apk
+          path: out/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload web build
+        uses: actions/upload-artifact@v4
+        with:
+          name: gatebreaker-web
+          path: dist
+          retention-days: 7
+
+      # Workflow artifacts are zipped and need a signed-in session, which makes
+      # them impractical to install from a phone. A release asset is a plain
+      # public URL that a mobile browser downloads straight to the device.
+      - name: Publish APK to the rolling release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk out/gatebreaker.apk
+          NOTES="Debug-signed build of Gatebreaker: Rift Ascension.
+
+          **[Download gatebreaker.apk](https://github.com/${GITHUB_REPOSITORY}/releases/download/gatebreaker-latest/gatebreaker.apk)**
+
+          Open the link on your Android phone and tap the file to install.
+          Android will ask you to allow installing from unknown sources, because
+          this is signed with a debug key rather than a Play Store key.
+          Requires Android 5.1 (API 22) or newer. The game is fully offline.
+
+          Built from \`${GITHUB_SHA}\`. This release is replaced by every new build."
+
+          if gh release view gatebreaker-latest >/dev/null 2>&1; then
+            gh release upload gatebreaker-latest out/gatebreaker.apk --clobber
+            gh release edit gatebreaker-latest --notes "$NOTES"
+          else
+            gh release create gatebreaker-latest out/gatebreaker.apk \
+              --title "Gatebreaker — latest build" \
+              --notes "$NOTES"
+          fi
+          echo "APK: https://github.com/${GITHUB_REPOSITORY}/releases/download/gatebreaker-latest/gatebreaker.apk"

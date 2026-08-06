@@ -1,0 +1,21 @@
+node_modules/
+dist/
+out/
+.DS_Store
+
+# Local-only working files kept outside version control
+_stray-site-files-backup/
+Ultimate RPG Items Pack - Aug 2019/
+
+# Android build output
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+*.apk
+*.aab
+*.keystore
