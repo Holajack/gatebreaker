@@ -16,22 +16,38 @@ export class Input {
     this._bindKeys();
   }
 
+  // Floating thumbstick: the ring is placed under whichever finger lands in the
+  // left zone rather than sitting at one fixed spot, so the thumb never has to
+  // hunt for it. If a drag runs past the ring's edge the origin trails the
+  // finger, which keeps long sweeps from pinning at full tilt in a stale
+  // direction.
   _bindStick() {
+    const zone = document.getElementById('stickZone');
     const stick = document.getElementById('stick');
     const nub = document.getElementById('stickNub');
-    if (!stick) return;
+    if (!zone || !stick || !nub) return;
 
     const setNub = (dx, dy) => {
       nub.style.transform = `translate(${dx}px, ${dy}px)`;
     };
 
+    // Where the hint ring rests when nobody is touching it.
+    const park = () => {
+      if (this._stickId !== null) return;
+      const r = zone.getBoundingClientRect();
+      this._place(stick, r.left + r.width * 0.4, r.bottom - Math.min(r.height * 0.42, 150));
+    };
+    this._park = park;
+
     const start = (e) => {
+      if (this._stickId !== null) return;
       const t = e.changedTouches ? e.changedTouches[0] : e;
       this._stickId = e.changedTouches ? t.identifier : 'mouse';
-      const r = stick.getBoundingClientRect();
-      this._radius = r.width * 0.38;
-      this._stickOrigin = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-      move(e);
+      this._radius = (stick.getBoundingClientRect().width || 132) * 0.38;
+      this._stickOrigin = { x: t.clientX, y: t.clientY };
+      this._place(stick, t.clientX, t.clientY);
+      stick.classList.add('active');
+      setNub(0, 0);
       e.preventDefault();
     };
 
@@ -45,6 +61,15 @@ export class Input {
       let dx = t.clientX - this._stickOrigin.x;
       let dy = t.clientY - this._stickOrigin.y;
       const len = Math.hypot(dx, dy) || 1;
+
+      // Drag past the rim and the origin follows, so the ring stays under the
+      // thumb and direction keeps tracking instead of saturating.
+      if (len > this._radius) {
+        this._stickOrigin.x += dx * (1 - this._radius / len);
+        this._stickOrigin.y += dy * (1 - this._radius / len);
+        this._place(stick, this._stickOrigin.x, this._stickOrigin.y);
+      }
+
       const clamped = Math.min(len, this._radius);
       dx = (dx / len) * clamped;
       dy = (dy / len) * clamped;
@@ -68,15 +93,25 @@ export class Input {
       this._stickId = null;
       this.move.x = 0; this.move.y = 0;
       setNub(0, 0);
+      stick.classList.remove('active');
+      park();
     };
 
-    stick.addEventListener('touchstart', start, { passive: false });
+    zone.addEventListener('touchstart', start, { passive: false });
     window.addEventListener('touchmove', move, { passive: false });
     window.addEventListener('touchend', end);
     window.addEventListener('touchcancel', end);
-    stick.addEventListener('mousedown', start);
+    zone.addEventListener('mousedown', start);
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', end);
+    window.addEventListener('resize', park);
+    window.addEventListener('orientationchange', () => setTimeout(park, 60));
+    park();
+  }
+
+  _place(el, x, y) {
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
   }
 
   _bindButtons() {

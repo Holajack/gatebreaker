@@ -68,8 +68,12 @@
       <button id="btnPause" class="icon-btn" aria-label="Pause">| |</button>
     </div>
 
+    <!-- Anywhere in this zone starts a thumbstick under the finger; the ring
+         below is only the resting hint, and it teleports to wherever you touch. -->
+    <div id="stickZone" class="stick-zone"></div>
+    <div id="stick" class="stick"><i id="stickNub"></i></div>
+
     <div class="hud-bottom">
-      <div id="stick" class="stick"><i id="stickNub"></i></div>
       <div class="skills">
         <div class="skill-row">
           <button class="skill-btn shadow" data-skill="summon"><span class="glyph">☗</span><i class="cd"></i><small>BIND</small></button>

@@ -201,16 +201,27 @@ kbd{
 /* ---------- controls ---------- */
 .hud-bottom{
   position:absolute;left:0;right:0;bottom:calc(14px + var(--safe-b));
-  display:flex;align-items:flex-end;justify-content:space-between;
+  display:flex;align-items:flex-end;justify-content:flex-end;
   padding:0 18px;gap:10px;
 }
+/* The whole lower-left quadrant is live: a touch anywhere in here places the
+   stick under that finger. Sits below the skill buttons in the stack so a
+   thumb that clips the zone edge still reaches them. */
+.stick-zone{
+  pointer-events:auto;position:absolute;
+  left:0;bottom:0;top:92px;width:58%;
+  touch-action:none;z-index:1;
+}
 .stick{
-  pointer-events:auto;position:relative;
-  width:132px;height:132px;flex:0 0 132px;border-radius:50%;
+  pointer-events:none;position:fixed;left:0;top:0;
+  width:132px;height:132px;border-radius:50%;
   background:radial-gradient(circle,rgba(124,92,255,.14),rgba(124,92,255,.04));
   border:1.5px solid rgba(124,92,255,.3);
-  touch-action:none;
+  touch-action:none;z-index:2;
+  transform:translate(-50%,-50%);
+  opacity:.32;transition:opacity .16s ease;
 }
+.stick.active{opacity:1}
 .stick i{
   position:absolute;left:50%;top:50%;width:56px;height:56px;margin:-28px 0 0 -28px;
   border-radius:50%;background:rgba(124,92,255,.5);
@@ -218,6 +229,7 @@ kbd{
   box-shadow:0 0 20px rgba(124,92,255,.6);
   transition:transform .04s linear;
 }
+.stick.active i{transition:none}
 .skills{display:flex;flex-direction:column;align-items:flex-end;gap:10px}
 .skill-row{display:flex;align-items:flex-end;gap:10px}
 .skill-btn{
@@ -300,7 +312,7 @@ kbd{
 }
 
 @media (max-height:520px){
-  .stick{width:106px;height:106px;flex-basis:106px}
+  .stick{width:106px;height:106px}
   .stick i{width:46px;height:46px;margin:-23px 0 0 -23px}
   .skill-btn{width:50px;height:50px}
   .skill-btn.big{width:72px;height:72px}
@@ -348,8 +360,9 @@ kbd{
 @media (orientation:landscape){
   .vitals{width:min(212px,24vw)}
   .hud-bottom{bottom:calc(10px + var(--safe-b));padding:0 22px}
-  .stick{width:112px;height:112px;flex-basis:112px}
+  .stick{width:112px;height:112px}
   .stick i{width:48px;height:48px;margin:-24px 0 0 -24px}
+  .stick-zone{top:76px;width:52%}
   .skill-btn{width:52px;height:52px}
   .skill-btn.big{width:76px;height:76px}
   .skill-btn .glyph{font-size:19px}
