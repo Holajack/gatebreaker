@@ -1,0 +1,1139 @@
+{
+  "summary": "Gatebreaker expands from a six-arena wave shooter into a hub-and-gate ARPG: a walkable city (\"Threshold\") with colour-coded rank portals, nine distinct gate environments, a real five-stat progression system with a persistent shadow roster, and the CC0 Quaternius item pack wired in as loot/weapon models. The plan is deliberately additive: game.js gains a mode-dispatch table and loses ~40 lines of hardcoded dungeon dispatch, but its combat, spawn, damage and camera code is untouched. Everything else lands as NEW modules with fixed public interfaces so parallel agents cannot collide.\n\nTHREE CORRECTIONS TO THE BRIEF, stated explicitly:\n\n(1) ENVIRONMENT BREAK POINT MOVED FROM C TO B. The owner's instinct (\"E is always a plain dungeon, variation starts around C\") is directionally right but the SYSTEMS research is explicit that the genre's canonical break is at B, not C: E and D are enclosed interiors, C is *still* a cave system (both canonical C-rank dungeons are cave tunnels), and the anomalous-interior mechanic \u2014 the one that produces snowfields, poison jungles and burning towers \u2014 is gated to B-and-above. So: E = tight stone dungeon, D = ossuary dungeon, C = a huge open CAVERN (visibly a different place, still geologically a cave \u2014 this is the compromise that gives the player a visible step up at C without breaking canon), B/A/S = true open landscapes. The owner's \"sometimes a forest, sometimes a winter area, a burning tower\" is delivered by the ANOMALY GATE roll available at B+, which also buys the genre's best tension beat for one extra field. Net effect: the owner gets more variety than he asked for, one rank later than he asked for.\n\n(2) \"ONE ENVIRONMENT PER RANK\" BECOMES \"ONE CANONICAL ENVIRONMENT PER RANK, PLUS A THREE-ENTRY ANOMALY POOL AT B+\". Nine biomes total, not six. They are built from five shared layout kits, so nine biomes is roughly 1.6x the work of six, not 1.5x from scratch.\n\n(3) SHADOW CAPACITY IS SPLIT INTO TWO NUMBERS. Canon's single \"20 then 100,000\" curve is both a dead progression axis and an Android performance hazard. ROSTER capacity (how many shadows you own, persisted) grows to 120; FIELD capacity (how many are simultaneously on the battlefield) grows 2 -> 12 and is hard-clamped by the quality tier. This is closer to the licensed mobile precedent the research cites and is the only version that survives a mid-range phone.\n\nWHERE THE RESEARCH REPORTS CONFLICT, AND WHAT I FOLLOWED:\n- CODEBASE says src/world/overworld.js is a finished city hub; ASSETS says \"there are no buildings at all\" in it. ASSETS is right \u2014 I read the file. It is a seeded wilderness heightfield with six portal props, never executed in a browser, and its only importer (ow-test.mjs) points at /home/user/... on a different machine. I am HARVESTING its portal-placement and resolve() code into a new src/world/city.js and deleting it. Do not treat it as working code.\n- CODEBASE recommends adopting attacks.js and weapons.js (2,092 lines of dead but sophisticated code). I am adopting weapons.js ONLY (it is the natural consumer of the item pack, and its own comment states its sword table reproduces game.js's hardcoded sword exactly, so adoption is feel-neutral). I am NOT adopting attacks.js in this expansion \u2014 it is a combat-feel rewrite that would fight every parallel workstream here. It stays dead, flagged in openQuestions.\n- PERF says fix the frame-pacing bug before anything else; SYSTEMS and ASSETS have no opinion. PERF wins \u2014 it is step 1, because src/main.js:110 `if (acc < TARGET_DT - 0.0015) return` genuinely renders every 2nd rAF on a 90 Hz panel (45 fps) and src/core/quality.js:117's `fps < 46` downgrade then pins that device to 'low' forever. Every performance number anyone has ever measured on this game on a 72/90/144 Hz phone is invalid.\n\nLEGAL: 'monarch' is renamed to 'archon' everywhere (config.js currently ships \"MONARCH'S REACH\" and \"THE RIFT MONARCH\", the two closest strings in the codebase to the source work). No character names, guild names, story location names, or silhouettes from the source appear anywhere in this spec. The shadow-grade ladder, the city, the districts, the biomes and the bosses are all originally named, and the ash/cinder lexicon is inherited from the repo's own existing UI copy (\"Cinderbound\", ui.js:120).\n\nSCOPE HONESTY: this is a 4-6 week build for a team, not a weekend. The city hub with navigation and the nine-biome rewrite are each multi-week on their own. Three items are explicitly deferred and listed in openQuestions rather than pretended into the build order.",
+  "modules": [
+    {
+      "path": "tools/_harness.mjs",
+      "status": "new",
+      "purpose": "Shared Playwright harness. Every tool in tools/ currently hardcodes a Linux chrome path (/opt/pw-browsers/chromium-1194/chrome-linux/chrome), a Linux output dir (/tmp/claude-0/-home-user-collins-seo-website/...), and a DIFFERENT dev-server port each (4178/4180/4190/4191/4193/4200/4212) while vite.config.js serves 5173. Nothing runs on this Mac. This module makes every tool runnable and is a hard prerequisite for verifying any later step.",
+      "exports": [
+        "export const PORT = Number(process.env.GB_PORT || 5173);",
+        "export const OUT = process.env.GB_OUT || `${process.env.TMPDIR || '/tmp'}/gatebreaker-shots`;",
+        "export async function launchBrowser({ headless = true, swiftshader = true } = {}) -> Promise<import('playwright').Browser>",
+        "export async function newPhonePage(browser, { width = 412, height = 892, dpr = 2 } = {}) -> Promise<{ page, errors: string[], logs: string[] }>",
+        "export async function ensureServer({ port = PORT, timeoutMs = 20000 } = {}) -> Promise<{ url: string, stop: () => Promise<void> }>",
+        "export async function gotoGame(page, { path = '/', waitMs = 2400 } = {}) -> Promise<void>",
+        "export function writeReport(name, data) -> string",
+        "export async function evalGame(page, fn, ...args) -> Promise<any>"
+      ],
+      "dependsOn": [],
+      "notes": "launchBrowser must resolve the browser via playwright's own chromium.executablePath() with an env override GB_CHROME, never a literal path. ensureServer spawns `npx vite --port <port> --strictPort` only if a HEAD request to the port fails, and returns a no-op stop() if a server was already running. writeReport mkdir -p's OUT. Also add npm scripts: \"smoke\": \"node tools/smoke.mjs\", \"test:city\": \"node tools/city-test.mjs\", \"test:progression\": \"node tools/progression-test.mjs\", \"test:biomes\": \"node tools/biome-test.mjs\", \"test:shadows\": \"node tools/shadow-test.mjs\"."
+    },
+    {
+      "path": "src/core/frameclock.js",
+      "status": "new",
+      "purpose": "Refresh-rate-aware frame pacing, replacing the accumulator in src/main.js:103-116 that aliases 72/90/144 Hz panels down to 36/45/48 fps. Measures the real display interval, then renders every Nth rAF callback by COUNTING callbacks rather than accumulating time.",
+      "exports": [
+        "export class FrameClock { constructor({ targetFps = 60, sampleFrames = 30, onFrame } = {}) }",
+        "FrameClock.prototype.start() -> void",
+        "FrameClock.prototype.stop() -> void",
+        "FrameClock.prototype.setTarget(fps: 30 | 60) -> void",
+        "FrameClock.prototype.get refreshHz() -> number",
+        "FrameClock.prototype.get step() -> number",
+        "FrameClock.prototype.get measuredFps() -> number",
+        "export function detectRefreshHz(samples: number[]) -> number"
+      ],
+      "dependsOn": [],
+      "notes": "onFrame(dt, rawDt) is called only on rendered frames; dt is clamped to 0.05. During the first sampleFrames callbacks it renders EVERY callback (so boot is not slowed) while collecting intervals, then computes step = max(1, Math.round(refreshHz / targetFps)). detectRefreshHz takes the median interval and snaps to the nearest of [60,72,90,120,144,165] when within 8%. setTarget(30) is what CityMode calls on entry and DungeonMode calls setTarget(60)."
+    },
+    {
+      "path": "src/core/quality.js",
+      "status": "modified",
+      "purpose": "Make the up/down thresholds relative to the CURRENT target fps instead of the hardcoded 46/58 at quality.js:117, and expose per-mode caps so the city can run a lower ceiling than combat.",
+      "exports": [
+        "export const TIERS  // unchanged keys; ADD to every tier: maxFieldShadows (low 4, medium 6, high 9, ultra 12), cityChunkRadius (low 2, medium 3, high 4, ultra 4), instanceScale (low 0.4, medium 0.7, high 1.0, ultra 1.25)",
+        "export class Quality { constructor({ onChange, startTier = null, targetFps = 60 } = {}) }",
+        "Quality.prototype.setTargetFps(fps: number) -> void",
+        "Quality.prototype.update(rawDt: number) -> void",
+        "Quality.prototype.lock(tierName: string | null) -> void",
+        "Quality.prototype.get current() -> object",
+        "Quality.prototype.get fps() -> number",
+        "Quality.statics: Quality.guessStartTier() -> string"
+      ],
+      "dependsOn": [
+        "src/core/frameclock.js"
+      ],
+      "notes": "Downgrade when smoothed fps < targetFps * 0.78 sustained 2.5 s; upgrade when > targetFps * 0.96 sustained 6 s. Keep the existing p95 hitch term. Do NOT change the TIERS pixelRatio values in this step \u2014 PERF's recommendation to cap mid-range at 1.25 is handled by making 'high' unreachable unless measured fps sustains, which the new relative thresholds already do."
+    },
+    {
+      "path": "src/game/config.js",
+      "status": "modified",
+      "purpose": "The single balance table. Gains a fifth stat, the 5-points-per-level + auto-+1 rule, a level-100 curve, the renamed archon content, and a GATES table restructured so rank, biome and difficulty are separable.",
+      "exports": [
+        "export const RANKS = ['E','D','C','B','A','S']",
+        "export const LEVEL_CAP = 100",
+        "export const POINTS_PER_LEVEL = 5",
+        "export const AUTO_STAT_PER_LEVEL = 1",
+        "export const DAILY_CONTRACT_POINTS = 3",
+        "export const STATS  // 5 entries, keys in fixed order: 'str','agi','vit','int','per'",
+        "export const STAT_RATES  // see notes for the exact literal",
+        "export const GATES  // 6 entries; see notes for the exact literal",
+        "export const ANOMALY_CHANCE = { E:0, D:0, C:0, B:0.14, A:0.20, S:0.26 }",
+        "export const ENEMY_TYPES  // grunt/stalker/brute/caster unchanged, PLUS 'lancer' and 'howler'",
+        "export const BOSSES  // 6 entries; 'monarch' key RENAMED to 'archon', name 'THE RIFT ARCHON'",
+        "export const SKILLS  // summon.maxShadows removed \u2014 capacity now comes from progression.js",
+        "export const SHADOW_GRADES",
+        "export function xpForLevel(level: number) -> number",
+        "export function derive(save: Save) -> Derived",
+        "export function scaleEnemy(base: object, level: number) -> { hp, atk, xp }",
+        "export function rankOf(level: number) -> 'E'|'D'|'C'|'B'|'A'|'S'|'SOVEREIGN'",
+        "export function gateIndexOfRank(rank: string) -> number"
+      ],
+      "dependsOn": [],
+      "notes": "STAT_RATES literal (agents must use these EXACT numbers): { str:{atk:2.4, atkSpeed:0.006, atkSpeedCap:0.30}, agi:{speed:0.09, crit:0.0055, critCap:0.55, critDmg:0.0035, dodgeWindowMs:4, dodgeBaseMs:110, dodgeCapMs:260}, vit:{hp:11, regen:0.05, dr:0.0018, drCap:0.45}, int:{mp:7, mpRegen:0.16, cdr:0.0045, cdrCap:0.40, shadowDmg:0.011}, per:{floor:0.012, floorBase:0.55, floorCap:0.92, tellMs:8, tellBaseMs:120, tellCapMs:520, extract:0.004} }. GATES literal: E{reqLevel:1, enemyLevel:2, bossLevel:6, enemies:12, waveSize:3, biome:'warren'}, D{reqLevel:5, enemyLevel:7, bossLevel:12, enemies:18, waveSize:4, biome:'ossuary'}, C{reqLevel:11, enemyLevel:14, bossLevel:21, enemies:26, waveSize:6, biome:'deepglass'}, B{reqLevel:19, enemyLevel:24, bossLevel:33, enemies:32, waveSize:7, biome:'emberfall'}, A{reqLevel:29, enemyLevel:37, bossLevel:49, enemies:38, waveSize:8, biome:'rivenwaste'}, S{reqLevel:42, enemyLevel:54, bossLevel:70, enemies:46, waveSize:9, biome:'archonreach'}. Note bossLevel is roughly a full rank above enemyLevel \u2014 that is the boss-offset rule from the SYSTEMS research, made numeric. derive() must return the existing keys PLUS: dmgFloor, tellLeadMs, dodgeWindow, cdr, dr, critDmg, atkSpeed. rankOf: <8 E, <16 D, <25 C, <37 B, <53 A, <71 S, >=71 'SOVEREIGN'. xpForLevel(level) = Math.floor(52 * Math.pow(level, 1.42)) \u2014 L2=139, L10=1368, L20=3667, L40=9792, L60=17109, L100=35880."
+    },
+    {
+      "path": "src/core/save.js",
+      "status": "modified",
+      "purpose": "Schema v2. The shadow roster changes from an integer count to an array of records, the fifth stat is added, and currency/daily-contract state appears. save.js:23-30 merges new FIELDS safely but has no path for a CHANGED field type, so an explicit migration is required or every v1 player's save silently produces `shadows.length === undefined`.",
+      "exports": [
+        "export const SAVE_KEY = 'gatebreaker.save.v2'",
+        "export const SCHEMA_VERSION = 2",
+        "export function freshSave() -> Save",
+        "export function load() -> Save",
+        "export function save(data: Save) -> void",
+        "export function wipe() -> void",
+        "export function migrate(raw: object) -> Save"
+      ],
+      "dependsOn": [],
+      "notes": "freshSave() returns exactly: { version:2, level:1, xp:0, points:0, stats:{str:0,agi:0,vit:0,int:0,per:0}, autoStats:0, cleared:{}, shadows:{ roster:[], deployed:[], nextId:1 }, ash:0, daily:{ dayKey:null, progress:0, claimed:false }, classTier:null, unlockedAnomaly:false, totalKills:0, deaths:0, weapon:null, stash:[] }. A ShadowRecord is { id:number, name:string, grade:number, type:'grunt'|'stalker'|'brute'|'caster'|'lancer'|'howler'|'boss', level:number, kills:number, bornAt:number }. migrate() reads BOTH 'gatebreaker.save.v1' and v2 keys: if only v1 exists, it converts `shadows: <int N>` into N roster records of grade 1 type 'grunt' level = save.level, seeds per:0, sets version:2, writes to the v2 key and leaves v1 in place (do not delete \u2014 a rollback must not destroy progress). load() calls migrate() then merges onto freshSave() the same way as today."
+    },
+    {
+      "path": "src/game/progression.js",
+      "status": "new",
+      "purpose": "All level/stat/capacity math as pure functions over the save object. Nothing here imports THREE or touches the DOM, so it is unit-testable in Node and is the module the progression smoke test drives directly.",
+      "exports": [
+        "export function grantXp(save, amount: number) -> { levelsGained: number, pointsGained: number, autoGained: number, capped: boolean }",
+        "export function canAllocate(save, key: 'str'|'agi'|'vit'|'int'|'per') -> boolean",
+        "export function allocate(save, key: string, count = 1) -> boolean",
+        "export function respecCost(save) -> number",
+        "export function respec(save) -> boolean",
+        "export function effectiveStat(save, key: string) -> number",
+        "export function shadowRosterCapacity(save) -> number",
+        "export function shadowFieldCapacity(save, qualityTier: object) -> number",
+        "export function extractionChance(save, { enemyLevel, tierWeight, secondsSinceDeath, attemptIndex }) -> number",
+        "export function dailyKey(now = Date.now()) -> string",
+        "export function dailyState(save, now = Date.now()) -> { key: string, progress: number, target: number, claimed: boolean, expired: boolean }",
+        "export function tickDaily(save, deltaProgress: number, now = Date.now()) -> boolean",
+        "export function claimDaily(save, now = Date.now()) -> boolean",
+        "export function classTrialAvailable(save) -> boolean",
+        "export function awardClassTier(save, survivalSeconds: number) -> 'base'|'advanced'|'sovereign'"
+      ],
+      "dependsOn": [
+        "src/game/config.js",
+        "src/core/save.js"
+      ],
+      "notes": "EXACT FORMULAS \u2014 agents must not invent variants. effectiveStat = save.stats[key] + save.autoStats (autoStats is the +1-to-everything counter, incremented once per level). shadowRosterCapacity = Math.min(120, 6 + Math.floor(effectiveStat(save,'int') * 0.35) + Math.floor(save.level * 0.6)). shadowFieldCapacity = Math.max(2, Math.min(12, qualityTier.maxFieldShadows, 2 + Math.floor(save.level/8) + Math.floor(effectiveStat(save,'int')/40))). extractionChance = clamp(tierWeight * clamp(1 + (save.level - enemyLevel)*0.03, 0.4, 1.6) * Math.max(0.25, 1 - secondsSinceDeath/12) * (1 - attemptIndex*0.18) + effectiveStat(save,'per')*0.004, 0.04, 0.95), where tierWeight is 0.62 trash / 0.45 elite / 0.22 boss. grantXp loops while xp >= xpForLevel(level) and level < LEVEL_CAP, awarding POINTS_PER_LEVEL free points and incrementing autoStats by AUTO_STAT_PER_LEVEL each level. respecCost = 80 + 14 * (total allocated points). dailyKey is the local-date YYYY-MM-DD string (offline game, no server time). daily target is 3 (clear 3 gates OR raise 3 shadows \u2014 the caller decides what counts). awardClassTier thresholds: <60 s 'base', 60-149 s 'advanced', >=150 s 'sovereign'."
+    },
+    {
+      "path": "src/game/shadows.js",
+      "status": "new",
+      "purpose": "The shadow army as data: roster management, grades, promotion, and deployment selection. Deliberately free of THREE \u2014 game.js keeps ownership of meshes and spawning, this module decides WHO exists and WHO deploys.",
+      "exports": [
+        "export const GRADES  // 7 entries, index 0..6",
+        "export function gradeName(index: number) -> string",
+        "export function gradeMultiplier(index: number) -> number",
+        "export function makeShadow(save, { type, level, grade = 0 }) -> ShadowRecord",
+        "export function addShadow(save, record) -> { added: boolean, reason: 'ok'|'full' }",
+        "export function removeShadow(save, id: number) -> boolean",
+        "export function releaseWeakest(save, count = 1) -> ShadowRecord[]",
+        "export function promoteCost(save, record) -> { ash: number, minLevel: number }",
+        "export function canPromote(save, record) -> boolean",
+        "export function promote(save, id: number) -> boolean",
+        "export function setDeployed(save, ids: number[]) -> number[]",
+        "export function autoDeploy(save, fieldCap: number) -> number[]",
+        "export function deployedRecords(save) -> ShadowRecord[]",
+        "export function shadowCombat(save, record) -> { hp: number, atk: number, speed: number, radius: number, scale: number }",
+        "export function rosterSummary(save) -> { count: number, capacity: number, byGrade: number[], strongest: ShadowRecord | null }",
+        "export function nameFor(type: string, grade: number, seedId: number) -> string"
+      ],
+      "dependsOn": [
+        "src/game/config.js",
+        "src/game/progression.js"
+      ],
+      "notes": "GRADES literal, ORIGINAL naming built on the repo's own existing 'Cinderbound' lexicon (ui.js:120) \u2014 do NOT use the source work's grade names: [{name:'CINDER', mul:0.55, maxCount:Infinity},{name:'THRALL', mul:0.75, maxCount:Infinity},{name:'SOLDIER', mul:1.00, maxCount:Infinity},{name:'VANGUARD', mul:1.35, maxCount:24},{name:'CHAMPION', mul:1.80, maxCount:8},{name:'WARLORD', mul:2.50, maxCount:3},{name:'ASHEN FIRST', mul:4.00, maxCount:1}]. promoteCost.ash = Math.round(120 * Math.pow(2.2, record.grade)); minLevel = 8 * (record.grade + 1). shadowCombat: atk = ENEMY_TYPES[record.type].atk * gradeMultiplier(record.grade) * (1 + effectiveStat(save,'int')*0.011) * (1 + save.level*0.05); hp = ENEMY_TYPES[type].hp * gradeMultiplier * (1 + save.level*0.06). autoDeploy sorts by (grade desc, level desc, kills desc) and returns the first fieldCap ids. nameFor composes from two ORIGINAL word lists baked into this file (e.g. ['Ash','Grey','Coal','Rime','Hollow','Quill','Sable'] x ['-warden','-mark','-thorn','-fang','-shard','-vow']) plus a numeric suffix on collision \u2014 never a name from any existing property."
+    },
+    {
+      "path": "src/world/terrain.js",
+      "status": "modified",
+      "purpose": "Keep as the seeded heightfield math (it is the one dead file that is genuinely good \u2014 pure math, no THREE, unit-testable). Add flattening so the city can carve level plazas and building pads into it without the buildings floating.",
+      "exports": [
+        "export function mulberry32(seed: number) -> () => number",
+        "export function fbm(x, y, seed, octaves = 4, lacunarity = 2.03, gain = 0.5) -> number",
+        "export class Terrain { constructor({ seed, size, maxHeight, flats = [] }) }",
+        "Terrain.prototype.height(x: number, z: number) -> number",
+        "Terrain.prototype.normal(x, z, out?) -> {x,y,z}",
+        "Terrain.prototype.slope(x, z) -> number",
+        "Terrain.prototype.walkable(x, z) -> boolean",
+        "Terrain.prototype.findSpot(rnd, { minR, maxR, tries }) -> {x, z} | null",
+        "Terrain.prototype.clampToWorld(pos, margin) -> boolean",
+        "Terrain.prototype.addFlat({ x, z, radius, feather = 6, height = null }) -> void",
+        "Terrain.prototype.rebuildFlats() -> void"
+      ],
+      "dependsOn": [],
+      "notes": "addFlat blends the raw fbm height toward `height` (or toward the terrain height at the flat's centre when height is null) with a smoothstep over `feather` units. Flats are stored in an array and evaluated inside height(), so collision, the visual mesh and the nav grid cannot disagree \u2014 that agreement is the whole reason this file exists. Keep height() allocation-free; it is called per-frame per-entity."
+    },
+    {
+      "path": "src/world/city.js",
+      "status": "new",
+      "purpose": "THE CITY HUB. A walkable district-based city called Threshold with a portal plaza, service buildings the player can enter (as interaction points, not interior loads), ambient NPCs, and one colour-coded portal per rank. This replaces src/world/overworld.js, harvesting its portal-placement and resolve() code but discarding its wilderness terrain treatment.",
+      "exports": [
+        "export class City { constructor(scene, renderer, camera, quality) }",
+        "City.prototype.build(seed = 20260806, save) -> City",
+        "City.prototype.dispose() -> void",
+        "City.prototype.update(dt: number, playerPos: THREE.Vector3) -> void",
+        "City.prototype.resolve(pos: THREE.Vector3, radius: number, vel: THREE.Vector3 | null) -> void",
+        "City.prototype.heightAt(x: number, z: number) -> number",
+        "City.prototype.groundNormal(x, z, out?) -> {x,y,z}",
+        "City.prototype.portalAt(pos: THREE.Vector3) -> Portal | null",
+        "City.prototype.nearestPortal(pos: THREE.Vector3) -> { portal: Portal, distance: number } | null",
+        "City.prototype.interactAt(pos: THREE.Vector3) -> Interactable | null",
+        "City.prototype.setPortalState(rank: string, { locked: boolean, anomaly: boolean }) -> void",
+        "City.prototype.spawnPoint() -> THREE.Vector3",
+        "City.prototype.updateShadowCamera(target: THREE.Vector3, extent = 18) -> void",
+        "City.prototype.get navGrid() -> NavGrid",
+        "City.prototype.get stats() -> { drawGroups: number, chunksVisible: number, instances: number }",
+        "export const DISTRICTS  // 5 entries, see cityHub",
+        "export const PORTAL_COLORS = { E:0x8b97c9, D:0x2ad4c0, C:0x4ade80, B:0xa78bfa, A:0xffc24b, S:0xff4d6d, ANOMALY:0xff7af0 }"
+      ],
+      "dependsOn": [
+        "src/world/terrain.js",
+        "src/world/citykit.js",
+        "src/world/navgrid.js",
+        "src/world/navgrid.js",
+        "src/core/quality.js",
+        "src/render/sky.js",
+        "src/render/env.js"
+      ],
+      "notes": "A Portal is { rank, pos: THREE.Vector3, radius: number, color: number, locked: boolean, anomaly: boolean, group: THREE.Group, phase: number }. An Interactable is { id: 'barracks'|'exchange'|'assay'|'trial'|'stash', pos, radius, label: string }. HARD RULES: (a) ZERO THREE.PointLight anywhere in the city \u2014 overworld.js:293 toggles PointLight.visible, which mutates NUM_POINT_LIGHTS, which is part of three's program cache key, forcing shader recompiles as the player walks. Portal glow is emissive geometry on GLOW_LAYER instead. (b) The scene graph under City.group is exactly one Group per 64 m chunk; visibility is toggled with Group.visible so three's projectObject early-returns and prunes the whole subtree from traversal, shadow collection AND the glow pass. (c) Every prop comes from citykit as an InstancedMesh or a merged per-chunk BufferGeometry \u2014 no per-building materials, use setColorAt for tint variety. (d) Call computeBoundingSphere() on every InstancedMesh after filling, and keep instanced meshes chunk-local so the sphere is tight."
+    },
+    {
+      "path": "src/world/citykit.js",
+      "status": "new",
+      "purpose": "The modular geometry kit the city is assembled from. Twelve building modules and nine street props, authored once as shared BufferGeometries, so hundreds of buildings cost twelve draw calls. Kept separate from city.js so one agent can iterate on look while another iterates on layout.",
+      "exports": [
+        "export const MODULES  // keys: 'base','mid','cap','parapet','awning','sign','stair','pillar','arch','vent','balcony','antenna'",
+        "export const PROPS  // keys: 'lamp','bollard','bench','bin','planter','crate','banner','barrier','notice'",
+        "export function moduleGeometry(key: string) -> THREE.BufferGeometry",
+        "export function propGeometry(key: string) -> THREE.BufferGeometry",
+        "export function cityMaterials() -> { shell: THREE.Material, trim: THREE.Material, glass: THREE.Material, road: THREE.Material, emissive: THREE.Material }",
+        "export function buildFacade(rnd, { width, depth, floors, style }) -> { geometry: THREE.BufferGeometry, height: number, footprint: { w: number, d: number } }",
+        "export function buildBlock(rnd, { x, z, w, d, style, floorsMin, floorsMax }) -> { geometry: THREE.BufferGeometry, obstacles: Array<{pos:{x,z}, radius:number}>, boxes: Array<{x,z,w,d,rot}> }",
+        "export function makePropField(key: string, count: number) -> THREE.InstancedMesh",
+        "export function disposeCityKit() -> void",
+        "export function cityKitStats() -> { geometries: number, materials: number }"
+      ],
+      "dependsOn": [
+        "src/render/glow.js"
+      ],
+      "notes": "All materials are MeshStandardMaterial with vertexColors:true and flatShading:true so per-piece tint bakes into the merged geometry. Keep each merged chunk geometry between 5k and 20k triangles per PERF's guidance. Buildings are BOXES for collision \u2014 obstacles are returned as circles for compatibility with the existing resolve() signature, and `boxes` is returned separately for NavGrid to rasterize properly (circles around a long building block would make streets impassable). NO textures \u2014 the art direction is the repo's existing flat-shaded low-poly, and the Quaternius item pack is also untextured, so this stays visually coherent."
+    },
+    {
+      "path": "src/world/navgrid.js",
+      "status": "new",
+      "purpose": "Flow-field navigation. Enemy AI in game.js:831-871 is a three-branch steer-straight-at-the-player switch that only works because the arena is a convex disc; ANY concave geometry (a building, an alley, a tower wall) traps enemies permanently. This is required by both the city and by every non-circular biome.",
+      "exports": [
+        "export class NavGrid { constructor({ originX, originZ, size, cell = 2 }) }",
+        "NavGrid.prototype.clear() -> void",
+        "NavGrid.prototype.blockCircle(x: number, z: number, radius: number) -> void",
+        "NavGrid.prototype.blockBox(x: number, z: number, w: number, d: number, rot = 0) -> void",
+        "NavGrid.prototype.blockOutside(predicate: (x:number,z:number)=>boolean) -> void",
+        "NavGrid.prototype.bake() -> void",
+        "NavGrid.prototype.setGoal(x: number, z: number) -> boolean",
+        "NavGrid.prototype.flowAt(x: number, z: number, out: {x:number,z:number}) -> boolean",
+        "NavGrid.prototype.blockedAt(x: number, z: number) -> boolean",
+        "NavGrid.prototype.nearestOpen(x: number, z: number, maxRings = 8) -> { x: number, z: number } | null",
+        "NavGrid.prototype.get generation() -> number",
+        "NavGrid.prototype.debugMesh() -> THREE.Object3D"
+      ],
+      "dependsOn": [],
+      "notes": "Pure typed-array BFS Dijkstra over a uniform grid; no THREE import except in debugMesh (lazy-require it or accept a THREE reference in the constructor options \u2014 DO NOT import THREE at module top level, the headless progression test imports this file in Node). setGoal recomputes the integration field and MUST be throttled by the caller to at most 4 Hz and only when the goal cell changes; a 460 m world at cell 2 is 230x230 = 52,900 cells, which is a ~1.5 ms BFS on a mid-range phone \u2014 acceptable at 4 Hz, fatal every frame. flowAt returns false when the sample is outside the grid or unreachable, and the caller then falls back to the existing steer-straight behaviour. generation increments on every bake so consumers can invalidate caches."
+    },
+    {
+      "path": "src/world/overworld.js",
+      "status": "modified",
+      "purpose": "DELETE. 353 lines of never-executed code that describes a wilderness, not a city, and whose only importer (ow-test.mjs) references /home/user/collins-seo-website/... on a different machine. Its portal ring placement and resolve() are harvested into src/world/city.js first.",
+      "exports": [],
+      "dependsOn": [],
+      "notes": "Delete this file and ow-test.mjs at build step 7, AFTER city.js passes its smoke test and not before. Leaving it in place is a live hazard: any agent told 'the codebase already has an overworld' will assume it runs."
+    },
+    {
+      "path": "src/game/biomes.js",
+      "status": "new",
+      "purpose": "The nine environment definitions as DATA \u2014 palette, fog model, sky tuning, lighting rig, layout kit, prop mix, hazard, and the rank-to-biome roll. Today 'biomes' are five hex values in config.js:45-52 applied to identical hardcoded geometry (world.js:52-206); this file is what makes them actually different places.",
+      "exports": [
+        "export const BIOMES  // 9 entries: warren, ossuary, deepglass, emberfall, rivenwaste, archonreach, whitedrift, verdantrot, cinderwaste",
+        "export const CANONICAL_BIOME = { E:'warren', D:'ossuary', C:'deepglass', B:'emberfall', A:'rivenwaste', S:'archonreach' }",
+        "export const ANOMALY_POOL = ['whitedrift','verdantrot','cinderwaste']",
+        "export function getBiome(key: string) -> Biome",
+        "export function rollBiome(rank: string, rnd: () => number, { allowAnomaly = true } = {}) -> { key: string, anomaly: boolean }",
+        "export function biomeHazard(key: string) -> Hazard | null",
+        "export function biomeFog(key: string, extent: number) -> THREE.FogBase",
+        "export function biomeLighting(key: string) -> LightingRecipe",
+        "export function biomeSkyTuning(key: string) -> { stars: number, aurora: number, horizon: number, sunAngle: number }"
+      ],
+      "dependsOn": [
+        "src/game/config.js",
+        "src/render/sky.js"
+      ],
+      "notes": "A Biome record is { key, name, rank, kit: 'corridor'|'cavern'|'openfield'|'tower'|'ruins', enclosed: boolean, palette: { fog, ground, accent, sky, pillar, detail }, fogModel: 'linear'|'exp2', fogDensity: number, exposure: number, envIntensity: number, sky: { stars, aurora, horizon, sunAngle }, lighting: { hemi: [skyColor, groundColor, intensity], key: [color, intensity, x, y, z], rim: [color, intensity, x, y, z] }, props: { pillars:[min,max], rocks:number, shards:number, flora:number, debris:number }, hazard: Hazard|null, bounds: 'disc'|'rect'|'corridor'|'ring', extent: number }. A Hazard is { id, label, tickSeconds, effect: { moveMul?, attackSpeedMul?, hpPerSecond?, regenMul?, visionMul? } }. HAZARD LITERALS: whitedrift { moveMul: 0.80, attackSpeedMul: 0.85 }, verdantrot { hpPerSecond: -0.9, visionMul: 0.7 }, cinderwaste { regenMul: 0, hpPerSecond: -0.45 }, emberfall { hpPerSecond: -0.3 }. LIGHTING RULE from PERF: exactly one HemisphereLight + one DirectionalLight + the PMREM env per biome, ZERO PointLights. Mood comes from this table, not from extra lights."
+    },
+    {
+      "path": "src/game/biomebuild.js",
+      "status": "new",
+      "purpose": "The five layout kits that turn a Biome record into actual geometry. This is what replaces World.build's hardcoded CircleGeometry-plus-cylinder-wall for every biome. Nine biomes are built from five kits, which is what makes nine biomes affordable.",
+      "exports": [
+        "export function buildBiomeLayout(scene: THREE.Scene, biome: Biome, opts: { seed: number, rnd: () => number, quality: object, extent: number }) -> BiomeLayout",
+        "export function disposeBiomeLayout(layout: BiomeLayout) -> void",
+        "export const KITS = { corridor, cavern, openfield, tower, ruins }",
+        "export function kitFor(biome: Biome) -> (ctx: KitContext) => KitResult"
+      ],
+      "dependsOn": [
+        "src/game/biomes.js",
+        "src/world/terrain.js",
+        "src/world/navgrid.js",
+        "src/render/glow.js",
+        "src/world/citykit.js"
+      ],
+      "notes": "BiomeLayout is EXACTLY { group: THREE.Group, obstacles: Array<{pos:{x,z}, radius:number}>, boxes: Array<{x,z,w,d,rot}>, groundHeight: (x:number,z:number)=>number, groundNormal: (x,z,out)=>{x,y,z}, bounds: { kind:'disc'|'rect', radius?:number, minX?:number, maxX?:number, minZ?:number, maxZ?:number }, spawnPoints: THREE.Vector3[], bossAnchor: THREE.Vector3, playerStart: THREE.Vector3, navGrid: NavGrid, dispose: () => void }. World.build consumes exactly this shape \u2014 that contract is the single most important interface in this spec because three agents touch it. KIT BEHAVIOUR: 'corridor' = enclosed rooms joined by tunnels, flat ground, rect bounds, low ceiling planes (E/D); 'cavern' = one large irregular chamber, stalagmite pillars, crystal clusters (uses Crystal1-5 from the item pack), gentle heightfield floor, disc bounds (C); 'openfield' = Terrain heightfield, no ceiling, sky visible, disc bounds at 2.2x the current arena extent (A, whitedrift, verdantrot, cinderwaste); 'tower' = stacked circular floors with a central shaft and open sky above, rect bounds per floor (B); 'ruins' = broken slab architecture on a heightfield with a raised final platform, disc bounds (S)."
+    },
+    {
+      "path": "src/game/world.js",
+      "status": "modified",
+      "purpose": "Becomes a thin shell that delegates geometry to biomebuild and lighting/fog/sky to biomes, and loses its baked-in circular-arena assumptions.",
+      "exports": [
+        "export function mulberry32(seed: number) -> () => number",
+        "export class World { constructor(scene, renderer, camera, quality) }",
+        "World.prototype.build(gate: object, seed: number, biomeKey: string) -> void",
+        "World.prototype.clear() -> void",
+        "World.prototype.update(dt: number) -> void",
+        "World.prototype.resolve(pos, radius, vel) -> void",
+        "World.prototype.heightAt(x: number, z: number) -> number",
+        "World.prototype.groundNormal(x, z, out?) -> {x,y,z}",
+        "World.prototype.randomSpawn(rnd, minDistFrom, minDist = 14) -> THREE.Vector3",
+        "World.prototype.updateShadowCamera(target, extent = 14) -> void",
+        "World.prototype.contains(x: number, z: number, margin = 0) -> boolean",
+        "World.prototype.get navGrid() -> NavGrid",
+        "World.prototype.get bounds() -> object",
+        "World.prototype.get radius() -> number  // kept as a compat shim = bounding radius of bounds"
+      ],
+      "dependsOn": [
+        "src/game/biomes.js",
+        "src/game/biomebuild.js",
+        "src/render/env.js",
+        "src/render/sky.js",
+        "src/render/glow.js",
+        "src/core/quality.js"
+      ],
+      "notes": "build() now takes an explicit biomeKey (rolled by DungeonMode) instead of reading gate.biome, which is what makes anomaly gates possible. resolve() must delegate the boundary clamp to `bounds` \u2014 replace the radial `lim = this.radius - radius - 0.6` at world.js:309-316 with a kind switch. randomSpawn must return layout.spawnPoints entries rather than polar sampling. The `radius` getter is kept ONLY so the three external callers that assume a disc keep working during the transition (projectile culling at game.js:1070, boss spawn at game.js:283); those three are fixed to use contains()/bossAnchor in the same step."
+    },
+    {
+      "path": "src/render/env.js",
+      "status": "modified",
+      "purpose": "Fork the environment map per biome. buildBiomeEnvironment (env.js:109-116) currently returns the HDRI PMREM and IGNORES its `biome` argument whenever public/hdri/rift_sky.hdr loaded \u2014 which it always does \u2014 so all six biomes share one identical IBL today. Enclosed biomes must not be lit by an open sky HDRI.",
+      "exports": [
+        "export function loadHdri(url = 'hdri/rift_sky.hdr') -> Promise<THREE.Texture | null>",
+        "export function getHdriTexture() -> THREE.Texture | null",
+        "export function buildBiomeEnvironment(renderer: THREE.WebGLRenderer, biome: Biome) -> THREE.WebGLRenderTarget",
+        "export function disposeEnvironmentCache() -> void",
+        "export function environmentCacheStats() -> { entries: number, bytes: number }"
+      ],
+      "dependsOn": [
+        "src/game/biomes.js"
+      ],
+      "notes": "Cache by biome.key with an LRU of 3 entries \u2014 PMREM generation is ~40-80 ms on a mid-range phone and must happen during the gate-entry transition, never mid-run. Open-sky biomes (openfield, tower, ruins kits) use the HDRI PMREM tinted by palette; ENCLOSED biomes (corridor, cavern) use the existing synthesized makeEnvSource gradient at env.js:24-67, which is currently dead fallback code and is exactly right for a cave. This is the cheapest way to get six visibly different lighting moods without six HDRIs."
+    },
+    {
+      "path": "src/core/appstate.js",
+      "status": "new",
+      "purpose": "A screen state machine over the existing DOM divs. Today UI.show/hide (ui.js:65-66) are unguarded classList toggles with no exclusivity, and transitions are hardcoded callback chains split across main.js:15-32, ui.js:27-59 and game.js. Adding a city is not 'add a screen'; it needs a router first.",
+      "exports": [
+        "export const SCREENS = ['boot','title','city','gates','hud','levelup','pause','results','how','barracks','assay','trial']",
+        "export class AppState { constructor({ onEnter, onExit } = {}) }",
+        "AppState.prototype.go(screen: string, payload = {}) -> boolean",
+        "AppState.prototype.back() -> boolean",
+        "AppState.prototype.replace(screen: string, payload = {}) -> boolean",
+        "AppState.prototype.get current() -> string",
+        "AppState.prototype.get payload() -> object",
+        "AppState.prototype.is(screen: string) -> boolean",
+        "AppState.prototype.overlay(screen: string, on: boolean) -> void",
+        "AppState.prototype.guard(from: string, to: string, fn: () => boolean) -> void"
+      ],
+      "dependsOn": [],
+      "notes": "go() hides ALL screens in SCREENS then shows the target, so two screens can never both be visible \u2014 the current bug. `hud` and `pause` are OVERLAYS handled by overlay(), not exclusive screens. Maintains a bounded 8-entry back stack. onEnter(screen, payload, prev) and onExit(screen, next) are the hooks main.js uses to call game.enterCity()/game.startGate(). Android hardware back maps to back()."
+    },
+    {
+      "path": "src/game/modes/mode.js",
+      "status": "new",
+      "purpose": "The GameMode interface + registry. This is the contract that lets city and dungeon agents work without seeing each other's code.",
+      "exports": [
+        "export class GameMode { constructor(game) }",
+        "GameMode.prototype.enter(payload: object) -> void",
+        "GameMode.prototype.exit() -> void",
+        "GameMode.prototype.update(dt: number, rawDt: number) -> void",
+        "GameMode.prototype.updateCamera(dt: number) -> void",
+        "GameMode.prototype.resolveFor(entity: object) -> void",
+        "GameMode.prototype.get targetFps() -> number",
+        "GameMode.prototype.get name() -> string",
+        "export function registerMode(name: string, factory: (game) => GameMode) -> void",
+        "export function createMode(name: string, game) -> GameMode",
+        "export const MODE_NAMES = ['city','dungeon']"
+      ],
+      "dependsOn": [],
+      "notes": "Base class methods are no-ops so a partial implementation still runs. `update` receives the ALREADY time-scaled dt (hit-stop and level-up dilation stay in Game.update where they are today). Modes must never call renderer.render \u2014 Game.update keeps ownership of glow.render and quality.update."
+    },
+    {
+      "path": "src/game/modes/citymode.js",
+      "status": "new",
+      "purpose": "The hub game mode: walk the city, approach portals, interact with district services, no combat.",
+      "exports": [
+        "export class CityMode extends GameMode { constructor(game) }",
+        "CityMode.prototype.enter({ spawnAt = null } = {}) -> void",
+        "CityMode.prototype.exit() -> void",
+        "CityMode.prototype.update(dt, rawDt) -> void",
+        "CityMode.prototype.updateCamera(dt) -> void",
+        "CityMode.prototype.get targetFps() -> 30",
+        "CityMode.prototype.get name() -> 'city'",
+        "CityMode.prototype.get city() -> City",
+        "CityMode.prototype.get prompt() -> { kind: 'portal'|'interact', label: string, rank?: string, locked?: boolean } | null",
+        "CityMode.prototype.confirmPrompt() -> { action: 'enterGate', rank: string } | { action: 'open', id: string } | null"
+      ],
+      "dependsOn": [
+        "src/game/modes/mode.js",
+        "src/world/city.js",
+        "src/game/physics.js",
+        "src/ui/cityui.js",
+        "src/core/frameclock.js"
+      ],
+      "notes": "On enter: game.world.clear(), build the City, call game.player.body.setEnvironment(city.heightAt, city.resolve.bind(city), city.groundNormal) \u2014 physics.js was explicitly designed for this and is the one genuinely ready piece. Set frameClock.setTarget(30) and quality.setTargetFps(30). Camera gets a 3.2 m collision probe (raycast from player to desired camPos against city.obstacles, pull in on hit) and single-finger-drag yaw \u2014 the fixed camOffset at game.js:50 with no yaw control is acceptable in a disc arena and unacceptable in a city. Confirming a portal prompt calls game.enterGate(rank), which routes back through AppState."
+    },
+    {
+      "path": "src/game/modes/dungeonmode.js",
+      "status": "new",
+      "purpose": "A thin adapter that preserves the existing dungeon loop exactly. It calls back into Game's existing seven updaters rather than moving them, so game.js's combat, damage, spawn and XP code is not touched by this expansion.",
+      "exports": [
+        "export class DungeonMode extends GameMode { constructor(game) }",
+        "DungeonMode.prototype.enter({ rank: string, gateIndex: number, biomeKey: string, anomaly: boolean, seed: number }) -> void",
+        "DungeonMode.prototype.exit() -> void",
+        "DungeonMode.prototype.update(dt, rawDt) -> void",
+        "DungeonMode.prototype.updateCamera(dt) -> void",
+        "DungeonMode.prototype.get targetFps() -> 60",
+        "DungeonMode.prototype.get name() -> 'dungeon'",
+        "DungeonMode.prototype.get hazard() -> Hazard | null"
+      ],
+      "dependsOn": [
+        "src/game/modes/mode.js",
+        "src/game/biomes.js",
+        "src/game/difficulty.js",
+        "src/game/enemyai.js",
+        "src/game/shadows.js",
+        "src/core/frameclock.js"
+      ],
+      "notes": "update() calls game._updateDungeonFrame(dt) \u2014 the extracted block from game.js:697-714 \u2014 then applies the biome hazard tick. Sets frameClock.setTarget(60). enter() is the only place a biome is rolled: `const { key, anomaly } = rollBiome(rank, rnd)`, then game.world.build(gate, seed, key). Also spawns the deployed shadow roster via shadows.autoDeploy + game._spawnShadow, replacing the `for (let i = 0; i < this.save.shadows; i++)` loop at game.js:200."
+    },
+    {
+      "path": "src/game/difficulty.js",
+      "status": "new",
+      "purpose": "Per-rank enemy tuning, the boss-offset rule, and the anomaly modifier \u2014 so 'enemies must be genuinely difficult and difficulty scales with rank' is a table someone can tune, not numbers scattered through game.js.",
+      "exports": [
+        "export const RANK_PROFILES  // 6 entries keyed by rank",
+        "export function enemyPlanFor(gate: object, { anomaly = false, playerLevel = 1 } = {}) -> { level: number, mix: Array<{ type: string, weight: number }>, waveSize: number, total: number, spawnInterval: number, aggression: number, telegraphMul: number }",
+        "export function bossPlanFor(gate: object, { anomaly = false, playerLevel = 1 } = {}) -> { key: string, level: number, hpMul: number, atkMul: number, phases: number, adds: { type: string, count: number, atPhase: number } | null }",
+        "export function anomalyModifier(rank: string) -> { levelBonus: number, hpMul: number, atkMul: number, rewardMul: number }",
+        "export function rewardFor(gate: object, { anomaly = false, cleared = true, timeSeconds = 0 }) -> { xp: number, ash: number, dropRolls: number, luck: number }",
+        "export function overlevelPenalty(playerLevel: number, gateLevel: number) -> number"
+      ],
+      "dependsOn": [
+        "src/game/config.js"
+      ],
+      "notes": "RANK_PROFILES literal \u2014 these are the numbers that make the game hard: E{aggression:0.55, telegraphMul:1.35, spawnInterval:3.4, mix:[grunt 0.8, stalker 0.2]}, D{0.68, 1.20, 3.0, [grunt .55, stalker .3, brute .15]}, C{0.80, 1.05, 2.6, [grunt .35, stalker .3, brute .2, caster .15]}, B{0.92, 0.92, 2.2, [stalker .3, brute .25, caster .2, lancer .25]}, A{1.05, 0.82, 1.9, [brute .3, caster .25, lancer .25, howler .2]}, S{1.20, 0.72, 1.6, [brute .25, caster .2, lancer .25, howler .3]}. aggression multiplies enemy move speed and shortens attackCd; telegraphMul multiplies the wind-up duration (lower = less warning = harder). BOSS OFFSET RULE (from SYSTEMS): bossPlanFor returns level = gate.bossLevel, which config.js sets a full rank above gate.enemyLevel. anomalyModifier: { levelBonus: 6, hpMul: 1.35, atkMul: 1.25, rewardMul: 2.1 } for all ranks. overlevelPenalty returns an XP multiplier: 1.0 when within 3 levels, decaying to 0.25 at 15 levels over."
+    },
+    {
+      "path": "src/game/enemyai.js",
+      "status": "new",
+      "purpose": "Replace the inline three-branch steer-straight switch at game.js:831-871 with flow-field-aware steering, so enemies can navigate concave biome geometry and the city. Extracted as a module so the AI agent and the combat code do not collide.",
+      "exports": [
+        "export const BEHAVIORS = ['chase','lunge','ranged','flank','siege']",
+        "export function makeAgent(entity: object, behavior: string) -> Agent",
+        "export function steerAgent(agent: Agent, ctx: SteerContext, dt: number) -> { moveX: number, moveZ: number, wantAttack: boolean, yaw: number }",
+        "export function separate(entities: Array<object>, radiusScale = 1, maxPairs = 900) -> void",
+        "export function tickAggro(agent: Agent, ctx: SteerContext, dt: number) -> void"
+      ],
+      "dependsOn": [
+        "src/world/navgrid.js"
+      ],
+      "notes": "SteerContext is { navGrid: NavGrid | null, targetPos: {x,z}, selfPos: {x,z}, distance: number, losBlocked: boolean, aggression: number, dt: number }. steerAgent asks navGrid.flowAt first; if it returns false (outside grid / unreachable / no grid) it falls back to the straight-line steer that exists today, so this module degrades to current behaviour rather than breaking. separate() replaces _separate at game.js:996-1011 and MUST cap at maxPairs \u2014 the current O(n^2) is fine at 10 enemies and quadratic-fatal at the 30+ the city and S-rank gates imply. Two NEW archetypes for B+: 'lancer' (charges along the flow field, long telegraph, huge damage) and 'howler' (buffs nearby enemies' aggression, must be killed first)."
+    },
+    {
+      "path": "src/game/entities.js",
+      "status": "modified",
+      "purpose": "Collapse the humanoid from 15-17 draw calls to 6. makeHumanoid builds 10 base meshes plus weapon plus ring plus 2 health-bar meshes; at S-rank with 9 enemies + 12 shadows + boss + player that is ~350 draw calls for characters alone, against PERF's 120-call main-pass budget. This is PERF's 'pathA', ~40 lines, and it is the cheapest large win in the whole plan.",
+      "exports": [
+        "export function makeHumanoid({ color, glow, accent, weapon, cloak, scale, boss }) -> THREE.Group",
+        "export function animateRig(root, { moving, speed, t, attackPhase, hurt, airborne, riseRate }) -> void",
+        "export function makeGroundRing(color, radius = 0.8, opacity = 0.5) -> THREE.Mesh  // DEPRECATED shim, see notes",
+        "export function makeHealthBar(width = 1.2, color = 0xff2d55) -> THREE.Group  // DEPRECATED shim",
+        "export function setHealthBar(bar, ratio) -> void  // DEPRECATED shim",
+        "export class DecalPool { constructor(scene, { rings = 64, bars = 64 } = {}) }",
+        "DecalPool.prototype.acquireRing(color: number, radius: number) -> number",
+        "DecalPool.prototype.acquireBar(color: number, width: number) -> number",
+        "DecalPool.prototype.setRing(handle: number, x: number, y: number, z: number, visible: boolean) -> void",
+        "DecalPool.prototype.setBar(handle: number, x, y, z, ratio: number, visible: boolean) -> void",
+        "DecalPool.prototype.release(handle: number) -> void",
+        "DecalPool.prototype.update(camera: THREE.Camera) -> void",
+        "DecalPool.prototype.dispose() -> void",
+        "export function disposeEntityCache() -> void"
+      ],
+      "dependsOn": [
+        "src/render/glow.js",
+        "src/render/rim.js"
+      ],
+      "notes": "Merge torso+hips+head+shoulder into ONE geometry at module init (they never move relative to each other); eyes merge into a second tiny emissive geometry on GLOW_LAYER. Remaining moving parts: armL, armR, legL, legR, weapon. Result: 6 meshes. animateRig's call signature and behaviour MUST NOT CHANGE \u2014 game.js calls it in three places. Geometries and materials are cached per (color, glow, accent, weapon, scale) key and shared, which also fixes the leak: makeHumanoid currently allocates ~12 fresh geometries + ~6 materials per enemy and clearEntities (game.js:209) removes without disposing, orphaning ~600 geometries per S-rank run \u2014 under Android 17's per-app memory limiter that is a crash, not a slowdown. DecalPool replaces per-entity rings and bars with two InstancedMeshes for the whole scene, removing 3 draws per character."
+    },
+    {
+      "path": "src/game/game.js",
+      "status": "modified",
+      "purpose": "Surgical changes only. Gains a mode dispatch table, entity disposal, a restored GL context handler, and a corrected near plane. Its combat, damage, spawn, XP, projectile and pickup code is NOT touched \u2014 that is the whole point of the DungeonMode adapter.",
+      "exports": [
+        "export class Game { constructor({ canvas, input, audio, ui, saveData, onSave, appState, frameClock }) }",
+        "Game.prototype.update(rawDt: number) -> void",
+        "Game.prototype.enterCity({ spawnAt = null } = {}) -> void",
+        "Game.prototype.enterGate(rank: string, { forceBiome = null } = {}) -> void",
+        "Game.prototype.startGate(index: number) -> void  // kept as a compat wrapper over enterGate",
+        "Game.prototype._updateDungeonFrame(dt: number) -> void",
+        "Game.prototype.clearEntities({ dispose = true } = {}) -> void",
+        "Game.prototype.pause(on: boolean) -> void",
+        "Game.prototype.quit() -> void",
+        "Game.prototype.refreshDerived(fill = false) -> void",
+        "Game.prototype.resize() -> void",
+        "Game.prototype.get mode() -> GameMode",
+        "Game.prototype.get shadowsOnField() -> number"
+      ],
+      "dependsOn": [
+        "src/game/modes/mode.js",
+        "src/game/modes/citymode.js",
+        "src/game/modes/dungeonmode.js",
+        "src/game/progression.js",
+        "src/game/shadows.js",
+        "src/game/difficulty.js",
+        "src/game/world.js",
+        "src/game/entities.js",
+        "src/game/physics.js",
+        "src/core/appstate.js"
+      ],
+      "notes": "THE SIX EDITS, and nothing else: (1) update() becomes `this.mode?.update(step, rawDt)` in place of the seven hardcoded calls at game.js:697-714, with that block moved verbatim into _updateDungeonFrame. (2) clearEntities disposes geometry and materials (it currently only scene.remove's). (3) camera near 0.1 -> 1.0 at game.js:49 (a 4000:1 ratio wasting the depth buffer on a first metre nothing ever occupies; the camera sits 15.6 units back) and far 400 -> 520 for the city, with sky.js's hardcoded scale.setScalar(300) derived from camera.far instead. (4) add a 'webglcontextrestored' listener beside the existing 'webglcontextlost' one at game.js:120 that rebuilds the current world and unpauses \u2014 Android WebViews drop the context on backgrounding routinely and today that means a permanently frozen game after a phone call. (5) MAX_BOUND (game.js:15) and the literal 6 at game.js:1189 are deleted; capacity comes from progression.shadowFieldCapacity. (6) _spawnShadow takes a ShadowRecord instead of a bare position. Projectile culling at game.js:1070 uses world.contains(); boss spawn at game.js:283 uses world.bounds/bossAnchor."
+    },
+    {
+      "path": "src/main.js",
+      "status": "modified",
+      "purpose": "Wire the FrameClock, AppState and the city entry point. Replaces the aliasing accumulator loop and the hardcoded title -> gates -> run callback chain.",
+      "exports": [],
+      "dependsOn": [
+        "src/core/frameclock.js",
+        "src/core/appstate.js",
+        "src/game/game.js",
+        "src/ui/ui.js",
+        "src/render/models.js",
+        "src/ui/icons.js"
+      ],
+      "notes": "Boot now also awaits loadItemModels() alongside loadHdri() \u2014 the ASSETS research measured the merged GLB at 758 KB / ~406 KB deflated, which loads well inside the existing ~900 ms splash, so no new loading screen is needed. Title's primary button goes to 'city', not 'gates'. The gates LIST screen is retained as a fast-travel menu reachable from the Assay Hall, so players who do not want to walk are not forced to."
+    },
+    {
+      "path": "src/ui/ui.js",
+      "status": "modified",
+      "purpose": "Five stats instead of four, the shadow roster panel, the city prompt, and routing through AppState instead of calling game.pause() from inside the UI layer (ui.js:124 currently reaches into Game, an inversion that will break with modes).",
+      "exports": [
+        "export class UI { constructor({ audio, appState, onPlayGate, onEnterGate, onResume, onQuit, onReset, onPromote, onDeploy, onClaimDaily }) }",
+        "UI.prototype.attach(save) -> void",
+        "UI.prototype.show(id) -> void",
+        "UI.prototype.hide(id) -> void",
+        "UI.prototype.showHud(on: boolean) -> void",
+        "UI.prototype.showGates() -> void",
+        "UI.prototype.showPause() -> void",
+        "UI.prototype.showLevelUp(fromPause: boolean, leveled: boolean) -> void",
+        "UI.prototype.showResults(payload) -> void",
+        "UI.prototype.showBarracks() -> void",
+        "UI.prototype.showAssay() -> void",
+        "UI.prototype.updateHud(game) -> void",
+        "UI.prototype.setCityPrompt(prompt: object | null) -> void",
+        "UI.prototype.toast(text: string, kind?: string) -> void",
+        "UI.prototype.refreshTitle() -> void"
+      ],
+      "dependsOn": [
+        "src/game/config.js",
+        "src/game/progression.js",
+        "src/game/shadows.js",
+        "src/core/appstate.js",
+        "src/ui/icons.js"
+      ],
+      "notes": "index.html gains four screens: #barracks (roster list, deploy toggles, promote buttons, capacity readout 'ROSTER 14/23 \u00b7 FIELD 4/6'), #assay (daily contract, rank certification, fast-travel gate list, class trial entry at level 40), #cityPrompt (the floating 'ENTER E-GRADE PORTAL' button), and #trial. The stat grid in #levelup becomes 5 rows. Do NOT restyle the existing screens in this workstream \u2014 visual polish is step 17."
+    },
+    {
+      "path": "src/ui/cityui.js",
+      "status": "new",
+      "purpose": "The city's diegetic overlay: portal proximity prompt, district name banners, an on-screen compass to the nearest unlocked portal. Separate from ui.js so the city agent is not editing the same file as the progression agent.",
+      "exports": [
+        "export class CityUI { constructor({ root = document.body, onConfirm }) }",
+        "CityUI.prototype.setPrompt(prompt: { kind, label, rank?, locked? } | null) -> void",
+        "CityUI.prototype.setDistrict(name: string | null) -> void",
+        "CityUI.prototype.setCompass(angleRad: number, distance: number, color: number) -> void",
+        "CityUI.prototype.show(on: boolean) -> void",
+        "CityUI.prototype.dispose() -> void"
+      ],
+      "dependsOn": [],
+      "notes": "Pure DOM/CSS, no canvas. The confirm button must be at least 56 px and sit in the lower-right thumb arc, clear of the floating thumbstick zone (#stickZone). Portal prompt border colour comes from PORTAL_COLORS so the rank is readable without reading."
+    },
+    {
+      "path": "tools/build-items-glb.mjs",
+      "status": "new",
+      "purpose": "Convert the 106-model CC0 Quaternius pack into one meshopt GLB. The ASSETS research ran this end to end and measured the result: 758 KB raw, ~406 KB deflated in the APK, 90,861 triangles, 27 materials, all 106 node names intact.",
+      "exports": [
+        "// CLI: node tools/build-items-glb.mjs [--src <pack dir>] [--out public/models/items.glb] [--blender <path>]",
+        "export async function buildItemsGlb({ srcDir, outFile, blenderPath }) -> { file: string, bytes: number, models: number, triangles: number, materials: number }"
+      ],
+      "dependsOn": [],
+      "notes": "Blender is at /Applications/Blender.app/Contents/MacOS/Blender and is NOT on PATH \u2014 resolve via env GB_BLENDER, then that literal, then `blender`, and fail with an explicit message naming all three. THE NON-OBVIOUS BUG the research already hit: creating a handle Empty with the same name as the imported FBX root yields 'Sword001' and every getObjectByName returns null \u2014 rename imported objects to '<name>__part' FIRST. Pipeline is Blender headless (merge all 106 FBX into ONE scene, collapse to the 34-material palette) -> gltf-transform dedup -> prune -> gltfpack -cc -kn. The -kn flag is mandatory: gltfpack silently strips node names without it and produces a file that loads fine and is unusable. Use meshopt, NOT Draco: Draco is ~20 KB smaller but ships two loose files located at runtime via DRACOLoader.setDecoderPath(), and under Capacitor (https://localhost, base:'./') a wrong path is a silent on-device offline failure. public/models/items.glb MUST be committed \u2014 the source pack is gitignored (.gitignore line 8) and exists on exactly one Mac, so CI cannot regenerate it."
+    },
+    {
+      "path": "tools/pack-icons.mjs",
+      "status": "new",
+      "purpose": "Pack the 107 1000x1000 icon PNGs (31 MB) into one 1408x1280 WebP atlas (319 KB) plus a JSON index. A 99% reduction, and the whole inventory UI becomes one image.",
+      "exports": [
+        "// CLI: node tools/pack-icons.mjs [--src <pack Icons dir>] [--out public/models/]",
+        "export async function packIcons({ srcDir, outDir, cell = 128 }) -> { atlas: string, index: string, bytes: number, count: number }"
+      ],
+      "dependsOn": [],
+      "notes": "SHIP-BREAKER the research found: icon filenames disagree with model filenames by CASE ONLY (Axe_Small vs Axe_small, FishBone vs Fishbone, Sword_Big vs Sword_big). macOS APFS is case-insensitive so naive lookup works in dev and fails on Android and Linux CI. Normalise every key to lowercase in the index and add an explicit alias entry for Potion1_Filled, which has two icons (Blue/Red) and no exact name match. Emit public/models/icons.webp + public/models/icons.json, both committed."
+    },
+    {
+      "path": "src/render/models.js",
+      "status": "new",
+      "purpose": "Load and hand out meshes from the merged item GLB. The codebase currently has NO model loading of any kind (grep for GLTFLoader/FBXLoader/OBJLoader across src/, public/ and index.html returns nothing), so this is the first asset pipeline.",
+      "exports": [
+        "export async function loadItemModels(url = 'models/items.glb') -> Promise<boolean>",
+        "export function hasItem(name: string) -> boolean",
+        "export function getItemMesh(name: string, { scale = 0.4, clone = true } = {}) -> THREE.Object3D | null",
+        "export function listItems() -> string[]",
+        "export function itemBounds(name: string) -> { x: number, y: number, z: number } | null",
+        "export function disposeItemModels() -> void",
+        "export function itemModelStats() -> { loaded: boolean, roots: number, meshes: number, materials: number, triangles: number }"
+      ],
+      "dependsOn": [],
+      "notes": "Uses GLTFLoader + MeshoptDecoder from three/addons \u2014 both resolve in three@0.169.0, and Vite inlines the decoder's embedded wasm into the JS bundle, so it structurally cannot break offline. Name lookup is case-insensitive (normalise to lowercase on both sides). DEFAULT SCALE 0.4 IS DELIBERATE: models are ~2.5x oversized for this metre-scale world (Sword measures 0.53 x 2.30 x 0.12 on a ~1.8-unit humanoid). Weapons run along +Y, which already matches the HAND_SOCKET = {x:0, y:-0.72, z:0} convention in weapons.js, so socket attachment needs no reorientation. loadItemModels resolves false rather than throwing when the file is missing \u2014 the game must still boot with procedural weapons if the GLB failed to ship."
+    },
+    {
+      "path": "src/ui/icons.js",
+      "status": "new",
+      "purpose": "CSS sprite lookup for the icon atlas, so inventory/loot UI is one image and one HTTP request.",
+      "exports": [
+        "export const ATLAS_URL = 'models/icons.webp'",
+        "export async function loadIconIndex(url = 'models/icons.json') -> Promise<boolean>",
+        "export function iconStyle(name: string, size = 48) -> string",
+        "export function iconEl(name: string, size = 48) -> HTMLElement",
+        "export function hasIcon(name: string) -> boolean"
+      ],
+      "dependsOn": [],
+      "notes": "iconStyle returns a ready-to-assign inline style string (background-image/background-position/background-size). All keys lowercase. Returns a neutral placeholder cell when the name is unknown so a missing icon is a grey square, never a broken layout."
+    },
+    {
+      "path": "src/game/weapons.js",
+      "status": "modified",
+      "purpose": "Adopt the existing 872-line dead loot system and back it with real models from the item pack. Its own comment states the SWORD_COMBO table reproduces game.js's hardcoded sword exactly, so adoption is feel-neutral \u2014 this is the highest-value dead code in the repo and the natural consumer of the asset pack.",
+      "exports": [
+        "export const ARCHETYPES, RARITIES, RARITY_ORDER, AFFIXES, WEAPONS, WEAPON_LIST  // unchanged",
+        "export function rollDrop(rnd, { rankIndex = 0, level = 1, luck = 0 }) -> Weapon | null",
+        "export function rollWeapon(baseId, rnd, { rarity, level, luck }) -> Weapon",
+        "export function equipWeapon(root: THREE.Object3D, weapon: Weapon, { ghost = false } = {}) -> THREE.Object3D | null",
+        "export function unequipWeapon(root) -> void",
+        "export function currentWeapon(root) -> Weapon | null",
+        "export function serializeWeapon(w) -> object",
+        "export function deserializeWeapon(data) -> Weapon | null",
+        "export function weaponSummary(w) -> string",
+        "export function buildWeaponMesh(weapon, { ghost = false } = {}) -> THREE.Object3D",
+        "export function weaponModelName(weapon: Weapon) -> string",
+        "export function setModelSource(getMesh: (name: string, opts?: object) => THREE.Object3D | null) -> void"
+      ],
+      "dependsOn": [
+        "src/render/models.js",
+        "src/game/config.js"
+      ],
+      "notes": "ONLY TWO ADDITIONS: setModelSource() injects models.getItemMesh so weapons.js keeps its zero-dependency shape and its existing procedural builders remain the fallback; weaponModelName maps an archetype+rarity to a pack node name (sword->'Sword'/'Sword_Golden', greataxe->'Axe_Double'/'Axe_Double_Golden', daggers->'Dagger'/'Dagger_Golden', polearm-> has NO direct match in the pack, keep procedural). Everything else in this file is already written and tested-by-construction; do not rewrite it. Wire rollDrop into game.js's existing _updatePickups and persist via save.weapon/save.stash."
+    },
+    {
+      "path": "tools/smoke.mjs",
+      "status": "modified",
+      "purpose": "The gating test for every build step. Currently non-runnable on this Mac (hardcoded Linux chrome path, Linux output dir, port 4193 against a server on 5173).",
+      "exports": [
+        "// CLI: node tools/smoke.mjs [--city] [--gate <rank>] [--shots]"
+      ],
+      "dependsOn": [
+        "tools/_harness.mjs"
+      ],
+      "notes": "Rewritten on _harness. Must assert: zero pageerrors, canvas non-zero, title -> city transition, city prompt appears within 6 s of walking toward a portal, gate entry, 20 s of simulated combat, results screen, and a heap/geometry-count probe via window.__game (renderer.info.memory.geometries must not grow across three consecutive gate entries \u2014 that is the clearEntities leak regression test)."
+    },
+    {
+      "path": "tools/city-test.mjs",
+      "status": "new",
+      "purpose": "Verify the city hub specifically: reachability of all six portals, no fall-through, no camera clipping, draw-call budget.",
+      "exports": [
+        "// CLI: node tools/city-test.mjs [--walk-seconds 60]"
+      ],
+      "dependsOn": [
+        "tools/_harness.mjs"
+      ],
+      "notes": "Drives the player on a scripted walk to each portal in turn via window.__game.player.pos teleport + physics settle, asserting body.grounded true and heightAt agreement within 0.05 units at 200 sampled points. Reads renderer.info.render.calls each frame and FAILS if the p95 exceeds 220 in the city. Also asserts renderer.info.programs.length does not grow while walking \u2014 the PointLight.visible shader-recompile regression."
+    },
+    {
+      "path": "tools/biome-test.mjs",
+      "status": "new",
+      "purpose": "Screenshot all nine biomes and assert they are actually different.",
+      "exports": [
+        "// CLI: node tools/biome-test.mjs"
+      ],
+      "dependsOn": [
+        "tools/_harness.mjs"
+      ],
+      "notes": "Forces each biome via window.__game.enterGate(rank, { forceBiome }) and captures one shot each. FAILS if any two shots have a mean-colour distance below a threshold, or if scene.environment is the same WebGLRenderTarget object across an enclosed and an open-sky biome \u2014 that is the exact bug where the HDRI silently overrides all per-biome lighting."
+    },
+    {
+      "path": "tools/progression-test.mjs",
+      "status": "modified",
+      "purpose": "Headless Node test (no browser) of progression.js, shadows.js and save migration, since all three are deliberately THREE-free.",
+      "exports": [
+        "// CLI: node tools/progression-test.mjs"
+      ],
+      "dependsOn": [
+        "src/game/progression.js",
+        "src/game/shadows.js",
+        "src/core/save.js"
+      ],
+      "notes": "Asserts: level 1->100 consumes the expected cumulative XP; every level grants exactly 5 free points and +1 to all five stats; roster capacity is monotonic and caps at 120; field capacity caps at 12 and respects the quality tier; extractionChance stays inside [0.04, 0.95] across the full input domain; a v1 save with shadows:6 migrates to a 6-entry roster; a v2 save round-trips unchanged. Runs in Node with no Playwright, so it is the fastest gate in the suite."
+    },
+    {
+      "path": "tools/shadow-test.mjs",
+      "status": "new",
+      "purpose": "In-browser verification that the roster survives a run, deploys correctly, and does not blow the entity budget.",
+      "exports": [
+        "// CLI: node tools/shadow-test.mjs"
+      ],
+      "dependsOn": [
+        "tools/_harness.mjs"
+      ],
+      "notes": "Grants XP to level 40 via window.__game, dumps points into INT, enters an A-rank gate, asserts the number of live shadow entities equals shadowFieldCapacity and never exceeds it, kills enemies and asserts extraction attempts cap at 3 per corpse, then clears the gate and asserts the roster persisted to localStorage under the v2 key."
+    }
+  ],
+  "biomes": [
+    {
+      "rank": "E",
+      "name": "THE WARREN",
+      "portalColor": "#8B97C9 \u2014 dull bone-blue, the dimmest portal in the plaza",
+      "environment": "A plain dungeon, exactly as specified. Tight cut-stone corridors 4 m wide opening into three or four small chambers. Low ceiling planes overhead, no sky. Built from the 'corridor' kit with rect bounds. Deliberately unremarkable \u2014 this is the baseline every later biome is read against.",
+      "lighting": "Enclosed. Synthesized gradient IBL (not the HDRI), one dim hemisphere at 0.35, one weak key from directly above. Linear fog near 14 / far 40.",
+      "palette": [
+        "#0A0D1C fog",
+        "#1A1F38 ground",
+        "#7C5CFF accent",
+        "#05060D sky",
+        "#2A3050 pillar",
+        "#3A4468 detail"
+      ],
+      "enemyMix": "80% grunt, 20% stalker. Level 2 trash, level 6 boss (the boss-offset rule).",
+      "difficulty": "Trivial by design. Aggression 0.55, telegraph 1.35x \u2014 enemy wind-ups are a third longer than baseline so the player can actually learn to read them."
+    },
+    {
+      "rank": "D",
+      "name": "THE OSSUARY",
+      "portalColor": "#2AD4C0 \u2014 cold teal",
+      "environment": "Still a plain dungeon per the brief. Same 'corridor' kit, but the chambers are ossuary vaults: stacked bone alcoves along the walls (Skull, Skull2, Bone, FishBone from the item pack, instanced), collapsed floor sections, and a single long processional hall as the boss room. Structurally identical to E, dressed completely differently \u2014 which is the point: the player should feel the WORLD changed before the LAYOUT does.",
+      "lighting": "Enclosed. Synthesized IBL, warmer. Hemisphere 0.4, key raking low along the hall axis so the bone alcoves throw long shadows. Linear fog near 16 / far 46.",
+      "palette": [
+        "#140F14 fog",
+        "#2A2028 ground",
+        "#C2703A accent",
+        "#0B0709 sky",
+        "#3D2F36 pillar",
+        "#5A4238 detail"
+      ],
+      "enemyMix": "55% grunt, 30% stalker, 15% brute. Level 7 trash, level 12 boss.",
+      "difficulty": "First real threat. Aggression 0.68, telegraph 1.20x. Brutes introduce an attack the player cannot simply out-trade."
+    },
+    {
+      "rank": "C",
+      "name": "DEEPGLASS CAVERN",
+      "portalColor": "#4ADE80 \u2014 pale green",
+      "environment": "THE BRIEF SAID VARIATION STARTS HERE; THE RESEARCH SAYS C IS STILL A CAVE, AND I FOLLOWED THE RESEARCH \u2014 but split the difference structurally. This is one enormous open cavern rather than a corridor network: a rolling heightfield floor, stalagmite forests, a crystal ceiling far enough up to read as sky-substitute, and huge luminous crystal clusters (Crystal1-5 from the item pack, instanced and emissive on the glow layer) that are the only light source. Geologically still a cave, so canon holds. Visually a completely different KIND of place from E and D, so the player gets his step up at C. Built from the 'cavern' kit, disc bounds, extent 1.6x the current arena.",
+      "lighting": "Enclosed but vast. Synthesized IBL keyed to the crystal accent. Hemisphere 0.5, one cold key from a ceiling fissure, no rim. Exp2 fog density 0.018 \u2014 the first non-linear fog in the game, which alone makes the space read as bigger.",
+      "palette": [
+        "#0B1A26 fog",
+        "#1D3A4D ground",
+        "#66E0FF accent",
+        "#061219 sky",
+        "#2D5570 pillar",
+        "#8FF0FF detail"
+      ],
+      "enemyMix": "35% grunt, 30% stalker, 20% brute, 15% caster. Level 14 trash, level 21 boss.",
+      "difficulty": "Aggression 0.80, telegraph 1.05x. Casters force movement; the open cavern means there is nowhere to funnel enemies, so the flow-field AI flanks properly here for the first time."
+    },
+    {
+      "rank": "B",
+      "name": "EMBERFALL",
+      "portalColor": "#A78BFA \u2014 violet",
+      "environment": "THE REAL DISCONTINUITY. Open sky for the first time. A burning ruined tower: eight stacked circular floors around an open central shaft, each floor a separate arena with a stairwell up, collapsed sections you can fall through, and real sky visible overhead through the broken roof. Built from the 'tower' kit. This is the owner's 'burning tower', and it is also the checkpoint-boss tower MECHANIC from the research with none of the source work's specific setting \u2014 no real-world city, no 100 floors, no borrowed silhouette.",
+      "lighting": "Open sky. HDRI PMREM tinted hot. Hemisphere 0.45 (orange sky / dark ground), one strong low key at 2.4 intensity casting long shadows down the shaft. Exp2 fog density 0.011. Exposure raised to 1.4.",
+      "palette": [
+        "#1C0A06 fog",
+        "#36150D ground",
+        "#FF6B2B accent",
+        "#120503 sky",
+        "#4D1F12 pillar",
+        "#FFB067 detail"
+      ],
+      "enemyMix": "30% stalker, 25% brute, 20% caster, 25% lancer (new archetype). Level 24 trash, level 33 boss.",
+      "difficulty": "Aggression 0.92, telegraph 0.92x \u2014 wind-ups now shorter than baseline. Ambient hazard: -0.3 HP/sec from the heat, so lingering costs. Lancers charge along the flow field and one-shot a careless player. FIRST RANK WHERE ANOMALY GATES CAN ROLL (14% chance)."
+    },
+    {
+      "rank": "A",
+      "name": "THE RIVEN WASTE",
+      "portalColor": "#FFC24B \u2014 amber",
+      "environment": "A full open landscape. Shattered plateaus over a seeded heightfield with real elevation the player must climb and fight on, floating slabs, and torn sky. Built from the 'openfield' kit at 2.2x the current arena extent \u2014 this is the first biome where the player's CharacterBody actually matters (slopes, step height, sliding), which is why enemies get CharacterBody in the same step.",
+      "lighting": "Open sky. HDRI PMREM, violet-shifted. Hemisphere 0.4, one key at a low angle, one violet rim. Exp2 fog density 0.008 \u2014 the longest sightlines in the game.",
+      "palette": [
+        "#0D0618 fog",
+        "#1C1030 ground",
+        "#B14BFF accent",
+        "#070312 sky",
+        "#2C1A4A pillar",
+        "#D08AFF detail"
+      ],
+      "enemyMix": "30% brute, 25% caster, 25% lancer, 20% howler (new archetype). Level 37 trash, level 49 boss.",
+      "difficulty": "Aggression 1.05, telegraph 0.82x. Howlers buff nearby enemies' aggression and must be prioritised \u2014 the first fight that requires target selection rather than target proximity. 20% anomaly chance."
+    },
+    {
+      "rank": "S",
+      "name": "ARCHON'S REACH",
+      "portalColor": "#FF4D6D \u2014 crimson, and the only portal placed outside the city wall",
+      "environment": "A ruined citadel field: broken slab architecture on a heightfield rising toward a final raised platform. Built from the 'ruins' kit. RENAMED FROM THE REPO'S CURRENT 'MONARCH'S REACH' \u2014 'monarch' as the proper noun for a top-tier antagonist is the single closest string in this codebase to the source work, and 'archon' costs nothing to swap. Carries the hidden-second-boss beat from the research: the apparent boss on the platform is a phase gate, and the true opponent arrives after it falls.",
+      "lighting": "Open sky. HDRI PMREM, deep crimson. Hemisphere 0.35, one hard key, one crimson rim at 1.4. Exp2 fog density 0.010. Exposure 1.15 \u2014 the darkest biome, so the glow layer carries the readability.",
+      "palette": [
+        "#18050F fog",
+        "#2E0A1C ground",
+        "#FF2D6B accent",
+        "#0E0208 sky",
+        "#45102A pillar",
+        "#FF7A9E detail"
+      ],
+      "enemyMix": "25% brute, 20% caster, 25% lancer, 30% howler. Level 54 trash, level 70 boss.",
+      "difficulty": "Aggression 1.20, telegraph 0.72x. Two-phase boss with an add wave at phase 2. 26% anomaly chance. Requires level 42 to enter and realistically level 55+ to clear."
+    },
+    {
+      "rank": "B+ (anomaly roll)",
+      "name": "WHITEDRIFT",
+      "portalColor": "#FF7AF0 \u2014 unstable magenta-white, and the portal FLICKERS between this and its rank colour, which is the player's only warning",
+      "environment": "THE OWNER'S WINTER AREA. A frostbite snowfield under a white-out sky: drifts, buried ruins, ice shelves, near-zero visibility at distance. 'openfield' kit with a snow palette and heavy exp2 fog. Rolls in place of the canonical biome on any B, A or S gate. This is how the brief's 'sometimes a completely different landscape' is delivered without breaking the rank-to-biome logic \u2014 and it buys the genre's best tension beat (you scanned it as B and walked into a snowfield) for the cost of one boolean.",
+      "lighting": "Open sky, blown out. HDRI PMREM desaturated toward white. Hemisphere 0.8 (unusually high \u2014 snow bounce), one weak key, no rim. Exp2 fog density 0.030, the densest in the game. Exposure 1.5.",
+      "palette": [
+        "#C8D8E8 fog",
+        "#DCE8F2 ground",
+        "#7FB8E0 accent",
+        "#AFC6DC sky",
+        "#9FB4C8 pillar",
+        "#FFFFFF detail"
+      ],
+      "enemyMix": "Canonical mix for the host gate's rank, +6 levels, 1.35x HP, 1.25x attack.",
+      "difficulty": "Hazard: -20% move speed, -15% attack speed for the whole run. This is the research's glacier-world debuff mechanic, renumbered. Rewards 2.1x."
+    },
+    {
+      "rank": "B+ (anomaly roll)",
+      "name": "VERDANT ROT",
+      "portalColor": "#FF7AF0 flickering",
+      "environment": "THE OWNER'S FOREST. A poisonous overgrown jungle: canopy overhead breaking the sky into shafts, dense instanced fronds and trunks, root walls that make the space genuinely concave \u2014 this is the biome that proves the flow-field navigation, because straight-line steering is useless here. 'openfield' kit with a canopy layer and aggressive prop density.",
+      "lighting": "Filtered. HDRI PMREM heavily green-tinted, low intensity. Hemisphere 0.3, one key broken by canopy shadow, one sickly green rim. Exp2 fog density 0.022. Exposure 1.1.",
+      "palette": [
+        "#0A1A0E fog",
+        "#16301C ground",
+        "#7FE05C accent",
+        "#08140A sky",
+        "#254A2C pillar",
+        "#C8FF9E detail"
+      ],
+      "enemyMix": "Canonical mix for the host gate's rank, +6 levels, 1.35x HP, 1.25x attack. Caster weight doubled.",
+      "difficulty": "Hazard: -0.9 HP/sec ambient poison and -30% effective view distance. Rewards 2.1x."
+    },
+    {
+      "rank": "B+ (anomaly roll)",
+      "name": "CINDER WASTE",
+      "portalColor": "#FF7AF0 flickering",
+      "environment": "A scorching walled desert: dune heightfield, half-buried monolithic architecture, a blinding sky. 'openfield' kit. Completes the anomaly set with a third distinct silhouette and palette so the anomaly roll never feels repetitive.",
+      "lighting": "Blown-out open sky. HDRI PMREM warm-shifted, high intensity. Hemisphere 0.7, one very strong overhead key at 2.8, no rim. Exp2 fog density 0.006 with a heat-shimmer vertex wobble on distant geometry. Exposure 1.55.",
+      "palette": [
+        "#E0C89A fog",
+        "#D8B478 ground",
+        "#FF8C3A accent",
+        "#F0DCB0 sky",
+        "#B08A54 pillar",
+        "#FFE8B8 detail"
+      ],
+      "enemyMix": "Canonical mix for the host gate's rank, +6 levels, 1.35x HP, 1.25x attack. Brute weight doubled.",
+      "difficulty": "Hazard: all HP and MP regeneration disabled, -0.45 HP/sec. Consumables become mandatory, which is what makes the item pack's 22 potions matter. Rewards 2.1x."
+    }
+  ],
+  "progression": {
+    "headline": "Five stats, 5 free points AND +1 to every stat per level, cap 100. The auto +1 is the cheapest change in the whole spec and it is what makes early levels feel like the body itself is changing rather than a number going up. The repo currently gives 3 points, no auto grant, and has only four stats \u2014 all three are wrong relative to the genre and all three are fixed here.",
+    "levelCap": 100,
+    "pointsPerLevel": 5,
+    "autoStatPerLevel": "+1 to str, agi, vit, int AND per, every level, automatically",
+    "dailyContract": "+3 free points for completing one in-game daily objective (clear 3 gates, OR raise 3 shadows, OR land 30 perfect dodges \u2014 any one of the three counts). Local-date keyed, fully offline. Missing it costs nothing \u2014 no forced punishment dungeon; the optional high-risk survival arena from the research is deferred (see openQuestions).",
+    "xpCurve": {
+      "formula": "xpForLevel(level) = Math.floor(52 * Math.pow(level, 1.42))  \u2014 XP required to go FROM this level to the next",
+      "samples": {
+        "L2": 139,
+        "L5": 481,
+        "L10": 1368,
+        "L15": 2410,
+        "L20": 3667,
+        "L30": 6512,
+        "L40": 9792,
+        "L50": 13432,
+        "L60": 17109,
+        "L75": 24123,
+        "L100": 35880
+      },
+      "cumulativeToL40": "~178,000 XP",
+      "cumulativeToL100": "~1,420,000 XP",
+      "shape": "Deliberately sub-exponential (~L^1.42). The research's fan-compiled power table is roughly LINEAR at ~+5 power per level; the exponential FEEL in the genre comes from enemy rank tiering, not from the player curve. Reproducing an exponential player curve here would make the last 40 levels unplayable."
+    },
+    "totalPointsAvailable": {
+      "freePointsAtL100": "99 levels x 5 = 495",
+      "autoStatsAtL100": "99 (applied to every stat simultaneously)",
+      "dailyPointsPerYear": "365 x 3 = 1095 theoretical, realistically 100-200 for an engaged player",
+      "effectiveMaxSingleStat": "99 (auto) + 495 (all-in) = 594, before dailies"
+    },
+    "stats": [
+      {
+        "key": "str",
+        "name": "STRENGTH",
+        "perPoint": "+2.4 attack power, +0.6% attack speed (attack-speed cap 30%)",
+        "role": "The flat damage stat. Also scales the combo finisher."
+      },
+      {
+        "key": "agi",
+        "name": "AGILITY",
+        "perPoint": "+0.09 move speed, +0.55% crit rate (cap 55%), +0.35% crit damage, +4 ms perfect-dodge window",
+        "role": "Base dodge window 110 ms, cap 260 ms. TYING THE DODGE WINDOW TO AGILITY IS THE POINT \u2014 it makes the stat felt in the hands rather than read on a panel. This is the single best stat-design idea in the research and it costs almost nothing."
+      },
+      {
+        "key": "vit",
+        "name": "VITALITY",
+        "perPoint": "+11 max HP, +0.05 HP regen/sec, +0.18% flat damage reduction (cap 45%)",
+        "role": "Survivability. The repo's existing +11 max HP is already correct in shape; the damage-reduction term is new and is what makes VIT viable at A and S rank where raw HP cannot keep up."
+      },
+      {
+        "key": "int",
+        "name": "INTELLECT",
+        "perPoint": "+7 max MP, +0.16 MP regen/sec, +0.45% cooldown reduction (cap 40%), +0.35 shadow roster capacity, +1.1% shadow damage",
+        "role": "THE SUMMONER STAT. Making INT govern both the shadow army's SIZE and its STRENGTH is canon-accurate (two independent statements in the research) and is what turns the stat page into a genuine build fork rather than five sliders that all mean 'more damage'."
+      },
+      {
+        "key": "per",
+        "name": "PERCEPTION",
+        "perPoint": "+1.2% damage floor, +8 ms enemy telegraph lead, +0.4% shadow extraction chance",
+        "role": "THE STAT MISSING FROM THE REPO ENTIRELY, and the most mechanically distinctive one available. It is a damage-FLOOR stat, not a crit stat: it compresses the low end of the damage roll upward (base floor 55% of max roll, cap 92%). Nothing else in the codebase does this. Second effect: higher PER makes enemy wind-up tells appear EARLIER and more visibly (base 120 ms lead, cap 520 ms) \u2014 an abstract number turned into a readable perceptual change. Third: it raises shadow extraction success."
+      },
+      {
+        "key": "\u2014",
+        "name": "RESPEC",
+        "perPoint": "respecCost(save) = 80 + 14 x (total allocated points), paid in Ash",
+        "role": "There is no respec in the source fiction, but the licensed game allows an escalating-cost reset and a mobile audience needs one. Escalating cost keeps it from being free experimentation."
+      }
+    ],
+    "shadowArmy": {
+      "twoCapacities": "THE KEY DESIGN CALL. Canon's single number (20, then a story-gated jump to 100,000+) is both a dead progression axis for most of the game and a hard Android performance hazard. Split it: ROSTER capacity is how many shadows you OWN and persist; FIELD capacity is how many stand on the battlefield at once.",
+      "rosterCapacity": {
+        "formula": "min(120, 6 + floor(INT_effective * 0.35) + floor(level * 0.6))",
+        "samples": {
+          "L1 INT0": 6,
+          "L12 INT31 (summon unlock)": 23,
+          "L20 INT60": 39,
+          "L40 INT139": 78,
+          "L60 INT220": 115,
+          "L80+ any": 120
+        },
+        "note": "Smooth, monotonic, and INT-driven \u2014 so 'how big is my army' is an actual build decision rather than a story flag."
+      },
+      "fieldCapacity": {
+        "formula": "clamp(2 + floor(level/8) + floor(INT_effective/40), 2, 12) then clamped again by qualityTier.maxFieldShadows (low 4, medium 6, high 9, ultra 12)",
+        "samples": {
+          "L1": 2,
+          "L12 INT31": 3,
+          "L24 INT80": 7,
+          "L40 INT139": 10,
+          "L56+ INT200+": 12
+        },
+        "note": "12 shadows x 6 draw calls each = 72 draw calls, which fits inside PERF's 120-call main-pass budget alongside the world. The current repo cap of 6 (MAX_BOUND, game.js:15) with 15-17 draw calls per character is already over budget today."
+      },
+      "extraction": {
+        "cost": "ZERO mana \u2014 extraction is free to attempt, which is canon-correct and also removes a resource-management chore from a mobile control scheme",
+        "attemptsPerCorpse": 3,
+        "corpseWindow": "12 seconds (corpses already exist in game.js as _updateCorpses)",
+        "formula": "clamp(tierWeight x levelFactor x decay x attemptPenalty + PER x 0.004, 0.04, 0.95)",
+        "terms": {
+          "tierWeight": "0.62 trash / 0.45 elite / 0.22 boss",
+          "levelFactor": "clamp(1 + (playerLevel - enemyLevel) x 0.03, 0.4, 1.6)",
+          "decay": "max(0.25, 1 - secondsSinceDeath / 12)  \u2014 'proportional to time elapsed since death', made numeric",
+          "attemptPenalty": "1 - attemptIndex x 0.18  (so attempts run 100% / 82% / 64% of base)"
+        },
+        "workedExample": "Level 20 player, PER 25, fresh grunt corpse at enemy level 14: 0.62 x 1.18 x 1.0 x 1.0 + 0.10 = 0.83. Same player on a level-33 boss corpse 6 s dead, second attempt: 0.22 x 0.61 x 0.5 x 0.82 + 0.10 = 0.155."
+      },
+      "grades": {
+        "ladder": "7 grades, ORIGINAL naming built from the repo's own existing 'Cinderbound' UI copy: CINDER (x0.55) -> THRALL (x0.75) -> SOLDIER (x1.00) -> VANGUARD (x1.35, max 24) -> CHAMPION (x1.80, max 8) -> WARLORD (x2.50, max 3) -> ASHEN FIRST (x4.00, max EXACTLY ONE)",
+        "promotionCost": "ash = round(120 x 2.2^grade) -> 120, 264, 581, 1278, 2812, 6186; and requires playerLevel >= 8 x (grade + 1) -> 8, 16, 24, 32, 40, 48",
+        "strengthFormula": "atk = ENEMY_TYPES[type].atk x gradeMul x (1 + INT x 0.011) x (1 + level x 0.05); hp = ENEMY_TYPES[type].hp x gradeMul x (1 + level x 0.06)",
+        "note": "Shadow strength scales off the OWNER's INT and level rather than being fixed per shadow \u2014 canon-accurate, and it means an early shadow you keep and promote stays relevant, which is what makes the roster feel like an army rather than a consumable."
+      },
+      "deathPenalty": "Dying no longer halves the count blindly (game.js:1211). It releases the WEAKEST floor(roster/4) shadows by grade \u2014 you lose recruits, never your Warlord. Losing an irreplaceable named shadow to a bad run is the fastest way to make a player stop taking risks."
+    },
+    "gateUnlocks": {
+      "E": "level 1",
+      "D": "level 5",
+      "C": "level 11",
+      "B": "level 19",
+      "A": "level 29",
+      "S": "level 42",
+      "note": "Deliberately gentler than the repo's current 1/4/9/16/25/36 because the XP curve is steeper and each gate is now much longer."
+    },
+    "rankLadder": {
+      "E": "1-7",
+      "D": "8-15",
+      "C": "16-24",
+      "B": "25-36",
+      "A": "37-52",
+      "S": "53-70",
+      "SOVEREIGN": "71-100",
+      "note": "The repo's rankOf() returns 'S' at level 40, which collides with the class-trial beat that also lands at 40. Pushing S to 53 and adding an above-the-ladder tier at 71 matches the research's structure: the world reclassifies you as top-rank at roughly 60% of the bar, and the last 30 levels are spent outgrowing the ladder entirely."
+    },
+    "classTrial": {
+      "trigger": "Fires once, at level 40, as a scripted solo gate that appears in the Assay Hall. Not a menu choice.",
+      "structure": "An original architectural interior (a sealed vault beneath the Assay Hall) populated by escalating animated constructs, culminating in a single commander.",
+      "scoring": "Survival time buys the tier of the outcome: <60 s = base class, 60-149 s = advanced, >=150 s = the unique summoner class. Class quality is a function of endurance under escalating pressure, not a dialogue choice \u2014 this is the single highest-leverage set-piece the research identified and it is nearly free to build on top of the existing wave spawner.",
+      "reward": "The commander becomes the player's first ASHEN FIRST shadow, permanently. Plus a title, +8 free stat points, and the roster-capacity formula unlocks its INT term."
+    }
+  },
+  "cityHub": {
+    "name": "THRESHOLD",
+    "concept": "A working town grown around a permanent gate cluster \u2014 the place hunters live between runs. Original setting, no borrowed names or locations. Roughly 340 x 340 m of walkable ground on a gently rolling heightfield with flattened plazas, bounded by a wall on three sides and a cliff on the fourth. Small enough to cross in ~50 seconds at run speed, dense enough that there is always something within 15 m.",
+    "technicalShape": {
+      "chunking": "A 64 m grid \u2014 6 x 6 = 36 chunks, one THREE.Group each, toggled with Group.visible. three's projectObject early-returns on visible===false, so an invisible chunk is pruned from scene traversal, shadow collection AND the second glow-pass traversal. Visible radius comes from qualityTier.cityChunkRadius (2 on low, 4 on ultra).",
+      "geometry": "Buildings are merged BufferGeometry per chunk with per-piece tint baked into a vertex colour attribute (the same technique overworld.js already used for terrain). Street props are InstancedMesh ACROSS chunks \u2014 one lamp mesh, one bench mesh, one bollard mesh, etc., 9 instanced meshes covering 2000+ props. Target: under 40 draw calls for the entire visible city.",
+      "lighting": "One HemisphereLight, one DirectionalLight, one PMREM environment. ZERO PointLights anywhere \u2014 overworld.js:293 toggled PointLight.visible, which mutates NUM_POINT_LIGHTS, which is part of three's program cache key, causing shader recompiles as the player walks. Portal glow is emissive geometry on the existing GLOW_LAYER instead.",
+      "navigation": "NavGrid at 2 m cells over the whole city (170 x 170 = 28,900 cells), baked once at build with building boxes rasterised properly (not as circles \u2014 circles around a long building block would seal the streets). Ambient NPCs consume the flow field.",
+      "ground": "Terrain heightfield with addFlat() carving level pads under every plaza and building, so the visual mesh, collision and nav grid cannot disagree.",
+      "framerate": "Locked 30 fps in the city (frameClock.setTarget(30)), 60 in gates. There is NO combat in the city, so the 30/60 discontinuity PERF flags as a feel risk does not apply here \u2014 that risk only materialises if combat is later added to the hub, which this spec does not do.",
+      "camera": "Third-person with single-finger-drag yaw (the current fixed camOffset with no yaw control is fine in a disc arena and unusable in a city) and a 3.2 m collision probe that pulls the camera in when a building is between it and the player."
+    },
+    "districts": [
+      {
+        "id": "plaza",
+        "name": "THE GATE PLAZA",
+        "position": "Centre of the map, the player's spawn point",
+        "what": "A wide circular flagstone plaza. Five portals stand on a ring at 22 m radius \u2014 E, D, C, B, A \u2014 each a 5 m standing oval of colour-matched energy above a stone dais, with a floating rank glyph and a locked/unlocked state. Walking within 3.5 m raises the confirm prompt. Locked portals are visibly dimmed with a level requirement etched on the dais.",
+        "why": "The single screen that has to sell the whole game. Six colours, six difficulties, all readable from one standing position."
+      },
+      {
+        "id": "breach",
+        "name": "THE BREACH",
+        "position": "Outside the north wall, up a switchback path, ~110 m from the plaza",
+        "what": "The S-rank portal, alone, on a cracked platform beyond the city's protection. Crimson, twice the size of the others, with a physically larger dais and a visible distortion shader on the surrounding air.",
+        "why": "Gate size scaling with rank is canon and free tension. Making the player physically walk out past the wall to reach it does more for its weight than any number in a table."
+      },
+      {
+        "id": "ashworks",
+        "name": "THE ASHWORKS",
+        "position": "East of the plaza, 40 m",
+        "what": "The shadow barracks. The player's roster stands physically in the yard \u2014 up to 12 rendered shadow figures, the rest represented as a count on the door. Interacting opens the barracks screen: deploy toggles, promotion, release, capacity readout ('ROSTER 14 / 23 \u00b7 FIELD 4 / 6').",
+        "why": "The army is the fantasy's payload. Seeing them standing there, and seeing the yard fill up as capacity grows, is worth more than any UI list \u2014 and the 12-figure cap is exactly the field capacity, so it costs nothing extra to render."
+      },
+      {
+        "id": "assay",
+        "name": "THE ASSAY HALL",
+        "position": "North of the plaza, 35 m",
+        "what": "The hunters' association building. Daily contract board (+3 stat points), rank certification (shows the player's current grade and the next threshold), the fast-travel gate list (the existing #gates screen, retained so players who do not want to walk are never forced to), and \u2014 at level 40 \u2014 the sealed stair down to the class trial.",
+        "why": "Everything administrative in one place, so the plaza stays about portals."
+      },
+      {
+        "id": "exchange",
+        "name": "THE EXCHANGE",
+        "position": "South of the plaza, 30 m, along a short market street",
+        "what": "Sell loot for Ash, buy consumables (the item pack's 22 potions become real inventory here), and the stash. This is where the adopted weapons.js loot system surfaces to the player.",
+        "why": "Gives Ash a sink, gives the item pack a purpose beyond weapon models, and makes the Cinder Waste anomaly's regen-disabled hazard meaningful because potions are now a thing you buy in advance."
+      },
+      {
+        "id": "row",
+        "name": "QUARTER ROW",
+        "position": "West, 45 m, a residential street running to the cliff overlook",
+        "what": "No services \u2014 pure ambience. Housing modules, washing lines, lamp posts, 8-14 ambient NPC walkers on the flow field, and an overlook at the end with a view down the cliff. One bench the player can sit on.",
+        "why": "A city with only shops is a menu with a camera. This district exists so the place reads as somewhere people live, and it is the cheapest district to build because it is entirely instanced kit pieces with no interaction logic."
+      }
+    ],
+    "portalPlacement": "Harvested from overworld.js's ring logic but re-authored: E/D/C/B/A on one plaza ring at 22 m with fixed compass positions (so muscle memory forms), S outside the wall. Each portal is a Group containing a merged dais geometry, an emissive oval on GLOW_LAYER, a slowly rotating ring, and a ground marker \u2014 4 meshes each, 24 total for the whole plaza.",
+    "anomalyTell": "When a gate rolls anomalous, its portal FLICKERS between its rank colour and #FF7AF0 before entry. That flicker is the player's only warning that the interior will not match the badge \u2014 rank is a sensor reading taken from outside, and it can be wrong. One boolean, one shader uniform, and the genre's best surprise beat.",
+    "whatThePlayerCanDo": [
+      "Walk, run and jump around 340 x 340 m with real terrain elevation",
+      "Enter any of six colour-coded rank portals by walking up to them",
+      "Manage the shadow roster in the Ashworks, and see the army physically standing in the yard",
+      "Claim the daily contract and check rank certification at the Assay Hall",
+      "Sell loot, buy potions and use the stash at the Exchange",
+      "Use the fast-travel gate list if they do not want to walk",
+      "Enter the class trial at level 40",
+      "Sit on a bench at the cliff overlook and watch the sky shader, which is already the nicest thing in the renderer and has never been visible for more than 90 seconds at a time"
+    ]
+  },
+  "buildOrder": [
+    "STEP 1 \u2014 REPAIR THE TEST HARNESS. Write tools/_harness.mjs; rewrite all 15 tools in tools/ to import PORT/OUT/launchBrowser from it; add the five npm scripts. VERIFY: `npm run smoke` completes on this Mac against the real vite port and writes screenshots to a real directory. Nothing else in this plan can be verified until this passes, and today literally nothing in tools/ runs (every file hardcodes /opt/pw-browsers/chromium-1194/chrome-linux/chrome and a different wrong port). This is a half-day and it gates everything.",
+    "STEP 2 \u2014 FIX FRAME PACING AND THE QUALITY GOVERNOR. Add src/core/frameclock.js; replace the accumulator in src/main.js:103-116; make src/core/quality.js thresholds relative to targetFps. VERIFY: a headless test that fakes 60/72/90/120/144 Hz rAF intervals and asserts the rendered-frame rate lands within 2 fps of the 60 target in every case, and that the tier does not ratchet down. THIS MUST BE STEP 2. On a 90 Hz phone the game currently renders every 2nd callback (45 fps) and quality.js:117's `fps < 46` then pins the device to 'low' permanently \u2014 every performance measurement anyone has ever taken on this game on a 72/90/144 Hz Android is invalid until this lands.",
+    "STEP 3 \u2014 STOP THE LEAKS. Make Game.clearEntities dispose geometries and materials; cache geometry/material in makeHumanoid; raise camera near 0.1 -> 1.0; add the webglcontextrestored handler. VERIFY: extend tools/smoke.mjs to enter and clear the E gate three times and assert renderer.info.memory.geometries and .textures do not grow between iterations. Today makeHumanoid allocates ~12 geometries + ~6 materials per enemy and clearEntities only scene.remove's them \u2014 ~600 orphaned geometries per S-rank run, which under Android 17's per-app memory limiter is a crash rather than a slowdown.",
+    "STEP 4 \u2014 SAVE SCHEMA V2 AND PROGRESSION MATH. Write src/core/save.js v2 + migrate(), src/game/progression.js, src/game/shadows.js; update src/game/config.js with the fifth stat, POINTS_PER_LEVEL 5, AUTO_STAT_PER_LEVEL 1, the new xp curve, the new rankOf, the archon rename, and the restructured GATES table. VERIFY: `node tools/progression-test.mjs` \u2014 pure Node, no browser, runs in under a second. Assert the L1->L100 curve, 5 points + 5 auto per level, capacity monotonicity, extraction chance bounds, and that a v1 save with shadows:6 migrates to a 6-entry roster. This step is entirely THREE-free and can run fully in parallel with steps 5-7.",
+    "STEP 5 \u2014 HUMANOID DRAW-CALL COLLAPSE. Merge the static humanoid parts (torso+hips+head+shoulder into one geometry, eyes into one emissive geometry), add DecalPool for instanced rings and health bars, keep animateRig's signature byte-identical. VERIFY: tools/smoke.mjs logs renderer.info.render.calls during a full E-rank run and asserts per-character cost dropped from ~15 to <=6, with no visual regression in the screenshots. ~40 lines of real work for a 55% cut on every character in the game \u2014 the cheapest large win available, and a prerequisite for both the city crowds and 12 field shadows.",
+    "STEP 6 \u2014 NAVIGATION. Write src/world/navgrid.js and src/game/enemyai.js; swap game.js's inline three-branch AI switch (game.js:831-871) and _separate (game.js:996-1011) for calls into enemyai. VERIFY: a headless Node test of NavGrid alone \u2014 build a U-shaped wall, set a goal inside the U, assert flowAt() from outside routes around rather than into it. Then run the existing arena smoke test and confirm enemy behaviour is unchanged (flowAt returns false in a convex disc with no grid, so the fallback path is exactly today's code). This is the piece that makes every concave biome and the city possible; do it before either.",
+    "STEP 7 \u2014 THE CITY, GEOMETRY ONLY. Write src/world/citykit.js and src/world/city.js. No modes, no gameplay \u2014 just City.build() into the existing scene, exercised by a throwaway harness page. VERIFY: `node tools/city-test.mjs` asserts draw calls p95 <= 220, renderer.info.programs.length does not grow during a scripted walk (the PointLight shader-recompile regression), and heightAt agrees with the visual mesh within 0.05 units at 200 sampled points. THEN delete src/world/overworld.js and ow-test.mjs. Not before \u2014 leaving 353 lines of never-executed lookalike code in the tree is how an agent ends up wiring the wrong file. THIS IS THE LARGEST SINGLE STEP: budget a week.",
+    "STEP 8 \u2014 MODE DISPATCH. Write src/core/appstate.js, src/game/modes/mode.js, src/game/modes/dungeonmode.js. Extract game.js:697-714 verbatim into Game._updateDungeonFrame and replace it with this.mode.update(step, rawDt). Register only the dungeon mode. VERIFY: full smoke test passes with ZERO behavioural difference \u2014 this step is a pure refactor and any visible change is a bug. Landing it separately from CityMode is what makes the refactor reviewable.",
+    "STEP 9 \u2014 CITY MODE. Write src/game/modes/citymode.js and src/ui/cityui.js; wire AppState so title -> city -> portal -> gate -> results -> city. Bind the player's CharacterBody to the city via setEnvironment (physics.js was explicitly built for exactly this and is the one genuinely ready piece in the repo). Add camera yaw and the collision probe. VERIFY: `node tools/city-test.mjs --walk-seconds 60` walks to all six portals, asserts body.grounded stays true, the prompt appears within 3.5 m, and entering returns the correct rank. Also assert no fall-through at 200 random spawn points.",
+    "STEP 10 \u2014 BIOME DATA AND KITS. Write src/game/biomes.js and src/game/biomebuild.js with the five kits; rewrite World.build to delegate to them and to drop the radial-clamp assumption; fork src/render/env.js per biome. Fix the three non-World files that assume a disc (projectile culling game.js:1070, boss spawn game.js:283, randomSpawn). VERIFY: `node tools/biome-test.mjs` screenshots all nine biomes and FAILS if any two have a mean-colour distance below threshold or share the same environment render target across an enclosed/open-sky pair. That second assertion is the specific bug where the shipped HDRI silently overrides all per-biome lighting \u2014 buildBiomeEnvironment (env.js:109-116) currently ignores its biome argument entirely. BUDGET A WEEK; nine biomes is the second-largest step.",
+    "STEP 11 \u2014 DIFFICULTY AND ANOMALY GATES. Write src/game/difficulty.js; wire enemyPlanFor/bossPlanFor into _spawnEnemy and _spawnBoss; add the two new archetypes (lancer, howler) to ENEMY_TYPES; roll the biome in DungeonMode.enter and add the portal flicker tell. VERIFY: a scripted run through all six ranks logging enemy level, boss level, kill time and player deaths; assert boss level is a full rank above trash level in every gate, and force an anomaly roll to confirm the hazard applies and rewards multiply by 2.1.",
+    "STEP 12 \u2014 SHADOW ARMY IN PLAY. Wire shadows.js into the game: extraction on corpses (3 attempts, 12 s window, zero mana), roster persistence, autoDeploy on gate entry, field capacity enforcement, the Ashworks screen, promotion and release. Delete MAX_BOUND (game.js:15) and the hardcoded 6 at game.js:1189. VERIFY: `node tools/shadow-test.mjs` \u2014 level to 40, dump INT, enter A-rank, assert live shadow count equals shadowFieldCapacity exactly and never exceeds it, assert extraction caps at 3 per corpse, clear the gate and assert the roster persisted under the v2 key.",
+    "STEP 13 \u2014 ITEM PACK CONVERSION. Write tools/build-items-glb.mjs and tools/pack-icons.mjs; run both; COMMIT public/models/items.glb, icons.webp and icons.json. VERIFY: a Node script parses items.glb through GLTFLoader + MeshoptDecoder and asserts 106 scene roots with names intact ('Sword', 'Chest_Open', 'Armor_Black' all resolve), ~90,861 triangles, and that every icon index key is lowercase. The name-intact assertion is not optional \u2014 gltfpack silently strips node names without -kn and produces a file that loads without error and is completely unusable.",
+    "STEP 14 \u2014 MODEL LOADING AND LOOT. Write src/render/models.js and src/ui/icons.js; preload in main.js's existing boot sequence alongside loadHdri; adopt src/game/weapons.js by adding setModelSource and weaponModelName only; wire rollDrop into the existing _updatePickups; persist save.weapon and save.stash; build the Exchange screen. VERIFY: smoke test picks up a drop, equips it, and screenshots confirm a real model in the hand at the correct scale (0.4x \u2014 the pack's Sword is 2.30 units on a ~1.8-unit humanoid). Also verify the game still boots with public/models/ deleted, falling back to procedural weapons.",
+    "STEP 15 \u2014 ENEMIES AND SHADOWS GET BODIES. Give every enemy and shadow a CharacterBody via attachBody instead of the manual integration at game.js:874-880 and game.js:1050-1052. They are currently hard-pinned to y=0 with no gravity and no ground sampling, so on any biome with elevation they float and clip. VERIFY: enter the Riven Waste and Whitedrift (the two heightfield biomes), assert every entity's y is within 0.1 of world.heightAt(x,z) across 600 frames, and that none fall through. This is deliberately AFTER the biomes exist, because it cannot be tested before them.",
+    "STEP 16 \u2014 UI PASS. Five-stat allocation grid, roster panel, city prompt, Assay and Exchange screens, HUD readouts for hazard state and field-shadow count, Android hardware back mapped to AppState.back(). VERIFY: full smoke test navigates every screen and asserts AppState never leaves two exclusive screens visible simultaneously \u2014 the current UI.show/hide (ui.js:65-66) are unguarded classList toggles with no exclusivity and this is a real bug today.",
+    "STEP 17 \u2014 VISUAL POLISH PASS. Per-biome fog models and exposure, sky star/aurora tuning (World.build currently never passes makeSky's tuning parameters, so all six skies are identical at stars=1.0 aurora=0.55), portal shaders, glow-layer budget, and a lighting review of all nine biomes side by side. VERIFY: tools/biome-test.mjs screenshots plus a human look. This is the step that decides whether it reads as a released game, and it is the step most likely to get cut under time pressure \u2014 protect it.",
+    "STEP 18 \u2014 APK VALIDATION. `npm run apk`; install on a real mid-range device (Poco X4 Pro / Redmi Note 12 / Galaxy A34 class). VERIFY ON HARDWARE: 30 fps sustained in the city and 60 in combat after 10 minutes of continuous play (assume 25-35% thermal loss from cold), APK under 20 MB, models load offline with airplane mode on, no context loss after backgrounding and returning, and a 45-minute session with repeated S-rank runs that does not get killed by Android's memory limiter. NOTHING IN THIS PLAN IS DONE UNTIL THIS PASSES \u2014 Capacitor WebView has documented cases of running the same content slower than Chrome on the same device, and no desktop number predicts it."
+  ],
+  "risks": [
+    "THE FOUR DEAD FILES ARE THE HEADLINE RISK, AND ONE RESEARCH REPORT IS WRONG ABOUT THEM. src/world/overworld.js (353), src/world/terrain.js (155), src/game/attacks.js (1220) and src/game/weapons.js (872) \u2014 2,600 lines, 34% of src \u2014 are imported by nothing. I verified this. The CODEBASE report calls overworld.js 'exactly the city hub feature, already built'; it is not \u2014 it is a wilderness heightfield with six portal props and no buildings, it has never executed in a browser, and its only importer references /home/user/collins-seo-website/... on a different machine. Any agent told 'the overworld already exists' will wire up a file that has never run. This spec harvests from it and deletes it at step 7.",
+    "THE CITY IS A MULTI-WEEK EFFORT AND STEP 7 IS THE WHOLE PROJECT'S CRITICAL PATH. Chunked streaming, a modular building kit, nav baking, camera collision and yaw, terrain flattening, and ambient NPCs is a week of focused work minimum, and it blocks steps 9, 15 and 18. If anything slips, this is what slips.",
+    "NINE BIOMES IS THE SECOND MULTI-WEEK ITEM. 'Biomes' today are five hex values applied to identical hardcoded geometry \u2014 CircleGeometry ground, cylinder membrane, torus rim, cone pillars, 60 dodecahedron rocks, 44 octahedron shards, the same four lights in the same positions at the same intensities. A glacier and a burning throne room build byte-identical meshes in different colours. Delivering nine visually distinct environments is a rewrite of World.build plus five layout kits plus a lighting pass, not a config edit.",
+    "THE ASSET PACK CONTRIBUTES NOTHING TO THE WORLD. It is 106 handheld props: weapons, armour pieces, potions, chests, books, crystals, keys. Zero characters, zero creatures, zero buildings, zero terrain, zero vegetation, zero rigs, zero animations, zero textures. It solves loot and inventory completely and advances the city and all nine biomes by exactly nothing. Every environmental asset in this spec is procedural code, and that is a deliberate choice, not an oversight. If anyone reads 'we have a CC0 asset pack' as 'the city is half-built', the schedule is already wrong.",
+    "THE SIX BOSSES REMAIN THE THINNEST VISUAL AREA. No free CC0 pack contains anything resembling the archetypes this game needs, and this spec does not solve it \u2014 bosses stay as scaled humanoids carried by colour and the glow system. That will be the weakest-looking part of the finished game and no amount of the other work compensates.",
+    "ICON FILENAMES DIFFER FROM MODEL FILENAMES BY CASE ONLY (Axe_Small vs Axe_small, FishBone vs Fishbone, Sword_Big vs Sword_big). macOS APFS is case-insensitive, so naive lookup works perfectly through the entire development cycle and then fails on Android and in Linux CI. Step 13's lowercase-normalisation assertion is the only thing standing between this spec and a silent ship-breaker.",
+    "public/models/items.glb MUST BE COMMITTED AND THE COMMIT MUST BE VERIFIED. The 97 MB source pack is gitignored (.gitignore line 8) and exists on exactly one Mac, so CI cannot regenerate the GLB. If the file is missing or caught by an ignore rule, the build produces a game with no models, no error, and no obvious symptom until someone looks at a weapon.",
+    "BLENDER IS NOT ON PATH \u2014 only at /Applications/Blender.app/Contents/MacOS/Blender. Any build script assuming `blender` works fails with a misleading 'command not found', and fails differently on a machine where someone installed it via Homebrew.",
+    "ENEMIES AND SHADOWS DO NOT USE THE PHYSICS ENGINE TODAY. Only the player gets a CharacterBody; everything else integrates manually and is hard-pinned to y=0 with no gravity and no ground sampling. On the two heightfield biomes and anywhere in the city with elevation they will float and clip. Step 15 fixes it, but it cannot be tested until the biomes exist, so this defect is latent for most of the build.",
+    "THE 30 fps CITY / 60 fps COMBAT SPLIT IS A REAL FEEL DISCONTINUITY. It is safe here only because the city has no combat. The moment anyone adds a hostile encounter to the hub \u2014 and someone will want to \u2014 the dodge i-frame window (SKILLS.dash iframes: 0.34) at 30 fps becomes a design problem, not an engineering one.",
+    "NO webglcontextrestored HANDLER EXISTS TODAY, only contextlost. Android WebViews drop the GL context on backgrounding routinely, and the more GPU memory the city keeps resident the more often it happens. Right now that means a permanently frozen game after an incoming call. Step 3 fixes it; until then every on-device test session is one phone call from a false bug report.",
+    "BatchedMesh DEPENDS ON WEBGL_multi_draw, WHICH IS MISSING ON EXACTLY THE WEAKEST DEVICES YOU NEED IT ON. three falls back to a loop of draw calls, so the win silently evaporates on the target hardware. This spec therefore specifies merged-geometry-per-chunk plus InstancedMesh as the primary path and does not depend on BatchedMesh at all.",
+    "PROCEDURAL-EVERYTHING KEEPS THE APK TINY AND MOVES ALL GENERATION COST TO RUNTIME. Without a per-frame build cap, walking across a chunk boundary produces a hitch that no draw-call work fixes \u2014 and hitches are exactly what quality.js's p95 term will correctly punish by dropping visual quality. City chunk building must be capped at one chunk per frame with a time budget.",
+    "ADOPTING weapons.js MEANS ADOPTING ITS SWING STATE MACHINE ALONGSIDE game.js's INLINE ONE. Its own comment says the SWORD_COMBO table reproduces game.js's hardcoded sword exactly, so it should be feel-neutral \u2014 but 'should be' is doing work in that sentence, and it is the one adoption in this plan that can change how the game feels in the hand. Verify by side-by-side video, not by reading the table.",
+    "LEGAL EXPOSURE IS ABOUT SILHOUETTE AND NAMING, NOT MECHANICS. Stat formulas, rank ladders and progression curves are not copyrightable. What would read as copying is a specific character design or a specific scene. Emberfall must NOT become a real-world capital city on fire; the boss of Archon's Reach must NOT be a red-and-black knight with a greatsword guarding an empty throne; no shadow may be a giant humanoid insect lieutenant. The mechanics (checkpoint-boss tower, named unique shadow, ruined-city biome) are all fine; the specific silhouettes, palettes and settings must be original. Anyone doing the art pass needs to be told this explicitly.",
+    "EVERY HARD NUMBER IN THIS SPEC IS INVENTED, AND THAT IS CORRECT. The research is explicit that there is no canonical XP table, no canonical mana cost list and no canonical per-point conversion rate anywhere in the source material \u2014 the only well-attested figure is '5 stat points per level'. The numbers here are internally consistent and tuned for this game's curve. Do not let anyone 'correct' them against a fan wiki."
+  ],
+  "openQuestions": [
+    "src/game/attacks.js (1,220 lines) is NOT adopted by this plan and stays dead. It is a genuinely better combat system than what ships \u2014 swept hitboxes, aim assist with target stickiness, a poise/hitstun model, four-stage state machines, per-archetype patterns with feints, 7 boss patterns and a 4-entry phase table. But adopting it is a combat-FEEL rewrite that would touch every file three other workstreams are editing. The research also warns that the genre's power curve stops being interesting around B-rank unless the break gauge, dodge windows and cancel rules carry the tension that raw numbers no longer do \u2014 which is precisely what attacks.js provides. RECOMMENDATION: a dedicated 1-2 week follow-up project after step 18, run by one agent alone with no parallel work in flight. Doing it inside this expansion will produce merge conflicts in game.js that nobody can resolve.",
+    "PERF's 'pathB' \u2014 collapsing the whole crowd into one InstancedMesh with the walk cycle moved from animateRig into a vertex shader \u2014 is a multi-day rewrite of entities.js plus every animation call site in game.js, and it fights the per-limb Group hierarchy that weapons.js also reaches into. This spec does pathA only (15-17 draws down to 6). PathB is only worth it if crowds above ~20 concurrent characters are actually wanted. Do we want city crowds of 40+, or are 8-14 ambient NPCs enough? If 14 is enough, pathB is never needed.",
+    "The daily-contract FAILURE penalty is unimplemented. The research describes a punishment dungeon (survive 4 hours in a lightless desert stalked by poison-fanged centipedes) for missing the daily. This spec makes missing it cost nothing, because a mobile game that punishes absence teaches players to stop opening it. If a high-risk optional survival arena is wanted as a REWARD path instead, that is a separate ~3-day feature and needs a design decision first.",
+    "No respec UI is specified beyond the cost formula. Escalating-cost respec is in progression.js as a function; whether it appears in the Exchange, the Assay Hall, or the level-up screen is unresolved.",
+    "Hunter-population and economy numbers are deliberately absent. The source's own figures are internally inconsistent by roughly 100x (0.001% of the population awakens, yet 50,000 awakened in a country of 51 million is 0.098%). This spec introduces Ash as a currency with promotion costs and nothing else. A full economy \u2014 loot values, potion prices, stash limits \u2014 needs its own balance pass and should not be improvised by whoever builds the Exchange screen.",
+    "Audio is entirely unaddressed. src/core/audio.js exists and works, but nine biomes, a city with districts, portal proximity, and a shadow army all want distinct audio and none is specified or sourced. This is a real gap in 'looks like a polished, professionally released game' and it is not a small one.",
+    "Interior loads for city buildings are explicitly out of scope \u2014 the Ashworks, Assay Hall and Exchange are interaction points that open DOM screens, not walkable interiors. If walkable interiors are wanted, that is a third world type, a third mode, and roughly another week each.",
+    "The class trial at level 40 is specified as a mechanic (survival-scored, three tiers, the commander becomes your ASHEN FIRST) but its arena is not designed. It reuses the wave spawner and the 'corridor' kit, which is cheap, but the research is emphatic that this is the highest-leverage set-piece in the entire genre \u2014 it probably deserves bespoke treatment rather than a reskinned gate, and that is a scope decision nobody has made yet.",
+    "Whether the S-rank hidden-second-boss beat (the apparent boss is a phase gate; the real opponent arrives after it falls) ships in this expansion or later. bossPlanFor has a `phases` field that supports it, but the boss AI to actually drive a two-identity fight does not exist and would most naturally come from attacks.js \u2014 which is deferred. These two decisions are coupled.",
+    "On-device baselining has not happened and cannot happen until step 2 lands. Every performance target in this plan is derived from ARM's published GLES guidance derated for WebGL, not measured on this game on this hardware. If the Capacitor WebView delta turns out to be large \u2014 and there are documented cases of Capacitor running the same content slower than Chrome on the same Android device \u2014 the city's 30 fps target and the 12-shadow field cap are the first two numbers that have to move."
+  ]
+}
