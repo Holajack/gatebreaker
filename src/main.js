@@ -4,6 +4,8 @@ import * as Save from './core/save.js';
 import { UI } from './ui/ui.js';
 import { Game } from './game/game.js';
 import { loadHdri } from './render/env.js';
+import { loadItemModels, getItemMesh, itemModelStats } from './render/models.js';
+import { loadIconIndex } from './ui/icons.js';
 import { FrameClock } from './core/frameclock.js';
 
 const canvas = document.getElementById('scene');
@@ -81,13 +83,31 @@ const bootMessages = [
 let hdriReady = false;
 loadHdri().then((tex) => { hdriReady = Boolean(tex); });
 
+// The 106-model CC0 item pack is ~737 KB and loads in one request, so it rides
+// the same splash the HDRI already covers instead of hitching the first drop.
+// Both of these resolve FALSE rather than throwing when the file is absent:
+// the game is fully offline and must still boot with public/models/ deleted,
+// falling back to the procedural weapons in weapons.js.
+let itemsReady = false;
+const itemsPromise = loadItemModels().then((ok) => {
+  itemsReady = true;
+  if (ok) game.useItemModels(getItemMesh);
+  else console.warn('[items] models/items.glb unavailable — using procedural weapons');
+  return ok;
+});
+loadIconIndex();
+
+// Exposed so the smoke test can assert the pack actually resolved rather than
+// inferring it from pixels.
+window.__items = { ready: () => itemsReady, stats: itemModelStats, promise: itemsPromise };
+
 let bootStep = 0;
 const bootTimer = setInterval(() => {
   bootStep++;
   const pct = Math.min(100, bootStep * 25);
   document.getElementById('bootFill').style.width = `${pct}%`;
   document.getElementById('bootMsg').textContent = bootMessages[Math.min(bootStep, bootMessages.length - 1)];
-  if (bootStep >= 4 && (hdriReady || bootStep >= 8)) {
+  if (bootStep >= 4 && ((hdriReady && itemsReady) || bootStep >= 8)) {
     clearInterval(bootTimer);
     setTimeout(() => {
       document.getElementById('boot').classList.add('hidden');

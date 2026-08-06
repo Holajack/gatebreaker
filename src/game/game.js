@@ -15,6 +15,10 @@ import {
   autoDeploy, deployedRecords, addShadow, makeShadow, releaseWeakest,
   shadowCombat, rosterSummary,
 } from './shadows.js';
+import {
+  rollDrop, equipWeapon, currentWeapon, setModelSource,
+  serializeWeapon, deserializeWeapon, starterWeapon, buildWeaponMesh, rarityColor,
+} from './weapons.js';
 import { Glow, GLOW_LAYER } from '../render/glow.js';
 import { Quality } from '../core/quality.js';
 import { attachBody, applyKnockback, FLAT_GROUND } from './physics.js';
@@ -23,6 +27,12 @@ import { attachBody, applyKnockback, FLAT_GROUND } from './physics.js';
 // as its tierWeight. Provisional home: difficulty.js owns enemy classification
 // once step 11 lands, and this table moves there wholesale.
 const TIER_WEIGHT = { brute: 'elite', lancer: 'elite', howler: 'elite' };
+
+// How many spare weapons the save carries. Bounded because the whole profile
+// lives in one localStorage string.
+const STASH_LIMIT = 12;
+// Chance a trash kill leaves a weapon behind. Bosses always drop one.
+const WEAPON_DROP_CHANCE = 0.06;
 const tierWeightOf = (e) => (e.isBoss ? 'boss' : TIER_WEIGHT[e.key] || 'trash');
 
 const tmpV = new THREE.Vector3();
@@ -157,9 +167,12 @@ export class Game {
 
   // ---------------------------------------------------------------- player
   _buildPlayer() {
+    // `weapon: 'none'` on purpose: the hardcoded blade makeHumanoid used to
+    // build is now supplied by weapons.js, which is what lets the player hold
+    // a rolled drop (and, once the item pack has loaded, a real model).
     const mesh = makeHumanoid({
       color: 0x8fa2ff, glow: 0xffc24b, accent: 0x161c3c,
-      weapon: 'sword', cloak: true, scale: 1,
+      weapon: 'none', cloak: true, scale: 1,
     });
     this.playerRing = makeGroundRing(0xffc24b, 1.0, 0.8);
     mesh.add(this.playerRing);
@@ -186,6 +199,52 @@ export class Game {
     this._arenaResolve = (pos, radius, vel) => this.world.resolve(pos, radius, vel);
     attachBody(this.player, { radius: 0.6, maxSpeed: this.derived.speed });
     this.player.body.setEnvironment(FLAT_GROUND, this._arenaResolve);
+
+    this._restoreLoadout();
+  }
+
+  // ------------------------------------------------------------- loadout
+  //
+  // save.weapon and save.stash store (base, rarity, seed, level) per weapon,
+  // not a snapshot of every rolled number, so re-tuning the tables later
+  // re-derives everyone's gear instead of leaving stale statlines in saves.
+
+  _restoreLoadout() {
+    this.weapon = deserializeWeapon(this.save.weapon) || starterWeapon();
+    this.stash = (Array.isArray(this.save.stash) ? this.save.stash : [])
+      .map((d) => deserializeWeapon(d))
+      .filter(Boolean)
+      .slice(0, STASH_LIMIT);
+    equipWeapon(this.player.mesh, this.weapon);
+  }
+
+  _persistLoadout() {
+    this.save.weapon = serializeWeapon(this.weapon);
+    this.save.stash = this.stash.map((w) => serializeWeapon(w)).filter(Boolean);
+    this.onSave();
+  }
+
+  /**
+   * Point weapon construction at the loaded item pack and rebuild whatever is
+   * currently in hand. Called from main.js once loadItemModels resolves TRUE;
+   * never called when the GLB is missing, so the procedural weapons stay.
+   */
+  useItemModels(getMesh) {
+    setModelSource(getMesh);
+    if (this.player?.mesh && this.weapon) equipWeapon(this.player.mesh, this.weapon);
+  }
+
+  /** Equip `w`, sending whatever was held to the stash. */
+  equip(w) {
+    if (!w) return;
+    const old = currentWeapon(this.player.mesh) || this.weapon;
+    if (old && old !== w) {
+      this.stash.unshift(old);
+      if (this.stash.length > STASH_LIMIT) this.stash.length = STASH_LIMIT;
+    }
+    this.weapon = w;
+    equipWeapon(this.player.mesh, w);
+    this._persistLoadout();
   }
 
   /** Shadows allowed on the field at once, clamped by the live quality tier. */
@@ -448,9 +507,13 @@ export class Game {
         tmpV.copy(e.pos).add(new THREE.Vector3((Math.random() - 0.5) * 5, 0, (Math.random() - 0.5) * 5));
         this._spawnPickup(tmpV.clone(), i < 3 ? 'hp' : 'mp');
       }
+      // A boss always leaves a weapon. It is the only guaranteed source, so
+      // clearing a rank always moves your gear forward.
+      this._spawnWeaponDrop(e.pos.clone());
     } else {
       const roll = Math.random();
-      if (roll < 0.26) this._spawnPickup(e.pos.clone(), 'hp');
+      if (roll < WEAPON_DROP_CHANCE) this._spawnWeaponDrop(e.pos.clone());
+      else if (roll < 0.26) this._spawnPickup(e.pos.clone(), 'hp');
       else if (roll < 0.34) this._spawnPickup(e.pos.clone(), 'mp');
     }
 
@@ -573,12 +636,18 @@ export class Game {
   _applySwingDamage() {
     const p = this.player;
     const finisher = p.comboIndex === 3;
-    const mult = SKILLS.attack.dmg * (finisher ? 1.85 : 1) * (1 + (p.comboIndex - 1) * 0.12);
-    const range = finisher ? 3.6 : 2.9;
-    const arc = finisher ? Math.PI * 0.85 : Math.PI * 0.62;
+    // The equipped weapon's rolled multipliers ride on top of the existing
+    // hardcoded sword numbers, which weapons.js's SWORD_COMBO reproduces
+    // exactly — so a Common Riftedge is feel-identical to what shipped before
+    // and anything better is a real upgrade rather than a cosmetic one.
+    const w = this.weapon;
+    const mult = SKILLS.attack.dmg * (finisher ? 1.85 : 1) * (1 + (p.comboIndex - 1) * 0.12)
+      * (w?.dmgMul ?? 1);
+    const range = (finisher ? 3.6 : 2.9) * (w?.reachMul ?? 1);
+    const arc = (finisher ? Math.PI * 0.85 : Math.PI * 0.62) * (w?.arcMul ?? 1);
     const hits = this._coneTargets(p.pos, p.yaw, range, arc);
     hits.forEach((e) => this._damageEnemy(e, this.derived.atk * mult, {
-      knockback: finisher ? 9 : 2.5,
+      knockback: (finisher ? 9 : 2.5) * (w?.knockMul ?? 1),
       stagger: finisher ? 0.45 : 0,
       from: p.pos,
     }));
@@ -1181,7 +1250,40 @@ export class Game {
     }
   }
 
-  _spawnPickup(pos, kind = 'hp') {
+  /**
+   * Roll a weapon for this gate and drop it. Uses the gate's seeded rng, so a
+   * replayed seed hands out the same loot.
+   */
+  _spawnWeaponDrop(pos) {
+    const w = rollDrop(this.rnd || Math.random, {
+      rankIndex: this.gateIndex ?? 0,
+      level: this.save.level,
+      // Perception is the stat that already governs what you notice; letting
+      // it nudge rarity gives it a second, visible job.
+      luck: Math.min(0.6, (this.save.stats?.per || 0) * 0.01),
+    });
+    if (!w) return;
+    this._spawnPickup(pos, 'weapon', w);
+  }
+
+  _spawnPickup(pos, kind = 'hp', weapon = null) {
+    if (kind === 'weapon' && weapon) {
+      // The drop is the weapon itself — the same mesh that ends up in the hand,
+      // so what you see on the floor is literally what you pick up.
+      const mesh = new THREE.Group();
+      const model = buildWeaponMesh(weapon);
+      model.rotation.z = 0.42;
+      mesh.add(model);
+      const tint = rarityColor(weapon.rarity);
+      mesh.position.copy(pos).setY(1.05);
+      mesh.add(new THREE.PointLight(tint, 3.0, 6));
+      this.scene.add(mesh);
+      this.pickups.push({
+        mesh, pos: mesh.position, kind: 'weapon', weapon,
+        life: 45, t: Math.random() * 6,
+      });
+      return;
+    }
     const color = kind === 'hp' ? 0xff4d6d : 0x22d3ee;
     const mesh = new THREE.Mesh(
       new THREE.OctahedronGeometry(0.34, 0),
@@ -1201,7 +1303,7 @@ export class Game {
       it.life -= dt;
       it.t += dt;
       it.mesh.rotation.y += dt * 2.4;
-      it.mesh.position.y = 0.9 + Math.sin(it.t * 3) * 0.16;
+      it.mesh.position.y = (it.kind === 'weapon' ? 1.05 : 0.9) + Math.sin(it.t * 3) * 0.16;
 
       const d = it.mesh.position.distanceTo(p.pos);
       // Magnet: drift toward the player once they're close, so you never have
@@ -1211,6 +1313,15 @@ export class Game {
         it.mesh.position.addScaledVector(tmpV, (6.5 - d) * 2.2 * dt);
       }
       if (d < 1.5) {
+        if (it.kind === 'weapon') {
+          this._takeWeapon(it.weapon);
+          this.fx.burst(it.mesh.position.clone(), 18, rarityColor(it.weapon.rarity), { speed: 5, up: 4, life: 0.5 });
+          this.audio.tone({ freq: 520, type: 'triangle', gain: 0.14, decay: 0.35, sweep: 1500 });
+          this.scene.remove(it.mesh);
+          disposeObject3D(it.mesh);
+          this.pickups.splice(i, 1);
+          continue;
+        }
         if (it.kind === 'hp') {
           const heal = Math.round(this.derived.maxHp * 0.16);
           p.hp = Math.min(this.derived.maxHp, p.hp + heal);
@@ -1230,6 +1341,24 @@ export class Game {
         disposeObject3D(it.mesh);
         this.pickups.splice(i, 1);
       }
+    }
+  }
+
+  /**
+   * Auto-equip on upgrade, stash otherwise. `score` is rollWeapon's single
+   * comparable number, so this never needs to know what an affix is.
+   */
+  _takeWeapon(w) {
+    if (!w) return;
+    const held = this.weapon;
+    if (!held || w.score > held.score) {
+      this.equip(w);
+      this.ui.toast(`${w.name.toUpperCase()}  ·  ${w.rarityName}`, 'gold');
+    } else {
+      this.stash.unshift(w);
+      if (this.stash.length > STASH_LIMIT) this.stash.length = STASH_LIMIT;
+      this._persistLoadout();
+      this.ui.toast(`STASHED  ${w.name.toUpperCase()}`);
     }
   }
 

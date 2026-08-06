@@ -164,6 +164,37 @@ those credits visible **inside** the game, not only in the repo.
 | --- | --- | --- | --- |
 | Rajdhani (500/600/700, latin) | Google Fonts | SIL OFL 1.1 | `src/fonts/` |
 | `moonless_golf` HDRI | [Poly Haven](https://polyhaven.com/a/moonless_golf) | **CC0** | `assets/hdri/` (source) → `public/hdri/rift_sky.hdr` (baked) |
+| Ultimate RPG Items Pack (106 models + 107 icons) | [Quaternius](https://quaternius.com/) | **CC0** | `Ultimate RPG Items Pack - Aug 2019/` (source, gitignored) → `public/models/items.glb` + `icons.webp`/`icons.json` |
+
+### The item pack
+
+```bash
+npm run build:items    # Blender -> gltf-transform -> gltfpack, plus the icon atlas
+npm run test:items     # asserts 106 named roots survive and every icon key is lowercase
+```
+
+106 FBX become one 736 KB meshopt GLB (90,861 triangles, 27 shared materials,
+each model a scene root named exactly after its source file). 107 1000×1000 PNGs
+become one 310 KB 1408×1280 WebP atlas plus a JSON index. Whole pack: ~1 MB.
+
+Four things about this pipeline are load-bearing and every one of them fails
+*silently* if changed — see the header comments in `tools/build-items-glb.mjs`
+and `tools/pack-icons.mjs`:
+
+- Imported FBX objects are renamed to `<name>__part` **before** the handle Empty
+  is created, or Blender hands back `Sword001` and every lookup returns null.
+- `gltfpack -kn` is mandatory; without it node names are stripped and the file
+  loads fine and is unusable.
+- meshopt, not Draco — Draco resolves two loose decoder files at runtime, which
+  is a silent on-device failure under Capacitor and breaks the offline rule.
+- Every icon key is lowercased: the pack's icon filenames differ from its model
+  filenames by case only, which macOS hides and Android does not.
+
+`public/models/` is committed on purpose (`.gitignore` carries explicit
+un-ignore rules). The 97 MB source pack exists on one machine, so CI cannot
+regenerate it — and a build that shipped without it would show no models and
+raise no error. `src/render/models.js` resolves `false` rather than throwing
+when the GLB is absent, so the game still boots on procedural weapons.
 
 The HDRI is baked from the 6.1 MB source EXR down to a 409 KB RGBE `.hdr`:
 

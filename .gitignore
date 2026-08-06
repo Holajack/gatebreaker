@@ -19,3 +19,12 @@ android/app/src/main/assets/capacitor.plugins.json
 *.apk
 *.aab
 *.keystore
+
+# The CONVERTED item pack, however, MUST ship. The source above is gitignored
+# and exists on exactly one Mac, so CI can never regenerate these. A rule that
+# swallowed them would produce a build with zero models and no error at all —
+# which is the specific failure tools/items-verify.mjs exists to catch.
+!public/models/
+!public/models/items.glb
+!public/models/icons.webp
+!public/models/icons.json

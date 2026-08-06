@@ -615,8 +615,129 @@ export function buildWeaponMesh(weapon, { ghost = false } = {}) {
   const base = typeof weapon === 'string' ? null : (weapon.base || WEAPONS[weapon.baseId]);
   const look = base ? base.look : {};
   const tint = (typeof weapon === 'string' ? RARITIES.common.color : weapon.tint) || RARITIES.common.color;
+  const archKey = arch === ARCHETYPES.daggers ? 'daggers' : (base ? base.archetype : 'sword');
+
+  const packed = buildPackMesh(weapon, archKey, ghost);
+  if (packed) return packed;
+
   const g = (arch || ARCHETYPES.sword).build(look, tint, ghost);
-  g.userData.archetype = arch === ARCHETYPES.daggers ? 'daggers' : (base ? base.archetype : 'sword');
+  g.userData.archetype = archKey;
+  return g;
+}
+
+// ------------------------------------------------------- CC0 item pack models
+//
+// The two additions that adopt public/models/items.glb. Everything above this
+// point is the original procedural implementation and stays the fallback: the
+// game must boot and play with public/models/ deleted entirely, so a null model
+// source here is a normal state, not an error.
+//
+// setModelSource is injection rather than an import so weapons.js keeps its
+// zero-dependency shape — it can still be loaded by a headless Node test with
+// no GLB, no renderer and no fetch.
+
+let _getModel = null;
+
+/**
+ * Point weapon construction at the item pack.
+ * `getMesh` is models.getItemMesh: (name, { scale, clone }) -> Object3D | null.
+ * Pass null to go back to purely procedural weapons.
+ */
+export function setModelSource(getMesh) {
+  _getModel = typeof getMesh === 'function' ? getMesh : null;
+}
+
+// The pack is metre-mismatched against this game: its Sword is 2.30 units tall
+// on a ~1.8-unit humanoid, so unscaled it is a sword taller than the hunter
+// holding it.
+//
+// These started at the 0.4x models.js still defaults to, and were then checked
+// against the actual rig in a screenshot — which is the only way to get this
+// right. At 0.4x the pack Sword's tip lands at y 1.67, level with the shoulder,
+// so the entire blade sits inside the arm mesh and the weapon reads as gone.
+// Each value below puts the archetype's tip within ~0.1 of the procedural
+// weapon it replaces (procedural sword tip ~1.6 above the fist, greataxe ~1.5,
+// dagger ~0.66), which is the silhouette the game's combat was tuned around.
+const MODEL_SCALE = { sword: 0.60, greataxe: 0.62, daggers: 0.50, polearm: 0.55 };
+
+// Rarity is carried by swapping to the pack's own gold variants rather than by
+// tinting: clones share materials with the source GLB, so mutating a material
+// to tint one weapon would recolour every other copy of it in the scene.
+const GOLDEN = new Set(['epic', 'legendary']);
+
+/**
+ * Node name in items.glb for a rolled weapon, or null when the pack has no
+ * honest match and the procedural builder should be used instead.
+ *
+ * The polearm archetype has NO spear or glaive in this pack — the closest
+ * things are an arrow and a dart, which read as ammunition, not a weapon. So
+ * spears stay procedural rather than being given a wrong silhouette.
+ */
+export function weaponModelName(weapon) {
+  if (!weapon) return null;
+  const base = typeof weapon === 'string' ? null : (weapon.base || WEAPONS[weapon.baseId]);
+  const archetype = typeof weapon === 'string'
+    ? weapon
+    : (weapon.archetype || base?.archetype || 'sword');
+  const gold = GOLDEN.has(typeof weapon === 'string' ? 'common' : weapon.rarity) ? '_Golden' : '';
+
+  switch (archetype) {
+    case 'sword':
+      return `Sword${gold}`;
+    case 'greataxe':
+      // The maul variant is a hammer, not an axe, and the pack has both — using
+      // the axe for it would misread the one archetype whose finisher is a
+      // ground pound.
+      return base?.look?.head === 'maul' ? `Hammer_Double${gold}` : `Axe_Double${gold}`;
+    case 'daggers':
+      return `Dagger${gold}`;
+    default:
+      return null;
+  }
+}
+
+// Tilt away from the body, radians about Z. The pack models' pivot is the
+// guard, so they run straight up +Y out of the fist — which is exactly where
+// the humanoid's 0.72-long arm mesh already is, and the blade renders entirely
+// inside the arm. The procedural builders escape this by being long enough to
+// clear the shoulder. Confirmed by screenshot: without the tilt only the tip
+// is visible; with it the whole blade reads.
+const MODEL_TILT = { sword: -0.30, greataxe: -0.26, daggers: -0.20, polearm: -0.18 };
+
+/** One pack model wrapped so equipWeapon's applyGrip has a clean node to pose. */
+function packPart(name, archKey) {
+  const holder = _getModel(name, { scale: MODEL_SCALE[archKey] ?? 0.4 });
+  if (!holder) return null;
+  // applyGrip overwrites position/rotation on the group it is handed, so the
+  // scale and the clearance tilt live one level down where they survive.
+  holder.rotation.z = MODEL_TILT[archKey] ?? 0;
+  const outer = new THREE.Group();
+  outer.add(holder);
+  outer.userData.archetype = archKey;
+  outer.userData.packModel = name;
+  return outer;
+}
+
+function buildPackMesh(weapon, archKey, ghost) {
+  // Shadow soldiers are translucent. Pack materials are shared across every
+  // clone, so making one instance transparent would ghost the player's weapon
+  // too — the procedural builder already has a per-instance ghost path.
+  if (!_getModel || ghost) return null;
+  const name = weaponModelName(weapon);
+  if (!name) return null;
+  const g = packPart(name, archKey);
+  if (!g) return null;
+
+  if (archKey === 'daggers') {
+    const off = packPart(name, archKey);
+    if (off) {
+      // Same reverse grip the procedural builder authors, so equipWeapon's
+      // offhand handling below needs no special case for pack models.
+      off.rotation.set(Math.PI * 0.92, 0, 0.18);
+      off.position.set(0, 0.04, -0.02);
+      g.userData.offhand = off;
+    }
+  }
   return g;
 }
 

@@ -10,6 +10,10 @@
     "sync": "cap sync android",
     "apk": "npm run build && cap sync android && cd android && ./gradlew assembleDebug",
     "smoke": "node tools/smoke.mjs",
+    "build:items": "node tools/build-items-glb.mjs && node tools/pack-icons.mjs",
+    "test:items": "node tools/items-verify.mjs",
+    "test:loot": "node tools/loot-test.mjs",
+    "test:loot-fallback": "node tools/loot-test.mjs --no-models",
     "test:city": "node tools/city-test.mjs",
     "test:progression": "node tools/progression-test.mjs",
     "test:frameclock": "node tools/frameclock-test.mjs",
@@ -25,7 +29,13 @@
   },
   "devDependencies": {
     "@capacitor/cli": "^6.2.0",
+    "@gltf-transform/core": "^4.4.2",
+    "@gltf-transform/extensions": "^4.4.2",
+    "@gltf-transform/functions": "^4.4.2",
+    "gltfpack": "^0.22.0",
+    "meshoptimizer": "^1.2.0",
     "playwright": "^1.49.1",
+    "sharp": "^0.35.3",
     "vite": "^5.4.11"
   }
 }
