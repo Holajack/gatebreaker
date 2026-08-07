@@ -118,7 +118,11 @@ Self-host them — don't link to Google Fonts, because the APK has no network.
 
 ## Size budget
 
-The APK is **7.9 MB** today. Rough additions:
+The debug APK is **13.14 MB** today (measured with `./gradlew assembleDebug`,
+2026-08-06), up from 8.70 MB before the character/creature/world packs landed.
+Of that +4.44 MB, only `characters.glb` is reachable from `src/main.js`;
+`creatures.glb`, `citykit.glb` and `nature.glb` are ~4.4 MB of payload that no
+runtime code path loads yet. Rough further additions:
 
 | Item | Realistic cost |
 | --- | --- |
@@ -165,6 +169,14 @@ those credits visible **inside** the game, not only in the repo.
 | Rajdhani (500/600/700, latin) | Google Fonts | SIL OFL 1.1 | `src/fonts/` |
 | `moonless_golf` HDRI | [Poly Haven](https://polyhaven.com/a/moonless_golf) | **CC0** | `assets/hdri/` (source) → `public/hdri/rift_sky.hdr` (baked) |
 | Ultimate RPG Items Pack (106 models + 107 icons) | [Quaternius](https://quaternius.com/) | **CC0** | `Ultimate RPG Items Pack - Aug 2019/` (source, gitignored) → `public/models/items.glb` + `icons.webp`/`icons.json` |
+| Ultimate Modular Men + Women Packs (21 rigged characters, 24 animations) | [Quaternius](https://quaternius.com/) | **CC0** | `assets/source/characters/` (source, 65 MB) → `public/models/characters.glb` + `characters.json` |
+| Ultimate Monsters (13 shipped) + Character Pack: Skeletons + Character Animations | [Quaternius](https://quaternius.com/), [KayKit](https://kaylousberg.itch.io/) | **CC0** | `assets/source/creatures/` (source, 96 MB) → `public/models/creatures.glb` + `creatures.json` — **built and verified, but NOT yet loaded by any code** |
+| Fantasy Town Kit 2.0 (167) + Ultimate Modular Ruins (78) | [Kenney](https://kenney.nl/assets), [Quaternius](https://quaternius.com/) | **CC0** | `assets/source/world/` (source, 31 MB) → `public/models/citykit.glb` + `citykit.json` — consumed by `src/world/citykit.js`, which only `src/world/city.js` uses |
+| Ultimate Nature Pack (140 pieces) | [Quaternius](https://quaternius.com/) | **CC0** | `assets/source/world/` (source) → `public/models/nature.glb` + `nature.json` — **built and verified, but NOT yet loaded by any code** |
+
+> `assets/source/` is ~190 MB of build input and is gitignored (the PROVENANCE /
+> CREDITS / LICENSE files are kept). Everything under `public/models/` MUST be
+> committed: the sources exist on one machine and CI cannot regenerate them.
 
 ### The item pack
 
@@ -195,6 +207,73 @@ un-ignore rules). The 97 MB source pack exists on one machine, so CI cannot
 regenerate it — and a build that shipped without it would show no models and
 raise no error. `src/render/models.js` resolves `false` rather than throwing
 when the GLB is absent, so the game still boots on procedural weapons.
+
+### The character packs
+
+```bash
+node tools/build-characters-glb.mjs            # build + verify
+node tools/build-characters-glb.mjs --verify   # verify the committed GLB only
+```
+
+21 CC0 Quaternius characters (11 men, 10 women) become one 3.2 MB meshopt GLB
+plus a 14 KB JSON manifest. 151,094 triangles, 48 materials, 24 animation clips
+per rig. Licences and provenance: `assets/source/characters/PROVENANCE.md`.
+
+**No Blender step.** Both packs ship glTF 2.0 with a single embedded base64
+buffer per character and zero images, so this is a pure gltf-transform pipeline
+— unlike the item pack, which has to go through Blender to merge 106 FBX.
+
+The shared-skeleton claim is **half true, and the half that is false is the
+expensive half.** All 21 characters have byte-identical bone *names* and
+hierarchy (62 joints) and the same 24 clip names. But the men's and women's
+packs are two different rigs: their bone rest transforms and inverse bind
+matrices differ (max rest-offset delta 0.108, max IBM delta 1.87), and every
+clip animates absolute per-bone *translations* baked against its own rest pose,
+so the two packs' clip payloads differ too. Playing `male_Walk` on a female mesh
+would drag the female bone offsets to male ones while her inverse bind matrices
+stayed put — she would stretch. So the GLB carries **two rigs and two clip sets**
+and dedups the other 19 skeletons and 19 clip sets away. That dedup is what
+turns 24.7 MB of merged glTF into 3.2 MB.
+
+Structure, all lowercase keys, all published in `characters.json`:
+
+```
+scene "characters"
+├── rig_male     — 62 bones prefixed m_,  clips prefixed male_,   11 characters
+└── rig_female   — 62 bones prefixed f_,  clips prefixed female_, 10 characters
+      └── char_women_witch
+            ├── char_women_witch_head / _body / _legs / _feet
+```
+
+Each rig root holds its skeleton *and* every character that uses it, so
+`SkeletonUtils.clone(rig)` clones all of them; drop the `char_*` groups you do
+not want. Part swapping works within a rig — any `char_*_head` can be reparented
+onto another character in the same pack and skins correctly.
+
+Five things are load-bearing and every one fails *silently* — see the header of
+`tools/build-characters-glb.mjs`:
+
+- Bone names are **prefixed per rig** (`m_` / `f_`). three.js runs every node
+  name through `createUniqueName()`, so two rigs both calling their root bone
+  `Root` would silently load as `Root` and `Root_1`, and which rig won would
+  depend on node ordering.
+- Dots are **stripped from bone names** up front (`Shoulder.L` → `m_Shoulder_L`),
+  because `PropertyBinding.sanitizeNodeName()` deletes `[]./:` — otherwise the
+  name in the file is not the name in the scene graph.
+- Clip names are **prefixed per rig**, so `Idle` is never ambiguous.
+- `gltfpack -kn` is mandatory, and meshopt not Draco, for the same two reasons
+  as the item pack.
+- Two of the 21 (women/Medieval's sword, women/SciFi's pistol) are **rigid props
+  parented to a hand bone**, not skinned parts. Discarding a duplicate bone tree
+  takes them with it and loses the geometry with no error at all. They are
+  hoisted into the character group and their bone is published as
+  `characters[key].props[slot].attachBone` — re-parent them at runtime.
+
+Verified: all 21 roots resolve by name, every `SkinnedMesh` has 62 bones, all 48
+clips are named and non-empty, every track of `male_Idle`/`female_Idle` binds to
+its own rig and to neither the other, a `SkeletonUtils.clone` of a rig stripped
+to one character animates, and each character's bind-pose bounding box matches
+its source `.gltf` to within 0.0001 units.
 
 The HDRI is baked from the 6.1 MB source EXR down to a 409 KB RGBE `.hdr`:
 

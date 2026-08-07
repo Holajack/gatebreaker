@@ -6,6 +6,7 @@ import { Game } from './game/game.js';
 import { loadHdri } from './render/env.js';
 import { loadItemModels, getItemMesh, itemModelStats } from './render/models.js';
 import { loadIconIndex } from './ui/icons.js';
+import { preloadCharacters, characterStats } from './game/entities.js';
 import { FrameClock } from './core/frameclock.js';
 
 const canvas = document.getElementById('scene');
@@ -97,9 +98,21 @@ const itemsPromise = loadItemModels().then((ok) => {
 });
 loadIconIndex();
 
+// The 3.2 MB skinned-character pack. entities.js kicks this off lazily on the
+// first makeHumanoid anyway, but by then the player already exists as a
+// procedural box-man and visibly pops when the real body swaps in. Starting it
+// here puts the whole load under the splash. Resolves FALSE, never throws.
+let charsReady = false;
+const charsPromise = preloadCharacters().then((ok) => {
+  charsReady = true;
+  if (!ok) console.warn('[characters] models/characters.glb unavailable — using the procedural rig');
+  return ok;
+});
+
 // Exposed so the smoke test can assert the pack actually resolved rather than
 // inferring it from pixels.
 window.__items = { ready: () => itemsReady, stats: itemModelStats, promise: itemsPromise };
+window.__characters = { ready: () => charsReady, promise: charsPromise, stats: characterStats };
 
 let bootStep = 0;
 const bootTimer = setInterval(() => {
@@ -107,7 +120,7 @@ const bootTimer = setInterval(() => {
   const pct = Math.min(100, bootStep * 25);
   document.getElementById('bootFill').style.width = `${pct}%`;
   document.getElementById('bootMsg').textContent = bootMessages[Math.min(bootStep, bootMessages.length - 1)];
-  if (bootStep >= 4 && ((hdriReady && itemsReady) || bootStep >= 8)) {
+  if (bootStep >= 4 && ((hdriReady && itemsReady && charsReady) || bootStep >= 8)) {
     clearInterval(bootTimer);
     setTimeout(() => {
       document.getElementById('boot').classList.add('hidden');

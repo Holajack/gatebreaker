@@ -1,0 +1,7192 @@
+{
+ "file": "models/citykit.glb",
+ "generatedBy": "tools/build-world-glb.mjs",
+ "sources": [
+  {
+   "name": "Kenney — Fantasy Town Kit 2.0",
+   "url": "https://kenney.nl/assets/fantasy-town-kit",
+   "licence": "CC0 1.0",
+   "prefix": "town_",
+   "pieces": 167,
+   "authoredGrid": 1,
+   "scaleBaked": 2,
+   "note": "Authored on a 1.0 cell at half world scale; multiplied by 2 INTO THE VERTEX DATA at build time so it shares the 2 m grid and metric scale of everything else. Sizes below are post-scale. Divide by 2 to compare with Kenney's docs."
+  },
+  {
+   "name": "Quaternius — Ultimate Modular Ruins Pack",
+   "url": "https://quaternius.com/packs/ultimatemodularruins.html",
+   "licence": "CC0 1.0",
+   "prefix": "ruin_",
+   "pieces": 78,
+   "authoredGrid": 2,
+   "scaleBaked": 1,
+   "note": "Already metric. Its How-To-Use.txt calls this a \"1x1 grid\", which is true in its own authoring units and is 2.0 world units after FBX import."
+  }
+ ],
+ "grid": {
+  "gridded": true,
+  "unit": 2,
+  "bestGuess": 2,
+  "confidence": 0.7492,
+  "tolerance": 0.05,
+  "onGridPieces": 224,
+  "note": "Cell size in metres on the XZ plane. Structural pieces span an integer number of cells. Per-piece \"cells\" is [x,z] in cells and \"fit\" is [x,z] in {exact, overhang, half, sub, free}. exact/overhang/half all tile on 2 m centres — \"overhang\" only means eaves or a stair nosing spill past the cell, which is normal and must NOT be read as off-grid. \"sub\" is smaller than a cell (a wall slab, a column): snap its centre. \"free\" means place it by hand. Y is unconstrained."
+ },
+ "gridCandidates": [
+  {
+   "grid": 0.25,
+   "hits": 216,
+   "considered": 486,
+   "score": 0.4444
+  },
+  {
+   "grid": 0.5,
+   "hits": 229,
+   "considered": 405,
+   "score": 0.5654
+  },
+  {
+   "grid": 1,
+   "hits": 234,
+   "considered": 355,
+   "score": 0.6592
+  },
+  {
+   "grid": 2,
+   "hits": 230,
+   "considered": 307,
+   "score": 0.7492
+  },
+  {
+   "grid": 4,
+   "hits": 15,
+   "considered": 28,
+   "score": 0.5357
+  }
+ ],
+ "stats": {
+  "pieces": 245,
+  "bytes": 1208140,
+  "triangles": 123674,
+  "materials": 24,
+  "textures": 1
+ },
+ "notes": [
+  "SCALE: everything in this file is metres, and so is nature.glb. The Kenney pieces were multiplied by 2 at build time (baked into vertices, not node transforms) because the two kits are authored at different scales. Do not apply any further factor.",
+  "PIVOTS: every piece is centred on its cell origin, so a cell spans -1..+1 in x and z, and y = 0 is the walk plane. Placing a piece at a cell centre is the whole placement rule.",
+  "town_wall* is a 0.2-thick slab on the +X EDGE of the cell (x 0.8..1.0), full 2 m width in z, spanning y 0..2. Four of them at 90-degree yaw steps around one cell centre make a room.",
+  "ruin_wall* is different and this WILL catch you: it spans the full cell in x and sits on the cell CENTRE line in z (z -0.25..0.03), so it bisects the cell instead of edging it. Town walls and ruin walls do not interchange without a half-cell offset.",
+  "Ruins floor tiles hang below the walk plane (y -0.25..+0.03); the top face is y ~= 0, so they drop straight in at y = 0 with no offset.",
+  "Ruins walls: turning a 90-degree corner needs the next wall flipped 180 degrees vertically or the corners overlap. ruin_curve_1 / ruin_curve_2 pre-bake that flip — use those.",
+  "STOREY HEIGHT is 2 m in both sub-kits (town_wall y = 2.000, ruin_wall y = 2.001), so floors stack at 2 m intervals across both.",
+  "town_* pieces are textured by ONE shared 512x512 colormap atlas (~11 KB) — the whole palette of the Kenney kit, and the only image in this file. ruin_* pieces are untextured flat material colours. Both are flat-shaded low-poly; there is no normal map and no PBR set.",
+  "Keys are lowercase and prefixed because Kenney \"wall.glb\" and Quaternius \"Wall.fbx\" collide on case alone, which macOS hides and Android does not."
+ ],
+ "pieces": [
+  {
+   "key": "ruin_arch_gothic",
+   "source": "quaternius-modular-ruins/Arch_Gothic.fbx",
+   "size": [
+    3.0919,
+    3.7605,
+    0.491
+   ],
+   "min": [
+    -1.546,
+    0,
+    -0.3652
+   ],
+   "max": [
+    1.546,
+    3.7605,
+    0.1258
+   ],
+   "triangles": 2904,
+   "cells": [
+    null,
+    0
+   ],
+   "fit": [
+    "free",
+    "sub"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "ruin_arch_gothic_roundcolumn",
+   "source": "quaternius-modular-ruins/Arch_Gothic_RoundColumn.fbx",
+   "size": [
+    3.0919,
+    3.7587,
+    0.4894
+   ],
+   "min": [
+    -1.546,
+    0.0018,
+    -0.3644
+   ],
+   "max": [
+    1.546,
+    3.7605,
+    0.125
+   ],
+   "triangles": 3224,
+   "cells": [
+    null,
+    0
+   ],
+   "fit": [
+    "free",
+    "sub"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "ruin_arch_round",
+   "source": "quaternius-modular-ruins/Arch_Round.fbx",
+   "size": [
+    3.0919,
+    3.5327,
+    0.491
+   ],
+   "min": [
+    -1.546,
+    0,
+    -0.3595
+   ],
+   "max": [
+    1.546,
+    3.5327,
+    0.1315
+   ],
+   "triangles": 2956,
+   "cells": [
+    null,
+    0
+   ],
+   "fit": [
+    "free",
+    "sub"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "ruin_arch_round_roundcolumn",
+   "source": "quaternius-modular-ruins/Arch_Round_RoundColumn.fbx",
+   "size": [
+    3.0919,
+    3.5309,
+    0.4894
+   ],
+   "min": [
+    -1.546,
+    0.0018,
+    -0.3644
+   ],
+   "max": [
+    1.546,
+    3.5327,
+    0.125
+   ],
+   "triangles": 3276,
+   "cells": [
+    null,
+    0
+   ],
+   "fit": [
+    "free",
+    "sub"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "ruin_barrel",
+   "source": "quaternius-modular-ruins/Barrel.fbx",
+   "size": [
+    0.8314,
+    1.0738,
+    0.8241
+   ],
+   "min": [
+    -0.4157,
+    0.0046,
+    -0.4135
+   ],
+   "max": [
+    0.4157,
+    1.0783,
+    0.4106
+   ],
+   "triangles": 1312,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_beartrap_closed",
+   "source": "quaternius-modular-ruins/BearTrap_Closed.fbx",
+   "size": [
+    1.1263,
+    0.6781,
+    1.4176
+   ],
+   "min": [
+    -0.5631,
+    -0.0187,
+    -0.5896
+   ],
+   "max": [
+    0.5631,
+    0.6594,
+    0.828
+   ],
+   "triangles": 608,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_beartrap_open",
+   "source": "quaternius-modular-ruins/BearTrap_Open.fbx",
+   "size": [
+    1.1966,
+    0.27,
+    1.4176
+   ],
+   "min": [
+    -0.5983,
+    -0.0192,
+    -0.5896
+   ],
+   "max": [
+    0.5983,
+    0.2508,
+    0.828
+   ],
+   "triangles": 608,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_bookcase_empty",
+   "source": "quaternius-modular-ruins/Bookcase_Empty.fbx",
+   "size": [
+    2.0785,
+    2.6542,
+    0.6582
+   ],
+   "min": [
+    -1.0393,
+    -0.0247,
+    -0.3451
+   ],
+   "max": [
+    1.0393,
+    2.6295,
+    0.3131
+   ],
+   "triangles": 1260,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_bookcase_full",
+   "source": "quaternius-modular-ruins/Bookcase_Full.fbx",
+   "size": [
+    2.0785,
+    2.6542,
+    0.6582
+   ],
+   "min": [
+    -1.0393,
+    -0.0247,
+    -0.3451
+   ],
+   "max": [
+    1.0393,
+    2.6295,
+    0.3131
+   ],
+   "triangles": 3360,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_brick",
+   "source": "quaternius-modular-ruins/Brick.fbx",
+   "size": [
+    0.5301,
+    0.3194,
+    0.2849
+   ],
+   "min": [
+    -0.254,
+    -0.0017,
+    -0.1568
+   ],
+   "max": [
+    0.2761,
+    0.3176,
+    0.128
+   ],
+   "triangles": 76,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_bricks",
+   "source": "quaternius-modular-ruins/Bricks.fbx",
+   "size": [
+    1.8244,
+    0.5462,
+    1.6101
+   ],
+   "min": [
+    -1.0807,
+    -0.0018,
+    -0.7866
+   ],
+   "max": [
+    0.7436,
+    0.5444,
+    0.8235
+   ],
+   "triangles": 312,
+   "cells": [
+    null,
+    null
+   ],
+   "fit": [
+    "free",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "ruin_bridgesection",
+   "source": "quaternius-modular-ruins/BridgeSection.fbx",
+   "size": [
+    2.5793,
+    0.4431,
+    2.2266
+   ],
+   "min": [
+    -1.3149,
+    -0.1081,
+    -1.4968
+   ],
+   "max": [
+    1.2643,
+    0.335,
+    0.7298
+   ],
+   "triangles": 1888,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_bush_1x1",
+   "source": "quaternius-modular-ruins/Bush_1x1.fbx",
+   "size": [
+    1.1209,
+    1.1996,
+    1.1881
+   ],
+   "min": [
+    -0.5605,
+    -0.3436,
+    -0.5941
+   ],
+   "max": [
+    0.5605,
+    0.856,
+    0.5941
+   ],
+   "triangles": 516,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_bush_2x1",
+   "source": "quaternius-modular-ruins/Bush_2x1.fbx",
+   "size": [
+    1.1881,
+    1.6297,
+    1.1881
+   ],
+   "min": [
+    -0.5941,
+    -0.1737,
+    -0.5941
+   ],
+   "max": [
+    0.5941,
+    1.456,
+    0.5941
+   ],
+   "triangles": 652,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_bush_2x2",
+   "source": "quaternius-modular-ruins/Bush_2x2.fbx",
+   "size": [
+    1.8038,
+    1.6297,
+    1.1881
+   ],
+   "min": [
+    -0.8941,
+    -0.1737,
+    -0.5941
+   ],
+   "max": [
+    0.9097,
+    1.456,
+    0.5941
+   ],
+   "triangles": 956,
+   "cells": [
+    null,
+    0
+   ],
+   "fit": [
+    "free",
+    "sub"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "ruin_candles_1",
+   "source": "quaternius-modular-ruins/Candles_1.fbx",
+   "size": [
+    0.881,
+    0.6067,
+    0.8436
+   ],
+   "min": [
+    -0.3849,
+    -0.0028,
+    -0.4752
+   ],
+   "max": [
+    0.4961,
+    0.604,
+    0.3684
+   ],
+   "triangles": 844,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_candles_2",
+   "source": "quaternius-modular-ruins/Candles_2.fbx",
+   "size": [
+    0.9931,
+    0.6457,
+    0.9861
+   ],
+   "min": [
+    -0.489,
+    -0.0028,
+    -0.4287
+   ],
+   "max": [
+    0.5041,
+    0.643,
+    0.5574
+   ],
+   "triangles": 1224,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_cart",
+   "source": "quaternius-modular-ruins/Cart.fbx",
+   "size": [
+    4.0956,
+    3.4029,
+    3.8574
+   ],
+   "min": [
+    -1.8616,
+    -1.3816,
+    -2.1313
+   ],
+   "max": [
+    2.234,
+    2.0213,
+    1.7261
+   ],
+   "triangles": 1432,
+   "cells": [
+    2,
+    null
+   ],
+   "fit": [
+    "exact",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "ruin_column_bridgesupport",
+   "source": "quaternius-modular-ruins/Column_BridgeSupport.fbx",
+   "size": [
+    0.7796,
+    4.0202,
+    0.6175
+   ],
+   "min": [
+    -0.34,
+    0.0061,
+    -0.3087
+   ],
+   "max": [
+    0.4396,
+    4.0263,
+    0.3087
+   ],
+   "triangles": 1242,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_column_round",
+   "source": "quaternius-modular-ruins/Column_Round.fbx",
+   "size": [
+    0.6566,
+    3.9899,
+    0.6566
+   ],
+   "min": [
+    -0.3283,
+    0,
+    -0.3283
+   ],
+   "max": [
+    0.3283,
+    3.9899,
+    0.3283
+   ],
+   "triangles": 1010,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_column_round_short",
+   "source": "quaternius-modular-ruins/Column_Round_Short.fbx",
+   "size": [
+    0.4894,
+    1.8297,
+    0.4894
+   ],
+   "min": [
+    -0.2447,
+    0,
+    -0.2447
+   ],
+   "max": [
+    0.2447,
+    1.8297,
+    0.2447
+   ],
+   "triangles": 634,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_column_square",
+   "source": "quaternius-modular-ruins/Column_Square.fbx",
+   "size": [
+    0.6566,
+    3.9899,
+    0.6566
+   ],
+   "min": [
+    -0.3283,
+    0,
+    -0.3283
+   ],
+   "max": [
+    0.3283,
+    3.9899,
+    0.3283
+   ],
+   "triangles": 690,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_crate",
+   "source": "quaternius-modular-ruins/Crate.fbx",
+   "size": [
+    0.8239,
+    0.824,
+    0.824
+   ],
+   "min": [
+    -0.412,
+    -0.0102,
+    -0.4121
+   ],
+   "max": [
+    0.412,
+    0.8138,
+    0.4119
+   ],
+   "triangles": 784,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_curve_1",
+   "source": "quaternius-modular-ruins/Curve_1.fbx",
+   "size": [
+    2.2748,
+    1.9974,
+    2.0689
+   ],
+   "min": [
+    -2.2528,
+    -0.0015,
+    -2.0755
+   ],
+   "max": [
+    0.0221,
+    1.9959,
+    -0.0065
+   ],
+   "triangles": 2302,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_curve_1_overgrown",
+   "source": "quaternius-modular-ruins/Curve_1_Overgrown.fbx",
+   "size": [
+    2.3048,
+    2.0009,
+    2.0689
+   ],
+   "min": [
+    -2.2827,
+    -0.0015,
+    -2.0755
+   ],
+   "max": [
+    0.0221,
+    1.9994,
+    -0.0065
+   ],
+   "triangles": 2444,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_curve_2",
+   "source": "quaternius-modular-ruins/Curve_2.fbx",
+   "size": [
+    2.2748,
+    1.9974,
+    2.0689
+   ],
+   "min": [
+    -0.0221,
+    -0.0015,
+    -2.0755
+   ],
+   "max": [
+    2.2528,
+    1.9959,
+    -0.0065
+   ],
+   "triangles": 2302,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_curve_2_overgrown",
+   "source": "quaternius-modular-ruins/Curve_2_Overgrown.fbx",
+   "size": [
+    2.3048,
+    2.0009,
+    2.0689
+   ],
+   "min": [
+    -0.0221,
+    -0.0015,
+    -2.0755
+   ],
+   "max": [
+    2.2827,
+    1.9994,
+    -0.0065
+   ],
+   "triangles": 2444,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_doors_gothicarch",
+   "source": "quaternius-modular-ruins/Doors_GothicArch.fbx",
+   "size": [
+    2.3129,
+    3.2096,
+    0.2743
+   ],
+   "min": [
+    -1.1565,
+    -0.006,
+    -0.1371
+   ],
+   "max": [
+    1.1565,
+    3.2036,
+    0.1371
+   ],
+   "triangles": 2184,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "overhang",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_doors_gothicarch_covered",
+   "source": "quaternius-modular-ruins/Doors_GothicArch_Covered.fbx",
+   "size": [
+    2.5226,
+    3.2096,
+    0.2789
+   ],
+   "min": [
+    -1.2675,
+    -0.006,
+    -0.1394
+   ],
+   "max": [
+    1.2551,
+    3.2036,
+    0.1394
+   ],
+   "triangles": 2096,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "overhang",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_doors_roundarch",
+   "source": "quaternius-modular-ruins/Doors_RoundArch.fbx",
+   "size": [
+    2.3129,
+    2.9694,
+    0.2743
+   ],
+   "min": [
+    -1.1565,
+    -0.006,
+    -0.1371
+   ],
+   "max": [
+    1.1565,
+    2.9634,
+    0.1371
+   ],
+   "triangles": 2184,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "overhang",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_doors_roundarch_covered",
+   "source": "quaternius-modular-ruins/Doors_RoundArch_Covered.fbx",
+   "size": [
+    2.5226,
+    2.9694,
+    0.2789
+   ],
+   "min": [
+    -1.2675,
+    -0.006,
+    -0.1394
+   ],
+   "max": [
+    1.2551,
+    2.9634,
+    0.1394
+   ],
+   "triangles": 2096,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "overhang",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_flag_gothicarch",
+   "source": "quaternius-modular-ruins/Flag_GothicArch.fbx",
+   "size": [
+    2.1881,
+    1.2157,
+    0.316
+   ],
+   "min": [
+    -1.1063,
+    2.2504,
+    -0.1126
+   ],
+   "max": [
+    1.0818,
+    3.466,
+    0.2034
+   ],
+   "triangles": 144,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "overhang",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_flag_roundarch",
+   "source": "quaternius-modular-ruins/Flag_RoundArch.fbx",
+   "size": [
+    2.1686,
+    1.1274,
+    0.316
+   ],
+   "min": [
+    -1.0845,
+    2.2504,
+    -0.1126
+   ],
+   "max": [
+    1.0841,
+    3.3778,
+    0.2034
+   ],
+   "triangles": 132,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "overhang",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_flag_wall",
+   "source": "quaternius-modular-ruins/Flag_Wall.fbx",
+   "size": [
+    0.9235,
+    2.0179,
+    0.316
+   ],
+   "min": [
+    -0.4617,
+    -0.0333,
+    -0.1126
+   ],
+   "max": [
+    0.4617,
+    1.9847,
+    0.2034
+   ],
+   "triangles": 204,
+   "cells": [
+    0.5,
+    0
+   ],
+   "fit": [
+    "half",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_flag_wall2",
+   "source": "quaternius-modular-ruins/Flag_Wall2.fbx",
+   "size": [
+    1.1267,
+    2.3543,
+    0.3224
+   ],
+   "min": [
+    -0.5633,
+    -2.3068,
+    -0.2748
+   ],
+   "max": [
+    0.5633,
+    0.0475,
+    0.0475
+   ],
+   "triangles": 368,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_floor_diamond",
+   "source": "quaternius-modular-ruins/Floor_Diamond.fbx",
+   "size": [
+    2,
+    0.1183,
+    2
+   ],
+   "min": [
+    -1,
+    -0.1019,
+    -1
+   ],
+   "max": [
+    1,
+    0.0163,
+    1
+   ],
+   "triangles": 400,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_floor_hole_corner",
+   "source": "quaternius-modular-ruins/Floor_Hole_Corner.fbx",
+   "size": [
+    1.9946,
+    0.1427,
+    1.9967
+   ],
+   "min": [
+    -0.9946,
+    -0.0819,
+    -0.9967
+   ],
+   "max": [
+    1,
+    0.0608,
+    1
+   ],
+   "triangles": 327,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_floor_hole_straight",
+   "source": "quaternius-modular-ruins/Floor_Hole_Straight.fbx",
+   "size": [
+    2,
+    0.1427,
+    1.1038
+   ],
+   "min": [
+    -1,
+    -0.0819,
+    -0.9967
+   ],
+   "max": [
+    1,
+    0.0608,
+    0.1071
+   ],
+   "triangles": 227,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_floor_squarelarge",
+   "source": "quaternius-modular-ruins/Floor_SquareLarge.fbx",
+   "size": [
+    1.9785,
+    0.108,
+    1.9798
+   ],
+   "min": [
+    -0.9893,
+    -0.081,
+    -0.9875
+   ],
+   "max": [
+    0.9893,
+    0.027,
+    0.9923
+   ],
+   "triangles": 118,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_floor_squares",
+   "source": "quaternius-modular-ruins/Floor_Squares.fbx",
+   "size": [
+    1.9921,
+    0.1159,
+    1.9956
+   ],
+   "min": [
+    -0.9946,
+    -0.0819,
+    -0.9967
+   ],
+   "max": [
+    0.9975,
+    0.034,
+    0.9989
+   ],
+   "triangles": 413,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_floor_standard",
+   "source": "quaternius-modular-ruins/Floor_Standard.fbx",
+   "size": [
+    1.9904,
+    0.2859,
+    1.9766
+   ],
+   "min": [
+    -0.9934,
+    -0.253,
+    -0.9891
+   ],
+   "max": [
+    0.9971,
+    0.033,
+    0.9874
+   ],
+   "triangles": 1304,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_floor_standard_half",
+   "source": "quaternius-modular-ruins/Floor_Standard_Half.fbx",
+   "size": [
+    1.9962,
+    0.1162,
+    1.9987
+   ],
+   "min": [
+    -0.9951,
+    -0.0821,
+    -0.9935
+   ],
+   "max": [
+    1.0011,
+    0.0342,
+    1.0052
+   ],
+   "triangles": 821,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_pot1",
+   "source": "quaternius-modular-ruins/Pot1.fbx",
+   "size": [
+    0.7684,
+    0.9617,
+    0.7683
+   ],
+   "min": [
+    -0.3842,
+    -0.0061,
+    -0.3841
+   ],
+   "max": [
+    0.3842,
+    0.9556,
+    0.3841
+   ],
+   "triangles": 1038,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_pot1_broken",
+   "source": "quaternius-modular-ruins/Pot1_Broken.fbx",
+   "size": [
+    0.7684,
+    0.6608,
+    0.7683
+   ],
+   "min": [
+    -0.3842,
+    -0.0061,
+    -0.3841
+   ],
+   "max": [
+    0.3842,
+    0.6547,
+    0.3841
+   ],
+   "triangles": 432,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_pot2",
+   "source": "quaternius-modular-ruins/Pot2.fbx",
+   "size": [
+    0.4633,
+    0.6373,
+    0.4633
+   ],
+   "min": [
+    -0.2317,
+    -0.0004,
+    -0.2317
+   ],
+   "max": [
+    0.2317,
+    0.6369,
+    0.2317
+   ],
+   "triangles": 878,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_pot2_broken",
+   "source": "quaternius-modular-ruins/Pot2_Broken.fbx",
+   "size": [
+    0.4617,
+    0.4287,
+    0.4616
+   ],
+   "min": [
+    -0.2309,
+    -0.0019,
+    -0.2308
+   ],
+   "max": [
+    0.2309,
+    0.4267,
+    0.2308
+   ],
+   "triangles": 322,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_pot3",
+   "source": "quaternius-modular-ruins/Pot3.fbx",
+   "size": [
+    0.4633,
+    0.8353,
+    0.4633
+   ],
+   "min": [
+    -0.2317,
+    -0.0004,
+    -0.2317
+   ],
+   "max": [
+    0.2317,
+    0.8349,
+    0.2317
+   ],
+   "triangles": 750,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_pot3_broken",
+   "source": "quaternius-modular-ruins/Pot3_Broken.fbx",
+   "size": [
+    0.4633,
+    0.3271,
+    0.4633
+   ],
+   "min": [
+    -0.2317,
+    -0.0004,
+    -0.2317
+   ],
+   "max": [
+    0.2317,
+    0.3268,
+    0.2317
+   ],
+   "triangles": 188,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_rail_corner",
+   "source": "quaternius-modular-ruins/Rail_Corner.fbx",
+   "size": [
+    1.1678,
+    0.4883,
+    1.1678
+   ],
+   "min": [
+    -0.1678,
+    -0.0025,
+    -0.1678
+   ],
+   "max": [
+    1,
+    0.4858,
+    1
+   ],
+   "triangles": 468,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_rail_divider",
+   "source": "quaternius-modular-ruins/Rail_Divider.fbx",
+   "size": [
+    0.3626,
+    0.4883,
+    0.3626
+   ],
+   "min": [
+    -0.1678,
+    -0.0025,
+    -0.1769
+   ],
+   "max": [
+    0.1948,
+    0.4858,
+    0.1857
+   ],
+   "triangles": 208,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_rail_straight",
+   "source": "quaternius-modular-ruins/Rail_Straight.fbx",
+   "size": [
+    0.3626,
+    0.4883,
+    2
+   ],
+   "min": [
+    -0.1678,
+    -0.0025,
+    -1
+   ],
+   "max": [
+    0.1948,
+    0.4858,
+    1
+   ],
+   "triangles": 428,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_stairs",
+   "source": "quaternius-modular-ruins/Stairs.fbx",
+   "size": [
+    2.0154,
+    0.9218,
+    2.1519
+   ],
+   "min": [
+    -1.0049,
+    -0.0189,
+    -1.0769
+   ],
+   "max": [
+    1.0105,
+    0.9029,
+    1.075
+   ],
+   "triangles": 2272,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_stairs_2",
+   "source": "quaternius-modular-ruins/Stairs_2.fbx",
+   "size": [
+    2.1519,
+    1.7817,
+    2.0154
+   ],
+   "min": [
+    -1.0769,
+    -0.003,
+    -1.0105
+   ],
+   "max": [
+    1.075,
+    1.7787,
+    1.0049
+   ],
+   "triangles": 2072,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_statue_fox",
+   "source": "quaternius-modular-ruins/Statue_Fox.fbx",
+   "size": [
+    1.3506,
+    3.7525,
+    1.6786
+   ],
+   "min": [
+    -0.5966,
+    0,
+    -0.9022
+   ],
+   "max": [
+    0.7541,
+    3.7525,
+    0.7764
+   ],
+   "triangles": 2152,
+   "cells": [
+    0,
+    null
+   ],
+   "fit": [
+    "sub",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "ruin_statue_stag",
+   "source": "quaternius-modular-ruins/Statue_Stag.fbx",
+   "size": [
+    2.3066,
+    4.6336,
+    1.2718
+   ],
+   "min": [
+    -1.71,
+    0,
+    -0.6029
+   ],
+   "max": [
+    0.5966,
+    4.6336,
+    0.6689
+   ],
+   "triangles": 4042,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "overhang",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_support_center",
+   "source": "quaternius-modular-ruins/Support_Center.fbx",
+   "size": [
+    3.0002,
+    4.1096,
+    0.6649
+   ],
+   "min": [
+    -1.5,
+    0,
+    -0.3325
+   ],
+   "max": [
+    1.5002,
+    4.1096,
+    0.3325
+   ],
+   "triangles": 4432,
+   "cells": [
+    null,
+    0
+   ],
+   "fit": [
+    "free",
+    "sub"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "ruin_support_left",
+   "source": "quaternius-modular-ruins/Support_Left.fbx",
+   "size": [
+    1.6452,
+    4.0962,
+    0.6589
+   ],
+   "min": [
+    -0.1434,
+    0,
+    -0.3295
+   ],
+   "max": [
+    1.5018,
+    4.0961,
+    0.3295
+   ],
+   "triangles": 3570,
+   "cells": [
+    null,
+    0
+   ],
+   "fit": [
+    "free",
+    "sub"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "ruin_support_right",
+   "source": "quaternius-modular-ruins/Support_Right.fbx",
+   "size": [
+    1.6452,
+    4.0962,
+    0.6589
+   ],
+   "min": [
+    -1.5018,
+    0,
+    -0.3295
+   ],
+   "max": [
+    0.1434,
+    4.0961,
+    0.3295
+   ],
+   "triangles": 3570,
+   "cells": [
+    null,
+    0
+   ],
+   "fit": [
+    "free",
+    "sub"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "ruin_support_tall",
+   "source": "quaternius-modular-ruins/Support_Tall.fbx",
+   "size": [
+    0.7952,
+    4.1222,
+    0.6544
+   ],
+   "min": [
+    -0.3929,
+    -0.0001,
+    -0.3272
+   ],
+   "max": [
+    0.4023,
+    4.1222,
+    0.3272
+   ],
+   "triangles": 674,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_torch",
+   "source": "quaternius-modular-ruins/Torch.fbx",
+   "size": [
+    0.2783,
+    1.1704,
+    0.4376
+   ],
+   "min": [
+    -0.1391,
+    -0.2708,
+    -0.2935
+   ],
+   "max": [
+    0.1391,
+    0.8997,
+    0.1441
+   ],
+   "triangles": 386,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_trapdoor",
+   "source": "quaternius-modular-ruins/Trapdoor.fbx",
+   "size": [
+    1.7413,
+    0.2152,
+    1.5733
+   ],
+   "min": [
+    -0.8687,
+    -0.0055,
+    -0.7879
+   ],
+   "max": [
+    0.8726,
+    0.2097,
+    0.7855
+   ],
+   "triangles": 506,
+   "cells": [
+    null,
+    null
+   ],
+   "fit": [
+    "free",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "ruin_wall",
+   "source": "quaternius-modular-ruins/Wall.fbx",
+   "size": [
+    1.9984,
+    2.0008,
+    0.2859
+   ],
+   "min": [
+    -0.9991,
+    -0.0011,
+    -0.2529
+   ],
+   "max": [
+    0.9993,
+    1.9998,
+    0.033
+   ],
+   "triangles": 1296,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_wall_archgothic",
+   "source": "quaternius-modular-ruins/Wall_ArchGothic.fbx",
+   "size": [
+    4.004,
+    3.9941,
+    0.2856
+   ],
+   "min": [
+    -2.002,
+    0.0027,
+    -0.2503
+   ],
+   "max": [
+    2.002,
+    3.9968,
+    0.0353
+   ],
+   "triangles": 2352,
+   "cells": [
+    2,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_wall_archround",
+   "source": "quaternius-modular-ruins/Wall_ArchRound.fbx",
+   "size": [
+    4.004,
+    3.9941,
+    0.31
+   ],
+   "min": [
+    -2.002,
+    0.0027,
+    -0.2503
+   ],
+   "max": [
+    2.002,
+    3.9968,
+    0.0597
+   ],
+   "triangles": 2364,
+   "cells": [
+    2,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_wall_archround_broken",
+   "source": "quaternius-modular-ruins/Wall_ArchRound_Broken.fbx",
+   "size": [
+    3.9932,
+    3.9848,
+    0.31
+   ],
+   "min": [
+    -1.997,
+    0.0027,
+    -0.2503
+   ],
+   "max": [
+    1.9961,
+    3.9874,
+    0.0597
+   ],
+   "triangles": 1604,
+   "cells": [
+    2,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_wall_archround_overgrown",
+   "source": "quaternius-modular-ruins/Wall_ArchRound_Overgrown.fbx",
+   "size": [
+    4.004,
+    3.9941,
+    0.3161
+   ],
+   "min": [
+    -2.002,
+    0.0027,
+    -0.2564
+   ],
+   "max": [
+    2.002,
+    3.9968,
+    0.0597
+   ],
+   "triangles": 2602,
+   "cells": [
+    2,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_wall_archround_overgrown_broken",
+   "source": "quaternius-modular-ruins/Wall_ArchRound_Overgrown_Broken.fbx",
+   "size": [
+    3.9932,
+    3.9848,
+    0.3161
+   ],
+   "min": [
+    -1.997,
+    0.0027,
+    -0.2564
+   ],
+   "max": [
+    1.9961,
+    3.9874,
+    0.0597
+   ],
+   "triangles": 1826,
+   "cells": [
+    2,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_wall_broken",
+   "source": "quaternius-modular-ruins/Wall_Broken.fbx",
+   "size": [
+    1.9904,
+    1.9473,
+    0.2859
+   ],
+   "min": [
+    -0.9933,
+    0.0126,
+    -0.2618
+   ],
+   "max": [
+    0.9971,
+    1.9599,
+    0.0242
+   ],
+   "triangles": 976,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_wall_double_broken",
+   "source": "quaternius-modular-ruins/Wall_Double_Broken.fbx",
+   "size": [
+    1.9904,
+    0.9868,
+    0.5656
+   ],
+   "min": [
+    -0.9933,
+    0.003,
+    -0.28
+   ],
+   "max": [
+    0.9971,
+    0.9898,
+    0.2856
+   ],
+   "triangles": 856,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_wall_double_hole",
+   "source": "quaternius-modular-ruins/Wall_Double_Hole.fbx",
+   "size": [
+    1.9936,
+    1.9758,
+    0.5654
+   ],
+   "min": [
+    -0.9965,
+    0.003,
+    -0.2798
+   ],
+   "max": [
+    0.9971,
+    1.9788,
+    0.2856
+   ],
+   "triangles": 1880,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_wall_half",
+   "source": "quaternius-modular-ruins/Wall_Half.fbx",
+   "size": [
+    0.9961,
+    2.0008,
+    0.2856
+   ],
+   "min": [
+    -0.497,
+    -0.0011,
+    -0.0328
+   ],
+   "max": [
+    0.4991,
+    1.9998,
+    0.2528
+   ],
+   "triangles": 632,
+   "cells": [
+    0.5,
+    0
+   ],
+   "fit": [
+    "half",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_wall_hole",
+   "source": "quaternius-modular-ruins/Wall_Hole.fbx",
+   "size": [
+    1.9984,
+    2.0008,
+    0.2856
+   ],
+   "min": [
+    -0.9991,
+    0.0346,
+    -0.2528
+   ],
+   "max": [
+    0.9993,
+    2.0354,
+    0.0328
+   ],
+   "triangles": 912,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_wall_overgrown",
+   "source": "quaternius-modular-ruins/Wall_Overgrown.fbx",
+   "size": [
+    1.9904,
+    1.9845,
+    0.3039
+   ],
+   "min": [
+    -0.9934,
+    0.0126,
+    -0.2613
+   ],
+   "max": [
+    0.9971,
+    1.9971,
+    0.0425
+   ],
+   "triangles": 1370,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_window_bars",
+   "source": "quaternius-modular-ruins/Window_Bars.fbx",
+   "size": [
+    1.9904,
+    1.9872,
+    0.3029
+   ],
+   "min": [
+    -0.9934,
+    0.0019,
+    -0.2666
+   ],
+   "max": [
+    0.9971,
+    1.9891,
+    0.0363
+   ],
+   "triangles": 1222,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_window_bars_double_overgrown",
+   "source": "quaternius-modular-ruins/Window_Bars_Double_Overgrown.fbx",
+   "size": [
+    2.0089,
+    3.9872,
+    0.3099
+   ],
+   "min": [
+    -0.9934,
+    0.0019,
+    -0.2583
+   ],
+   "max": [
+    1.0155,
+    3.9891,
+    0.0516
+   ],
+   "triangles": 2192,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_window_bars_overgrown",
+   "source": "quaternius-modular-ruins/Window_Bars_Overgrown.fbx",
+   "size": [
+    1.9904,
+    1.9872,
+    0.3052
+   ],
+   "min": [
+    -0.9934,
+    0.0019,
+    -0.2666
+   ],
+   "max": [
+    0.9971,
+    1.9891,
+    0.0386
+   ],
+   "triangles": 1352,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_window_open",
+   "source": "quaternius-modular-ruins/Window_Open.fbx",
+   "size": [
+    1.9904,
+    1.9872,
+    0.3029
+   ],
+   "min": [
+    -0.9934,
+    0.0019,
+    -0.2666
+   ],
+   "max": [
+    0.9971,
+    1.9891,
+    0.0363
+   ],
+   "triangles": 1148,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "ruin_window_open_double",
+   "source": "quaternius-modular-ruins/Window_Open_Double.fbx",
+   "size": [
+    1.9904,
+    3.9872,
+    0.3044
+   ],
+   "min": [
+    -0.9934,
+    0.0019,
+    -0.2528
+   ],
+   "max": [
+    0.9971,
+    3.9891,
+    0.0516
+   ],
+   "triangles": 1952,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_balcony_wall",
+   "source": "kenney-fantasy-town/balcony-wall.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 64,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_balcony_wall_fence",
+   "source": "kenney-fantasy-town/balcony-wall-fence.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 102,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_banner_green",
+   "source": "kenney-fantasy-town/banner-green.glb",
+   "size": [
+    0.1,
+    1.6787,
+    1
+   ],
+   "min": [
+    0.75,
+    0.3213,
+    -0.5
+   ],
+   "max": [
+    0.85,
+    2,
+    0.5
+   ],
+   "triangles": 102,
+   "cells": [
+    0,
+    0.5
+   ],
+   "fit": [
+    "sub",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_banner_red",
+   "source": "kenney-fantasy-town/banner-red.glb",
+   "size": [
+    0.1,
+    1.6787,
+    1
+   ],
+   "min": [
+    0.75,
+    0.3213,
+    -0.5
+   ],
+   "max": [
+    0.85,
+    2,
+    0.5
+   ],
+   "triangles": 98,
+   "cells": [
+    0,
+    0.5
+   ],
+   "fit": [
+    "sub",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_blade",
+   "source": "kenney-fantasy-town/blade.glb",
+   "size": [
+    0.222,
+    4,
+    0.8608
+   ],
+   "min": [
+    -0.111,
+    0,
+    -0.111
+   ],
+   "max": [
+    0.111,
+    4,
+    0.7498
+   ],
+   "triangles": 180,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_cart",
+   "source": "kenney-fantasy-town/cart.glb",
+   "size": [
+    1.786,
+    1.071,
+    2.68
+   ],
+   "min": [
+    -0.893,
+    0,
+    -1.29
+   ],
+   "max": [
+    0.893,
+    1.071,
+    1.39
+   ],
+   "triangles": 608,
+   "cells": [
+    null,
+    null
+   ],
+   "fit": [
+    "free",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "town_cart_high",
+   "source": "kenney-fantasy-town/cart-high.glb",
+   "size": [
+    1.786,
+    1.721,
+    2.78
+   ],
+   "min": [
+    -0.893,
+    0,
+    -1.29
+   ],
+   "max": [
+    0.893,
+    1.721,
+    1.49
+   ],
+   "triangles": 1028,
+   "cells": [
+    null,
+    null
+   ],
+   "fit": [
+    "free",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "town_chimney",
+   "source": "kenney-fantasy-town/chimney.glb",
+   "size": [
+    0.4238,
+    2,
+    0.68
+   ],
+   "min": [
+    0.4262,
+    0,
+    -0.34
+   ],
+   "max": [
+    0.85,
+    2,
+    0.34
+   ],
+   "triangles": 32,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_chimney_base",
+   "source": "kenney-fantasy-town/chimney-base.glb",
+   "size": [
+    0.6876,
+    2,
+    1.04
+   ],
+   "min": [
+    0.1624,
+    0,
+    -0.52
+   ],
+   "max": [
+    0.85,
+    2,
+    0.52
+   ],
+   "triangles": 78,
+   "cells": [
+    0,
+    0.5
+   ],
+   "fit": [
+    "sub",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_chimney_top",
+   "source": "kenney-fantasy-town/chimney-top.glb",
+   "size": [
+    0.5038,
+    1.25,
+    0.68
+   ],
+   "min": [
+    0.4262,
+    0,
+    -0.34
+   ],
+   "max": [
+    0.93,
+    1.25,
+    0.34
+   ],
+   "triangles": 78,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fence",
+   "source": "kenney-fantasy-town/fence.glb",
+   "size": [
+    0.15,
+    0.76,
+    2
+   ],
+   "min": [
+    0.85,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.76,
+    1
+   ],
+   "triangles": 84,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fence_broken",
+   "source": "kenney-fantasy-town/fence-broken.glb",
+   "size": [
+    0.5095,
+    0.76,
+    2
+   ],
+   "min": [
+    0.4905,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.76,
+    1
+   ],
+   "triangles": 124,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fence_curved",
+   "source": "kenney-fantasy-town/fence-curved.glb",
+   "size": [
+    2,
+    0.76,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.76,
+    1
+   ],
+   "triangles": 308,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fence_gate",
+   "source": "kenney-fantasy-town/fence-gate.glb",
+   "size": [
+    0.15,
+    0.76,
+    2
+   ],
+   "min": [
+    0.85,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.76,
+    1
+   ],
+   "triangles": 560,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fountain_center",
+   "source": "kenney-fantasy-town/fountain-center.glb",
+   "size": [
+    2,
+    0.28,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.28,
+    1
+   ],
+   "triangles": 4,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fountain_corner",
+   "source": "kenney-fantasy-town/fountain-corner.glb",
+   "size": [
+    2,
+    0.56,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.56,
+    1
+   ],
+   "triangles": 60,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fountain_corner_inner",
+   "source": "kenney-fantasy-town/fountain-corner-inner.glb",
+   "size": [
+    2,
+    0.56,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.56,
+    1
+   ],
+   "triangles": 146,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fountain_corner_inner_square",
+   "source": "kenney-fantasy-town/fountain-corner-inner-square.glb",
+   "size": [
+    2,
+    0.56,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.56,
+    1
+   ],
+   "triangles": 46,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fountain_curved",
+   "source": "kenney-fantasy-town/fountain-curved.glb",
+   "size": [
+    2,
+    0.56,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.56,
+    1
+   ],
+   "triangles": 266,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fountain_edge",
+   "source": "kenney-fantasy-town/fountain-edge.glb",
+   "size": [
+    2,
+    0.56,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.56,
+    1
+   ],
+   "triangles": 36,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fountain_round",
+   "source": "kenney-fantasy-town/fountain-round.glb",
+   "size": [
+    4,
+    0.56,
+    4
+   ],
+   "min": [
+    -2,
+    0,
+    -2
+   ],
+   "max": [
+    2,
+    0.56,
+    2
+   ],
+   "triangles": 1002,
+   "cells": [
+    2,
+    2
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fountain_round_detail",
+   "source": "kenney-fantasy-town/fountain-round-detail.glb",
+   "size": [
+    4,
+    0.96,
+    4
+   ],
+   "min": [
+    -2,
+    0,
+    -2
+   ],
+   "max": [
+    2,
+    0.96,
+    2
+   ],
+   "triangles": 1628,
+   "cells": [
+    2,
+    2
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fountain_square",
+   "source": "kenney-fantasy-town/fountain-square.glb",
+   "size": [
+    4,
+    0.9104,
+    4
+   ],
+   "min": [
+    -2,
+    0,
+    -2
+   ],
+   "max": [
+    2,
+    0.9104,
+    2
+   ],
+   "triangles": 270,
+   "cells": [
+    2,
+    2
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_fountain_square_detail",
+   "source": "kenney-fantasy-town/fountain-square-detail.glb",
+   "size": [
+    4,
+    0.96,
+    4
+   ],
+   "min": [
+    -2,
+    0,
+    -2
+   ],
+   "max": [
+    2,
+    0.96,
+    2
+   ],
+   "triangles": 334,
+   "cells": [
+    2,
+    2
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_hedge",
+   "source": "kenney-fantasy-town/hedge.glb",
+   "size": [
+    0.5,
+    0.5,
+    2
+   ],
+   "min": [
+    0.5,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.5,
+    1
+   ],
+   "triangles": 54,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_hedge_curved",
+   "source": "kenney-fantasy-town/hedge-curved.glb",
+   "size": [
+    2,
+    0.5,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.5,
+    1
+   ],
+   "triangles": 280,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_hedge_gate",
+   "source": "kenney-fantasy-town/hedge-gate.glb",
+   "size": [
+    0.5,
+    0.5,
+    2
+   ],
+   "min": [
+    0.5,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.5,
+    1
+   ],
+   "triangles": 76,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_hedge_large",
+   "source": "kenney-fantasy-town/hedge-large.glb",
+   "size": [
+    0.8,
+    1.2,
+    2
+   ],
+   "min": [
+    0.2,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    1.2,
+    1
+   ],
+   "triangles": 90,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_hedge_large_curved",
+   "source": "kenney-fantasy-town/hedge-large-curved.glb",
+   "size": [
+    2,
+    1.2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    1.2,
+    1
+   ],
+   "triangles": 252,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_hedge_large_gate",
+   "source": "kenney-fantasy-town/hedge-large-gate.glb",
+   "size": [
+    0.8,
+    1.2,
+    2
+   ],
+   "min": [
+    0.2,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    1.2,
+    1
+   ],
+   "triangles": 164,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_lantern",
+   "source": "kenney-fantasy-town/lantern.glb",
+   "size": [
+    0.4329,
+    3.112,
+    0.4486
+   ],
+   "min": [
+    -0.2164,
+    0,
+    -0.2243
+   ],
+   "max": [
+    0.2164,
+    3.112,
+    0.2243
+   ],
+   "triangles": 158,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_overhang",
+   "source": "kenney-fantasy-town/overhang.glb",
+   "size": [
+    0.57,
+    0.66,
+    2
+   ],
+   "min": [
+    0.28,
+    1.34,
+    -1
+   ],
+   "max": [
+    0.85,
+    2,
+    1
+   ],
+   "triangles": 68,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_pillar_stone",
+   "source": "kenney-fantasy-town/pillar-stone.glb",
+   "size": [
+    0.32,
+    2,
+    0.32
+   ],
+   "min": [
+    -0.16,
+    0,
+    -0.16
+   ],
+   "max": [
+    0.16,
+    2,
+    0.16
+   ],
+   "triangles": 124,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_pillar_wood",
+   "source": "kenney-fantasy-town/pillar-wood.glb",
+   "size": [
+    0.32,
+    2,
+    0.32
+   ],
+   "min": [
+    -0.16,
+    0,
+    -0.16
+   ],
+   "max": [
+    0.16,
+    2,
+    0.16
+   ],
+   "triangles": 44,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_planks",
+   "source": "kenney-fantasy-town/planks.glb",
+   "size": [
+    2,
+    0.12,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.12,
+    1
+   ],
+   "triangles": 96,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_planks_half",
+   "source": "kenney-fantasy-town/planks-half.glb",
+   "size": [
+    1,
+    0.12,
+    2
+   ],
+   "min": [
+    0,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.12,
+    1
+   ],
+   "triangles": 84,
+   "cells": [
+    0.5,
+    1
+   ],
+   "fit": [
+    "half",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_planks_opening",
+   "source": "kenney-fantasy-town/planks-opening.glb",
+   "size": [
+    2,
+    0.12,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.12,
+    1
+   ],
+   "triangles": 144,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_poles",
+   "source": "kenney-fantasy-town/poles.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 28,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_poles_horizontal",
+   "source": "kenney-fantasy-town/poles-horizontal.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 40,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_road",
+   "source": "kenney-fantasy-town/road.glb",
+   "size": [
+    2,
+    0.05,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.05,
+    1
+   ],
+   "triangles": 12,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_road_bend",
+   "source": "kenney-fantasy-town/road-bend.glb",
+   "size": [
+    6,
+    0.1,
+    6
+   ],
+   "min": [
+    -3,
+    0,
+    -3
+   ],
+   "max": [
+    3,
+    0.1,
+    3
+   ],
+   "triangles": 280,
+   "cells": [
+    3,
+    3
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_road_corner",
+   "source": "kenney-fantasy-town/road-corner.glb",
+   "size": [
+    2,
+    0.1,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.1,
+    1
+   ],
+   "triangles": 150,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_road_corner_inner",
+   "source": "kenney-fantasy-town/road-corner-inner.glb",
+   "size": [
+    2,
+    0.1,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.1,
+    1
+   ],
+   "triangles": 146,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_road_curb",
+   "source": "kenney-fantasy-town/road-curb.glb",
+   "size": [
+    2,
+    0.1,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.1,
+    1
+   ],
+   "triangles": 12,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_road_curb_end",
+   "source": "kenney-fantasy-town/road-curb-end.glb",
+   "size": [
+    2,
+    0.1,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.1,
+    1
+   ],
+   "triangles": 36,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_road_edge",
+   "source": "kenney-fantasy-town/road-edge.glb",
+   "size": [
+    2,
+    0.1,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.1,
+    1
+   ],
+   "triangles": 36,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_road_edge_slope",
+   "source": "kenney-fantasy-town/road-edge-slope.glb",
+   "size": [
+    2,
+    0.5,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.5,
+    1
+   ],
+   "triangles": 38,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_road_slope",
+   "source": "kenney-fantasy-town/road-slope.glb",
+   "size": [
+    2,
+    0.45,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.45,
+    1
+   ],
+   "triangles": 12,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_rock_large",
+   "source": "kenney-fantasy-town/rock-large.glb",
+   "size": [
+    3.34,
+    2.3256,
+    3.0971
+   ],
+   "min": [
+    -1.7419,
+    0,
+    -1.4494
+   ],
+   "max": [
+    1.5981,
+    2.3256,
+    1.6477
+   ],
+   "triangles": 200,
+   "cells": [
+    null,
+    null
+   ],
+   "fit": [
+    "free",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "town_rock_small",
+   "source": "kenney-fantasy-town/rock-small.glb",
+   "size": [
+    1.9966,
+    2.04,
+    2.6525
+   ],
+   "min": [
+    -1.0548,
+    0,
+    -1.5695
+   ],
+   "max": [
+    0.9419,
+    2.04,
+    1.083
+   ],
+   "triangles": 128,
+   "cells": [
+    1,
+    null
+   ],
+   "fit": [
+    "exact",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "town_rock_wide",
+   "source": "kenney-fantasy-town/rock-wide.glb",
+   "size": [
+    2.187,
+    2.04,
+    3.1349
+   ],
+   "min": [
+    -1.0935,
+    0,
+    -1.5674
+   ],
+   "max": [
+    1.0935,
+    2.04,
+    1.5674
+   ],
+   "triangles": 156,
+   "cells": [
+    1,
+    null
+   ],
+   "fit": [
+    "overhang",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "town_roof",
+   "source": "kenney-fantasy-town/roof.glb",
+   "size": [
+    2.1342,
+    1.2965,
+    2
+   ],
+   "min": [
+    -1.1342,
+    -0.0447,
+    -1
+   ],
+   "max": [
+    1,
+    1.2518,
+    1
+   ],
+   "triangles": 64,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_corner",
+   "source": "kenney-fantasy-town/roof-corner.glb",
+   "size": [
+    2.1342,
+    1.2965,
+    2.1342
+   ],
+   "min": [
+    -1.1342,
+    -0.0447,
+    -1
+   ],
+   "max": [
+    1,
+    1.2518,
+    1.1342
+   ],
+   "triangles": 36,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_corner_inner",
+   "source": "kenney-fantasy-town/roof-corner-inner.glb",
+   "size": [
+    2,
+    1.2518,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    1.2518,
+    1
+   ],
+   "triangles": 30,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_corner_round",
+   "source": "kenney-fantasy-town/roof-corner-round.glb",
+   "size": [
+    2.1342,
+    1.2965,
+    2.1342
+   ],
+   "min": [
+    -1.1342,
+    -0.0447,
+    -1
+   ],
+   "max": [
+    1,
+    1.2518,
+    1.1342
+   ],
+   "triangles": 44,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_flat",
+   "source": "kenney-fantasy-town/roof-flat.glb",
+   "size": [
+    2,
+    0.2518,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.2518,
+    1
+   ],
+   "triangles": 20,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_gable",
+   "source": "kenney-fantasy-town/roof-gable.glb",
+   "size": [
+    2.2,
+    1.1414,
+    2.1414
+   ],
+   "min": [
+    -1.1,
+    0,
+    -1.0707
+   ],
+   "max": [
+    1.1,
+    1.1414,
+    1.0707
+   ],
+   "triangles": 72,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_gable_detail",
+   "source": "kenney-fantasy-town/roof-gable-detail.glb",
+   "size": [
+    2.2,
+    1.3536,
+    2.4243
+   ],
+   "min": [
+    -1.1,
+    -0.0707,
+    -1.2121
+   ],
+   "max": [
+    1.1,
+    1.2828,
+    1.2121
+   ],
+   "triangles": 128,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_gable_end",
+   "source": "kenney-fantasy-town/roof-gable-end.glb",
+   "size": [
+    2.1707,
+    1.1414,
+    2.1414
+   ],
+   "min": [
+    -1.0707,
+    0,
+    -1.0707
+   ],
+   "max": [
+    1.1,
+    1.1414,
+    1.0707
+   ],
+   "triangles": 50,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_gable_top",
+   "source": "kenney-fantasy-town/roof-gable-top.glb",
+   "size": [
+    2,
+    0.7518,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.7518,
+    1
+   ],
+   "triangles": 56,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high",
+   "source": "kenney-fantasy-town/roof-high.glb",
+   "size": [
+    2.1414,
+    2.3521,
+    2
+   ],
+   "min": [
+    -1.1414,
+    -0.0707,
+    -1
+   ],
+   "max": [
+    1,
+    2.2814,
+    1
+   ],
+   "triangles": 64,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high_corner",
+   "source": "kenney-fantasy-town/roof-high-corner.glb",
+   "size": [
+    2.1414,
+    2.3521,
+    2.1414
+   ],
+   "min": [
+    -1.1414,
+    -0.0707,
+    -1
+   ],
+   "max": [
+    1,
+    2.2814,
+    1.1414
+   ],
+   "triangles": 36,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high_corner_round",
+   "source": "kenney-fantasy-town/roof-high-corner-round.glb",
+   "size": [
+    2.1414,
+    2.3521,
+    2.1414
+   ],
+   "min": [
+    -1.1414,
+    -0.0707,
+    -1
+   ],
+   "max": [
+    1,
+    2.2814,
+    1.1414
+   ],
+   "triangles": 48,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high_cornerinner",
+   "source": "kenney-fantasy-town/roof-high-cornerinner.glb",
+   "size": [
+    2,
+    2.2814,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2.2814,
+    1
+   ],
+   "triangles": 30,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high_flat",
+   "source": "kenney-fantasy-town/roof-high-flat.glb",
+   "size": [
+    2,
+    0.2814,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    0.2814,
+    1
+   ],
+   "triangles": 20,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high_gable",
+   "source": "kenney-fantasy-town/roof-high-gable.glb",
+   "size": [
+    2.2,
+    2.313,
+    2.2683
+   ],
+   "min": [
+    -1.1,
+    -0.0894,
+    -1.1342
+   ],
+   "max": [
+    1.1,
+    2.2236,
+    1.1342
+   ],
+   "triangles": 72,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high_gable_detail",
+   "source": "kenney-fantasy-town/roof-high-gable-detail.glb",
+   "size": [
+    2.2,
+    2.6261,
+    2.5367
+   ],
+   "min": [
+    -1.2,
+    -0.1789,
+    -1.2683
+   ],
+   "max": [
+    1,
+    2.4472,
+    1.2683
+   ],
+   "triangles": 140,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high_gable_end",
+   "source": "kenney-fantasy-town/roof-high-gable-end.glb",
+   "size": [
+    2.235,
+    2.313,
+    2.2683
+   ],
+   "min": [
+    -1.135,
+    -0.0894,
+    -1.1342
+   ],
+   "max": [
+    1.1,
+    2.2236,
+    1.1342
+   ],
+   "triangles": 52,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high_gable_top",
+   "source": "kenney-fantasy-town/roof-high-gable-top.glb",
+   "size": [
+    2,
+    1.2814,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    1.2814,
+    1
+   ],
+   "triangles": 56,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high_left",
+   "source": "kenney-fantasy-town/roof-high-left.glb",
+   "size": [
+    2.2828,
+    2.5228,
+    2
+   ],
+   "min": [
+    -1.2828,
+    -0.1414,
+    -1
+   ],
+   "max": [
+    1,
+    2.3814,
+    1
+   ],
+   "triangles": 84,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high_point",
+   "source": "kenney-fantasy-town/roof-high-point.glb",
+   "size": [
+    2.2,
+    2,
+    2.2
+   ],
+   "min": [
+    -1.1,
+    0,
+    -1.1
+   ],
+   "max": [
+    1.1,
+    2,
+    1.1
+   ],
+   "triangles": 44,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high_right",
+   "source": "kenney-fantasy-town/roof-high-right.glb",
+   "size": [
+    2.2828,
+    2.5228,
+    2
+   ],
+   "min": [
+    -1.2828,
+    -0.1414,
+    -1
+   ],
+   "max": [
+    1,
+    2.3814,
+    1
+   ],
+   "triangles": 84,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_high_window",
+   "source": "kenney-fantasy-town/roof-high-window.glb",
+   "size": [
+    2.1414,
+    2.3521,
+    2
+   ],
+   "min": [
+    -1.1414,
+    -0.0707,
+    -1
+   ],
+   "max": [
+    1,
+    2.2814,
+    1
+   ],
+   "triangles": 258,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_left",
+   "source": "kenney-fantasy-town/roof-left.glb",
+   "size": [
+    2.2683,
+    1.4412,
+    2
+   ],
+   "min": [
+    -1.2683,
+    -0.0894,
+    -1
+   ],
+   "max": [
+    1,
+    1.3518,
+    1
+   ],
+   "triangles": 84,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_point",
+   "source": "kenney-fantasy-town/roof-point.glb",
+   "size": [
+    2.2,
+    1,
+    2.2
+   ],
+   "min": [
+    -1.1,
+    0,
+    -1.1
+   ],
+   "max": [
+    1.1,
+    1,
+    1.1
+   ],
+   "triangles": 44,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_right",
+   "source": "kenney-fantasy-town/roof-right.glb",
+   "size": [
+    2.2683,
+    1.4412,
+    2
+   ],
+   "min": [
+    -1.2683,
+    -0.0894,
+    -1
+   ],
+   "max": [
+    1,
+    1.3518,
+    1
+   ],
+   "triangles": 84,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_roof_window",
+   "source": "kenney-fantasy-town/roof-window.glb",
+   "size": [
+    2.1342,
+    1.2965,
+    2
+   ],
+   "min": [
+    -1.1342,
+    -0.0447,
+    -1
+   ],
+   "max": [
+    1,
+    1.2518,
+    1
+   ],
+   "triangles": 176,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stairs_full",
+   "source": "kenney-fantasy-town/stairs-full.glb",
+   "size": [
+    2.04,
+    1,
+    2
+   ],
+   "min": [
+    -1.04,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ],
+   "triangles": 68,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stairs_full_corner_inner",
+   "source": "kenney-fantasy-town/stairs-full-corner-inner.glb",
+   "size": [
+    2,
+    1,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ],
+   "triangles": 84,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stairs_full_corner_outer",
+   "source": "kenney-fantasy-town/stairs-full-corner-outer.glb",
+   "size": [
+    2.04,
+    1,
+    2.04
+   ],
+   "min": [
+    -1.04,
+    0,
+    -1.04
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ],
+   "triangles": 100,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stairs_stone",
+   "source": "kenney-fantasy-town/stairs-stone.glb",
+   "size": [
+    2.04,
+    2,
+    1
+   ],
+   "min": [
+    -1.04,
+    0,
+    -0.5
+   ],
+   "max": [
+    1,
+    2,
+    0.5
+   ],
+   "triangles": 136,
+   "cells": [
+    1,
+    0.5
+   ],
+   "fit": [
+    "exact",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stairs_stone_corner",
+   "source": "kenney-fantasy-town/stairs-stone-corner.glb",
+   "size": [
+    2.04,
+    2,
+    2
+   ],
+   "min": [
+    -1.04,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 144,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stairs_stone_handrail",
+   "source": "kenney-fantasy-town/stairs-stone-handrail.glb",
+   "size": [
+    2.04,
+    2.89,
+    1
+   ],
+   "min": [
+    -1.04,
+    0,
+    -0.5
+   ],
+   "max": [
+    1,
+    2.89,
+    0.5
+   ],
+   "triangles": 272,
+   "cells": [
+    1,
+    0.5
+   ],
+   "fit": [
+    "exact",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stairs_stone_round",
+   "source": "kenney-fantasy-town/stairs-stone-round.glb",
+   "size": [
+    1.7237,
+    2,
+    0.9897
+   ],
+   "min": [
+    -0.8621,
+    0,
+    -0.1109
+   ],
+   "max": [
+    0.8616,
+    2,
+    0.8789
+   ],
+   "triangles": 154,
+   "cells": [
+    null,
+    0.5
+   ],
+   "fit": [
+    "free",
+    "half"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "town_stairs_wide_stone",
+   "source": "kenney-fantasy-town/stairs-wide-stone.glb",
+   "size": [
+    2.04,
+    2,
+    2
+   ],
+   "min": [
+    -1.04,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 136,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stairs_wide_stone_handrail",
+   "source": "kenney-fantasy-town/stairs-wide-stone-handrail.glb",
+   "size": [
+    2.04,
+    2.89,
+    2
+   ],
+   "min": [
+    -1.04,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2.89,
+    1
+   ],
+   "triangles": 272,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stairs_wide_wood",
+   "source": "kenney-fantasy-town/stairs-wide-wood.glb",
+   "size": [
+    2.04,
+    2,
+    2
+   ],
+   "min": [
+    -1.04,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 424,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stairs_wide_wood_handrail",
+   "source": "kenney-fantasy-town/stairs-wide-wood-handrail.glb",
+   "size": [
+    2.04,
+    2.89,
+    2
+   ],
+   "min": [
+    -1.04,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2.89,
+    1
+   ],
+   "triangles": 560,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stairs_wood",
+   "source": "kenney-fantasy-town/stairs-wood.glb",
+   "size": [
+    2.04,
+    2,
+    1
+   ],
+   "min": [
+    -1.04,
+    0,
+    -0.5
+   ],
+   "max": [
+    1,
+    2,
+    0.5
+   ],
+   "triangles": 432,
+   "cells": [
+    1,
+    0.5
+   ],
+   "fit": [
+    "exact",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stairs_wood_handrail",
+   "source": "kenney-fantasy-town/stairs-wood-handrail.glb",
+   "size": [
+    2.04,
+    2.89,
+    1
+   ],
+   "min": [
+    -1.04,
+    0,
+    -0.5
+   ],
+   "max": [
+    1,
+    2.89,
+    0.5
+   ],
+   "triangles": 568,
+   "cells": [
+    1,
+    0.5
+   ],
+   "fit": [
+    "exact",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stall",
+   "source": "kenney-fantasy-town/stall.glb",
+   "size": [
+    1.3,
+    0.731,
+    2
+   ],
+   "min": [
+    -0.65,
+    0,
+    -1
+   ],
+   "max": [
+    0.65,
+    0.731,
+    1
+   ],
+   "triangles": 106,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stall_bench",
+   "source": "kenney-fantasy-town/stall-bench.glb",
+   "size": [
+    0.52,
+    0.451,
+    1.88
+   ],
+   "min": [
+    -0.26,
+    0,
+    -0.94
+   ],
+   "max": [
+    0.26,
+    0.451,
+    0.94
+   ],
+   "triangles": 180,
+   "cells": [
+    0,
+    null
+   ],
+   "fit": [
+    "sub",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "town_stall_green",
+   "source": "kenney-fantasy-town/stall-green.glb",
+   "size": [
+    2,
+    2.474,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2.474,
+    1
+   ],
+   "triangles": 322,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stall_red",
+   "source": "kenney-fantasy-town/stall-red.glb",
+   "size": [
+    2,
+    2.474,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2.474,
+    1
+   ],
+   "triangles": 270,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_stall_stool",
+   "source": "kenney-fantasy-town/stall-stool.glb",
+   "size": [
+    0.52,
+    0.451,
+    0.52
+   ],
+   "min": [
+    -0.26,
+    0,
+    -0.26
+   ],
+   "max": [
+    0.26,
+    0.451,
+    0.26
+   ],
+   "triangles": 180,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_tree",
+   "source": "kenney-fantasy-town/tree.glb",
+   "size": [
+    2.046,
+    4.8255,
+    2.046
+   ],
+   "min": [
+    -1.023,
+    0,
+    -1.023
+   ],
+   "max": [
+    1.023,
+    4.8255,
+    1.023
+   ],
+   "triangles": 168,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_tree_crooked",
+   "source": "kenney-fantasy-town/tree-crooked.glb",
+   "size": [
+    2.046,
+    4.8252,
+    2.046
+   ],
+   "min": [
+    -1.023,
+    0,
+    -1.023
+   ],
+   "max": [
+    1.023,
+    4.8252,
+    1.023
+   ],
+   "triangles": 178,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_tree_high",
+   "source": "kenney-fantasy-town/tree-high.glb",
+   "size": [
+    2.046,
+    5.9455,
+    2.046
+   ],
+   "min": [
+    -1.023,
+    0,
+    -1.023
+   ],
+   "max": [
+    1.023,
+    5.9455,
+    1.023
+   ],
+   "triangles": 200,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_tree_high_crooked",
+   "source": "kenney-fantasy-town/tree-high-crooked.glb",
+   "size": [
+    2.046,
+    5.9452,
+    2.046
+   ],
+   "min": [
+    -1.023,
+    0,
+    -1.023
+   ],
+   "max": [
+    1.023,
+    5.9452,
+    1.023
+   ],
+   "triangles": 210,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_tree_high_round",
+   "source": "kenney-fantasy-town/tree-high-round.glb",
+   "size": [
+    2.0372,
+    5.5013,
+    2.0372
+   ],
+   "min": [
+    -1.0186,
+    0,
+    -1.0186
+   ],
+   "max": [
+    1.0186,
+    5.5013,
+    1.0186
+   ],
+   "triangles": 126,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall",
+   "source": "kenney-fantasy-town/wall.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 32,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_arch",
+   "source": "kenney-fantasy-town/wall-arch.glb",
+   "size": [
+    0.2,
+    2,
+    0.6
+   ],
+   "min": [
+    0.8,
+    0,
+    0.4
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 32,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_arch_top",
+   "source": "kenney-fantasy-town/wall-arch-top.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 146,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_arch_top_detail",
+   "source": "kenney-fantasy-town/wall-arch-top-detail.glb",
+   "size": [
+    0.32,
+    2,
+    2
+   ],
+   "min": [
+    0.74,
+    0,
+    -1
+   ],
+   "max": [
+    1.06,
+    2,
+    1
+   ],
+   "triangles": 168,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_block",
+   "source": "kenney-fantasy-town/wall-block.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 76,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_block_half",
+   "source": "kenney-fantasy-town/wall-block-half.glb",
+   "size": [
+    2,
+    1,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ],
+   "triangles": 76,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_broken",
+   "source": "kenney-fantasy-town/wall-broken.glb",
+   "size": [
+    0.2335,
+    2,
+    2
+   ],
+   "min": [
+    0.7951,
+    0,
+    -1
+   ],
+   "max": [
+    1.0287,
+    2,
+    1
+   ],
+   "triangles": 166,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_corner",
+   "source": "kenney-fantasy-town/wall-corner.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 52,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_corner_detail",
+   "source": "kenney-fantasy-town/wall-corner-detail.glb",
+   "size": [
+    0.32,
+    2,
+    0.32
+   ],
+   "min": [
+    0.74,
+    0,
+    0.74
+   ],
+   "max": [
+    1.06,
+    2,
+    1.06
+   ],
+   "triangles": 176,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_corner_diagonal",
+   "source": "kenney-fantasy-town/wall-corner-diagonal.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 48,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_corner_diagonal_half",
+   "source": "kenney-fantasy-town/wall-corner-diagonal-half.glb",
+   "size": [
+    1.1,
+    2,
+    1.95
+   ],
+   "min": [
+    -0.1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    0.95
+   ],
+   "triangles": 34,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_corner_edge",
+   "source": "kenney-fantasy-town/wall-corner-edge.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 40,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_curved",
+   "source": "kenney-fantasy-town/wall-curved.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 120,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_detail_cross",
+   "source": "kenney-fantasy-town/wall-detail-cross.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 80,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_detail_diagonal",
+   "source": "kenney-fantasy-town/wall-detail-diagonal.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 56,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_detail_horizontal",
+   "source": "kenney-fantasy-town/wall-detail-horizontal.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 46,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_diagonal",
+   "source": "kenney-fantasy-town/wall-diagonal.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 38,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_door",
+   "source": "kenney-fantasy-town/wall-door.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 376,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_doorway_base",
+   "source": "kenney-fantasy-town/wall-doorway-base.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 64,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_doorway_round",
+   "source": "kenney-fantasy-town/wall-doorway-round.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 172,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_doorway_square",
+   "source": "kenney-fantasy-town/wall-doorway-square.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 70,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_doorway_square_wide",
+   "source": "kenney-fantasy-town/wall-doorway-square-wide.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 46,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_doorway_square_wide_curved",
+   "source": "kenney-fantasy-town/wall-doorway-square-wide-curved.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 166,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_half",
+   "source": "kenney-fantasy-town/wall-half.glb",
+   "size": [
+    0.2,
+    1,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ],
+   "triangles": 32,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_rounded",
+   "source": "kenney-fantasy-town/wall-rounded.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 136,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_side",
+   "source": "kenney-fantasy-town/wall-side.glb",
+   "size": [
+    0.2,
+    2,
+    0.52
+   ],
+   "min": [
+    0.8,
+    0,
+    0.48
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 22,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_slope",
+   "source": "kenney-fantasy-town/wall-slope.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 32,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_window_glass",
+   "source": "kenney-fantasy-town/wall-window-glass.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 178,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_window_round",
+   "source": "kenney-fantasy-town/wall-window-round.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 278,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_window_shutters",
+   "source": "kenney-fantasy-town/wall-window-shutters.glb",
+   "size": [
+    0.35,
+    2,
+    2
+   ],
+   "min": [
+    0.65,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 286,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_window_small",
+   "source": "kenney-fantasy-town/wall-window-small.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 102,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_window_stone",
+   "source": "kenney-fantasy-town/wall-window-stone.glb",
+   "size": [
+    0.3,
+    2,
+    2
+   ],
+   "min": [
+    0.75,
+    0,
+    -1
+   ],
+   "max": [
+    1.05,
+    2,
+    1
+   ],
+   "triangles": 140,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood",
+   "source": "kenney-fantasy-town/wall-wood.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 32,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_arch",
+   "source": "kenney-fantasy-town/wall-wood-arch.glb",
+   "size": [
+    0.2,
+    2,
+    0.6
+   ],
+   "min": [
+    0.8,
+    0,
+    0.4
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 32,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_arch_top",
+   "source": "kenney-fantasy-town/wall-wood-arch-top.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 146,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_arch_top_detail",
+   "source": "kenney-fantasy-town/wall-wood-arch-top-detail.glb",
+   "size": [
+    0.32,
+    2,
+    2
+   ],
+   "min": [
+    0.74,
+    0,
+    -1
+   ],
+   "max": [
+    1.06,
+    2,
+    1
+   ],
+   "triangles": 168,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_block",
+   "source": "kenney-fantasy-town/wall-wood-block.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 76,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_block_half",
+   "source": "kenney-fantasy-town/wall-wood-block-half.glb",
+   "size": [
+    2,
+    1,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ],
+   "triangles": 76,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_broken",
+   "source": "kenney-fantasy-town/wall-wood-broken.glb",
+   "size": [
+    0.2258,
+    2,
+    2
+   ],
+   "min": [
+    0.7935,
+    0,
+    -1
+   ],
+   "max": [
+    1.0193,
+    2,
+    1
+   ],
+   "triangles": 166,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_corner",
+   "source": "kenney-fantasy-town/wall-wood-corner.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 52,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_corner_diagonal",
+   "source": "kenney-fantasy-town/wall-wood-corner-diagonal.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 48,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_corner_diagonal_half",
+   "source": "kenney-fantasy-town/wall-wood-corner-diagonal-half.glb",
+   "size": [
+    1.1,
+    2,
+    1.95
+   ],
+   "min": [
+    -0.1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    0.95
+   ],
+   "triangles": 34,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_corner_edge",
+   "source": "kenney-fantasy-town/wall-wood-corner-edge.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 40,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_curved",
+   "source": "kenney-fantasy-town/wall-wood-curved.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 120,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_detail_cross",
+   "source": "kenney-fantasy-town/wall-wood-detail-cross.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 80,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_detail_diagonal",
+   "source": "kenney-fantasy-town/wall-wood-detail-diagonal.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 56,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_detail_horizontal",
+   "source": "kenney-fantasy-town/wall-wood-detail-horizontal.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 46,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_diagonal",
+   "source": "kenney-fantasy-town/wall-wood-diagonal.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 38,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_door",
+   "source": "kenney-fantasy-town/wall-wood-door.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 376,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_doorway_base",
+   "source": "kenney-fantasy-town/wall-wood-doorway-base.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 64,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_doorway_round",
+   "source": "kenney-fantasy-town/wall-wood-doorway-round.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 172,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_doorway_square",
+   "source": "kenney-fantasy-town/wall-wood-doorway-square.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 82,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_doorway_square_wide",
+   "source": "kenney-fantasy-town/wall-wood-doorway-square-wide.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 46,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_doorway_square_wide_curved",
+   "source": "kenney-fantasy-town/wall-wood-doorway-square-wide-curved.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 166,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_half",
+   "source": "kenney-fantasy-town/wall-wood-half.glb",
+   "size": [
+    0.2,
+    1,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ],
+   "triangles": 32,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_rounded",
+   "source": "kenney-fantasy-town/wall-wood-rounded.glb",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 136,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_side",
+   "source": "kenney-fantasy-town/wall-wood-side.glb",
+   "size": [
+    0.2,
+    2,
+    0.52
+   ],
+   "min": [
+    0.8,
+    0,
+    0.48
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 22,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_slope",
+   "source": "kenney-fantasy-town/wall-wood-slope.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 84,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_window_glass",
+   "source": "kenney-fantasy-town/wall-wood-window-glass.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 122,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_window_round",
+   "source": "kenney-fantasy-town/wall-wood-window-round.glb",
+   "size": [
+    0.4,
+    2,
+    2
+   ],
+   "min": [
+    0.7,
+    0,
+    -1
+   ],
+   "max": [
+    1.1,
+    2,
+    1
+   ],
+   "triangles": 294,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_window_shutters",
+   "source": "kenney-fantasy-town/wall-wood-window-shutters.glb",
+   "size": [
+    0.2,
+    2,
+    2
+   ],
+   "min": [
+    0.8,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 122,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_window_small",
+   "source": "kenney-fantasy-town/wall-wood-window-small.glb",
+   "size": [
+    0.4,
+    2,
+    2
+   ],
+   "min": [
+    0.7,
+    0,
+    -1
+   ],
+   "max": [
+    1.1,
+    2,
+    1
+   ],
+   "triangles": 134,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_wall_wood_window_stone",
+   "source": "kenney-fantasy-town/wall-wood-window-stone.glb",
+   "size": [
+    0.3,
+    2,
+    2
+   ],
+   "min": [
+    0.75,
+    0,
+    -1
+   ],
+   "max": [
+    1.05,
+    2,
+    1
+   ],
+   "triangles": 202,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_watermill",
+   "source": "kenney-fantasy-town/watermill.glb",
+   "size": [
+    1.7,
+    3.5982,
+    3.5982
+   ],
+   "min": [
+    -0.85,
+    -1.7991,
+    -1.7991
+   ],
+   "max": [
+    0.85,
+    1.7991,
+    1.7991
+   ],
+   "triangles": 600,
+   "cells": [
+    null,
+    null
+   ],
+   "fit": [
+    "free",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "town_watermill_wide",
+   "source": "kenney-fantasy-town/watermill-wide.glb",
+   "size": [
+    2.1,
+    3.5982,
+    3.5982
+   ],
+   "min": [
+    -1.05,
+    -1.7991,
+    -1.7991
+   ],
+   "max": [
+    1.05,
+    1.7991,
+    1.7991
+   ],
+   "triangles": 600,
+   "cells": [
+    1,
+    null
+   ],
+   "fit": [
+    "overhang",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "town_wheel",
+   "source": "kenney-fantasy-town/wheel.glb",
+   "size": [
+    0.4769,
+    0.9665,
+    0.9355
+   ],
+   "min": [
+    0.3978,
+    0,
+    -0.4678
+   ],
+   "max": [
+    0.8747,
+    0.9665,
+    0.4678
+   ],
+   "triangles": 192,
+   "cells": [
+    0,
+    0.5
+   ],
+   "fit": [
+    "sub",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "town_windmill",
+   "source": "kenney-fantasy-town/windmill.glb",
+   "size": [
+    0.942,
+    6.2264,
+    6.2264
+   ],
+   "min": [
+    -0.471,
+    -3.1132,
+    -3.1132
+   ],
+   "max": [
+    0.471,
+    3.1132,
+    3.1132
+   ],
+   "triangles": 732,
+   "cells": [
+    0.5,
+    3
+   ],
+   "fit": [
+    "half",
+    "overhang"
+   ],
+   "onGrid": true
+  }
+ ]
+}

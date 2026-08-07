@@ -3,7 +3,9 @@ import { World, mulberry32 } from './world.js';
 import { Effects } from './effects.js';
 import {
   makeHumanoid, makeHealthBar, setHealthBar, animateRig, makeGroundRing, disposeObject3D,
+  setCharacterQuality,
 } from './entities.js';
+import { makeAgent, steerAgent, separate, noteAttack } from './enemyai.js';
 import {
   GATES, ENEMY_TYPES, BOSSES, SKILLS, derive, scaleEnemy, rankOf,
 } from './config.js';
@@ -37,6 +39,12 @@ const tierWeightOf = (e) => (e.isBoss ? 'boss' : TIER_WEIGHT[e.key] || 'trash');
 
 const tmpV = new THREE.Vector3();
 const tmpV2 = new THREE.Vector3();
+
+// Reused steering context; steerAgent never retains it.
+const _steerCtx = {
+  navGrid: null, targetPos: null, selfPos: null,
+  distance: 0, losBlocked: false, aggression: 1, dt: 0,
+};
 
 export class Game {
   constructor({ canvas, input, audio, ui, saveData, onSave }) {
@@ -129,6 +137,10 @@ export class Game {
   }
 
   _applyQuality(t) {
+    // The skinned-character budget has to follow the RUNTIME tier, not the tier
+    // guessed once at import. A device that gets stepped down mid-run otherwise
+    // keeps skinning more characters than it can afford.
+    setCharacterQuality(t);
     const dpr = Math.min(window.devicePixelRatio, t.pixelRatio);
     this.renderer.setPixelRatio(dpr);
     this.glow.setSize(window.innerWidth, window.innerHeight, dpr);
@@ -359,6 +371,10 @@ export class Game {
     const mesh = makeHumanoid({
       color: base.color, glow: base.glow, accent: 0x14172a,
       weapon, scale: base.scale, cloak: key === 'caster',
+      // The skinned-character picker cannot tell a lancer from a howler by the
+      // weapon alone — both carry a plain sword — so name the archetype and the
+      // rank outright. Both are advisory; makeHumanoid infers them otherwise.
+      archetype: key, rank: this.gate.rank ?? 'E',
     });
     mesh.add(makeGroundRing(base.glow, 0.85 * base.scale, 0.5));
     mesh.position.copy(pos);
@@ -389,6 +405,8 @@ export class Game {
       lungeCd: 0,
       isBoss: false,
     });
+    const spawned = this.enemies[this.enemies.length - 1];
+    spawned.agent = makeAgent(spawned, base.ai);
     this.spawned++;
   }
 
@@ -398,6 +416,7 @@ export class Game {
     const mesh = makeHumanoid({
       color: b.color, glow: b.glow, accent: 0x0d0f1c,
       weapon: 'sword', scale: b.scale, cloak: true,
+      archetype: 'boss', rank: this.gate.rank ?? 'E',
     });
     mesh.add(makeGroundRing(b.glow, 1.6, 0.6));
     mesh.position.copy(pos);
@@ -421,6 +440,11 @@ export class Game {
       spawning: 1.2, isBoss: true,
       pattern: 0, patternCd: 4.5, enraged: false,
     };
+    // The boss goes through the same stuck breaker as everything else. range 0
+    // keeps it pressing all the way in exactly as the old code did, and its
+    // attacks stay entirely owned by _bossBrain.
+    this.boss.agent = makeAgent(this.boss, 'chase');
+    this.boss.agent.range = 0;
     this.enemies.push(this.boss);
     this.bossActive = true;
 
@@ -442,6 +466,7 @@ export class Game {
     const mesh = makeHumanoid({
       color: 0x1a2740, glow: 0x35e6ff, accent: 0x0b1220,
       weapon: 'sword', scale: 0.95 * c.scale, ghost: true, cloak: true,
+      archetype: 'shadow', rank: this.gate?.rank ?? 'E',
     });
     mesh.add(makeGroundRing(0x35e6ff, 0.85 * c.scale, 0.6));
     mesh.position.copy(pos);
@@ -962,11 +987,19 @@ export class Game {
       hurt: Math.max(0, p.hurt),
       airborne: !p.body.grounded,
       riseRate: p.vel.y,
+      // The time-scaled dt, so hit-stop and level-up dilation slow the
+      // AnimationMixer too. Without it the mixer reads wall-clock and skinned
+      // characters keep moving at full speed through a freeze frame.
+      dt,
     });
   }
 
   _updateEnemies(dt) {
     const p = this.player;
+    // Crowd separation happens once for the whole field, BEFORE anyone moves.
+    // Doing it per-enemy after the move loop (the old _separate) left mesh
+    // positions a frame behind the separated pos.
+    separate(this.enemies, 1, 900);
     for (const e of this.enemies) {
       if (e.spawning > 0) {
         e.spawning -= dt;
@@ -990,35 +1023,35 @@ export class Game {
       if (dist > 0.001) toPlayer.divideScalar(dist);
 
       const staggered = e.stagger > 0;
-      let desiredSpeed = 0;
+      // Steering output, in world units. The old code carried a scalar
+      // `desiredSpeed` along toPlayer, which cannot express a detour.
+      let moveX = 0, moveZ = 0;
 
       if (e.isBoss) {
         this._bossBrain(e, dt, dist, toPlayer);
-        desiredSpeed = e.telegraph > 0 || staggered ? 0 : e.speed;
+        if (e.telegraph > 0 || staggered) { moveX = 0; moveZ = 0; }
+        else {
+          if (!e.agent) { e.agent = makeAgent(e, 'chase'); e.agent.range = 0; }
+          _steerCtx.navGrid = this.world.navGrid || null;
+          _steerCtx.targetPos = p.pos; _steerCtx.selfPos = e.pos;
+          _steerCtx.distance = dist; _steerCtx.losBlocked = false;
+          _steerCtx.aggression = 1; _steerCtx.dt = dt;
+          const bsteer = steerAgent(e.agent, _steerCtx, dt);
+          moveX = bsteer.moveX; moveZ = bsteer.moveZ;
+        }
       } else if (!staggered && e.telegraph <= 0) {
-        const ai = e.base.ai;
-        if (ai === 'ranged') {
-          // Casters keep their distance and open fire from the fringe.
-          const ideal = e.base.range * 0.55;
-          if (dist > ideal + 2) desiredSpeed = e.speed;
-          else if (dist < ideal - 3) { desiredSpeed = -e.speed * 0.8; }
-          if (dist < e.base.range && e.attackCd <= 0) {
-            e.telegraph = 0.55;
-            e.attackCd = e.base.attackCd + Math.random() * 0.6;
-          }
-        } else {
-          if (dist > e.base.range) desiredSpeed = e.speed;
-          if (ai === 'lunge') {
-            if (e.lungeCd > 0) e.lungeCd -= dt;
-            if (dist < 9 && dist > 3.2 && e.lungeCd <= 0) {
-              e.vel.addScaledVector(toPlayer, 16);
-              e.lungeCd = 3.4 + Math.random() * 2;
-            }
-          }
-          if (dist <= e.base.range + 0.4 && e.attackCd <= 0) {
-            e.telegraph = 0.42;
-            e.attackCd = e.base.attackCd + Math.random() * 0.4;
-          }
+        if (!e.agent) e.agent = makeAgent(e, e.base.ai);
+        _steerCtx.navGrid = this.world.navGrid || null;
+        _steerCtx.targetPos = p.pos; _steerCtx.selfPos = e.pos;
+        _steerCtx.distance = dist; _steerCtx.losBlocked = false;
+        _steerCtx.aggression = 1; _steerCtx.dt = dt;
+        const steer = steerAgent(e.agent, _steerCtx, dt);
+        moveX = steer.moveX; moveZ = steer.moveZ;
+        e.vel.x += steer.impulseX; e.vel.z += steer.impulseZ;
+        if (steer.wantAttack && e.attackCd <= 0) {
+          e.telegraph = steer.telegraph;
+          e.attackCd = e.base.attackCd + Math.random() * (steer.attackKind === 'ranged' ? 0.6 : 0.4);
+          noteAttack(e.agent);
         }
 
         // Shadows pull aggro: if one is much closer, fight it instead.
@@ -1027,7 +1060,7 @@ export class Game {
           const toS = tmpV2.copy(near.s.pos).sub(e.pos).setY(0);
           const dS = toS.length();
           if (dS > 0.001) toS.divideScalar(dS);
-          if (dS > e.base.range) { e.vel.addScaledVector(toS, e.speed * 9 * dt); desiredSpeed = 0; }
+          if (dS > e.base.range) { e.vel.addScaledVector(toS, e.speed * 9 * dt); moveX = 0; moveZ = 0; }
           else if (e.attackCd <= 0) {
             near.s.hp -= e.atk * 0.6;
             e.attackCd = e.base.attackCd;
@@ -1038,13 +1071,15 @@ export class Game {
         }
       }
 
-      if (desiredSpeed !== 0) e.vel.addScaledVector(toPlayer, desiredSpeed * 9 * dt);
+      if (moveX !== 0 || moveZ !== 0) { e.vel.x += moveX * 9 * dt; e.vel.z += moveZ * 9 * dt; }
+      // Deliberately still facing the PLAYER, not steer.yaw: the line below has
+      // always overwritten the shadow-facing yaw above, and keeping that quirk
+      // is what makes this swap behaviour-neutral outside the stuck breaker.
       if (e.telegraph <= 0 && !staggered) e.yaw = Math.atan2(toPlayer.x, toPlayer.z);
 
       e.vel.multiplyScalar(1 - Math.min(0.95, 7 * dt));
       e.pos.addScaledVector(e.vel, dt);
       this.world.resolve(e.pos, e.radius, e.vel);
-      this._separate(e);
 
       e.mesh.position.copy(e.pos);
       e.mesh.rotation.y = e.yaw;
@@ -1063,6 +1098,7 @@ export class Game {
         moving, speed: Math.hypot(e.vel.x, e.vel.z), t: this.time + e.pos.x,
         attackPhase: e.swing > 0 ? e.swing / 0.3 : 0,
         hurt: Math.max(0, e.hurt),
+        dt,
       });
 
       // health bar billboard
@@ -1160,22 +1196,6 @@ export class Game {
     return best ? { s: best, d: bestD } : null;
   }
 
-  _separate(e) {
-    // Cheap O(n^2) crowd separation; enemy counts stay well under 50.
-    for (const o of this.enemies) {
-      if (o === e) continue;
-      const dx = e.pos.x - o.pos.x;
-      const dz = e.pos.z - o.pos.z;
-      const min = e.radius + o.radius;
-      const d2 = dx * dx + dz * dz;
-      if (d2 < min * min && d2 > 0.0001) {
-        const d = Math.sqrt(d2);
-        const push = ((min - d) / d) * 0.5;
-        e.pos.x += dx * push;
-        e.pos.z += dz * push;
-      }
-    }
-  }
 
   _updateShadows(dt) {
     for (let i = this.shadows.length - 1; i >= 0; i--) {
@@ -1227,6 +1247,7 @@ export class Game {
       animateRig(s.mesh, {
         moving, speed: Math.hypot(s.vel.x, s.vel.z), t: this.time + s.life,
         attackPhase: s.swing > 0 ? s.swing / 0.3 : 0,
+        dt,
       });
     }
   }

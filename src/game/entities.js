@@ -3,11 +3,29 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLOW_LAYER } from '../render/glow.js';
 import { applyRim } from '../render/rim.js';
 import { DecalPool } from '../render/decalpool.js';
+import {
+  loadCharacterModels, charactersReady, makeCharacter, characterStats,
+  setCharacterQuality, characterBudgetAvailable, warmAppearance, MODEL_SCALE,
+} from '../render/characters.js';
 
-// Procedurally assembled low-poly humanoids. Building rigs in code means the
-// APK ships with zero model files and every silhouette is tunable from here.
+// Humanoids. There are now TWO implementations behind makeHumanoid():
 //
-// Two rules govern everything below:
+//   A. REAL SKINNED CHARACTERS out of public/models/characters.glb — 21 CC0
+//      Quaternius bodies on two skeletons, with 24 animation clips each and
+//      swappable head/body/legs/feet. This is what actually ships.
+//   B. THE PROCEDURAL BOX-MAN below, kept verbatim as the fallback. The game is
+//      fully offline: if the GLB did not make it into the APK, or the decoder
+//      refuses it on some device, a missing asset must degrade rather than
+//      crash the boot. Everything from `caches` to `animateRig`'s pose driver
+//      is that fallback, and it is still the thing the ground rings, health
+//      bars and weapon grips are dimensioned against.
+//
+// The two paths are interchangeable from the caller's side: makeHumanoid
+// returns a Group carrying the same userData.rig keys either way, and
+// animateRig takes the same options object and routes to an AnimationMixer
+// when the Group is GLB-backed.
+//
+// Two rules govern the procedural path:
 //
 // 1. NOTHING IS ALLOCATED PER ENTITY. Geometry and materials come out of the
 //    caches at the top of this file and are shared by every character that asks
@@ -22,6 +40,12 @@ import { DecalPool } from '../render/decalpool.js';
 
 // The pool is re-exported here so callers have one entity entry point.
 export { DecalPool };
+// Character-pack controls, re-exported so game.js/main.js never have to know
+// which render module the skinned path lives in.
+export {
+  loadCharacterModels, charactersReady, characterStats, setCharacterQuality,
+  characterBudgetAvailable, MODEL_SCALE,
+};
 
 // ------------------------------------------------------------------- caches
 
@@ -57,6 +81,14 @@ export function disposeObject3D(root) {
   // Tests and tools hand this synthetic entities whose `mesh` is a plain object,
   // and a teardown helper that throws takes the whole run down with it.
   if (!root || typeof root.traverse !== 'function') return;
+  // A GLB-backed humanoid owns an AnimationMixer and a reference on a shared
+  // merged geometry. Neither is reachable by traversal, and leaking the mixer
+  // leaks every AnimationAction bound to the dead skeleton.
+  _pending.delete(root);
+  if (root.userData?.character) {
+    root.userData.character.dispose();
+    root.userData.character = null;
+  }
   root.traverse((o) => {
     if (o.isDecal) { o.release(); return; }
     if (!o.geometry && !o.material) return;
@@ -192,18 +224,251 @@ function staffMesh(glow) {
   return staff;
 }
 
+// ------------------------------------------------------- skinned characters
+//
+// Everything from here to `makeHumanoid` is the GLB path. It is deliberately
+// written so that game.js needs no edits at all: makeHumanoid infers the
+// archetype from the arguments game.js already passes, seeds the appearance
+// from a spawn counter, and — because the pack cannot be loaded synchronously —
+// UPGRADES humanoids that were built before the load finished, in place.
+
+let _charLoad = null;
+/**
+ * Distinct looks generated per archetype before the sequence wraps, and a
+ * PER-ARCHETYPE counter so the wrap is exact.
+ *
+ * An ever-increasing counter would be more varied and would also allocate a new
+ * merged geometry (~165 KB) for every enemy that ever spawns, forever — the
+ * entity leak test reads exactly that as unbounded geometry growth, and from
+ * the outside it is indistinguishable from a leak. Four per archetype across
+ * the eight enemy/shadow archetypes plus the player's single fixed look is 33
+ * appearances, inside the 40-entry geometry cache in characters.js, and the
+ * whole set for a rank is allocated in one pass the first time anything is
+ * built at that rank. It is still 33 different bodies where the game had one.
+ */
+const APPEARANCE_VARIANTS = 4;
+const _spawnSeq = new Map();
+const _warmed = new Set();
+
+const ARCHETYPES = [
+  'player', 'grunt', 'stalker', 'brute', 'caster', 'lancer', 'howler', 'boss', 'shadow',
+];
+
+/**
+ * Allocate every archetype's looks for a rank, once per rank. Doing the whole
+ * rank at once rather than one archetype at a time costs one pass during boot
+ * (the player is the first thing built) and buys a geometry count that never
+ * moves again — which is the difference between a warm cache and a leak, from
+ * the outside.
+ */
+function warmRank(rank) {
+  if (_warmed.has(rank)) return;
+  _warmed.add(rank);
+  for (const a of ARCHETYPES) {
+    for (let i = 0; i < APPEARANCE_VARIANTS; i++) {
+      warmAppearance(a === 'player' ? 'player' : `${a}:${i}`, { archetype: a, rank });
+      if (a === 'player') break;      // the player has exactly one look
+    }
+  }
+}
+/** Procedural humanoids awaiting the pack: root -> the opts they were built from. */
+const _pending = new Map();
+
+/** Kick the pack load exactly once. Resolves FALSE, never throws. */
+export function preloadCharacters(url, manifestUrl) {
+  if (_charLoad) return _charLoad;
+  _charLoad = Promise.resolve()
+    .then(() => loadCharacterModels(url, manifestUrl))
+    .then((ok) => { if (ok) upgradePendingHumanoids(); return ok; })
+    .catch(() => false);
+  return _charLoad;
+}
+
+/**
+ * Archetype inference from the arguments game.js already passes.
+ *
+ * game.js does not know about appearance yet, so the mapping is reconstructed
+ * from what it does say. Passing `archetype` explicitly (see the game.js
+ * handoff) is strictly better — it is the only way lancer and howler get their
+ * own looks, because game.js hands both of them a plain sword.
+ */
+function inferArchetype({ ghost, boss, weapon, scale }) {
+  if (ghost) return 'shadow';
+  if (boss || scale >= 1.9) return 'boss';
+  if (weapon === 'staff') return 'caster';
+  if (weapon === 'claw') return 'stalker';
+  if (weapon === 'none') return 'player';
+  if (scale >= 1.2) return 'brute';
+  return 'grunt';
+}
+
+/** The hardcoded weapon makeHumanoid builds, re-hung on a bone socket. */
+function attachProceduralWeapon(socket, weapon, glow, ghost) {
+  if (!socket) return null;
+  if (weapon === 'sword') {
+    const blade = new THREE.Group();
+    blade.add(swordMesh(glow, ghost));
+    // Identical local transform to the procedural rig: the socket is built so
+    // that y = -0.72 is the fist there too.
+    blade.position.set(0, -0.72, 0.06);
+    blade.rotation.x = -0.25;
+    socket.add(blade);
+    return blade;
+  }
+  if (weapon === 'claw') {
+    const claw = clawMesh(glow);
+    socket.add(claw);
+    return claw;
+  }
+  if (weapon === 'staff') {
+    const staff = staffMesh(glow);
+    socket.add(staff);
+    return staff;
+  }
+  return null;
+}
+
+const _dummy = () => new THREE.Object3D();
+
+/**
+ * Fill `root` with a skinned character. Returns false when the pack is absent,
+ * the tier's character budget is already spent, or the merge failed — in every
+ * one of those cases the caller falls back to the procedural rig.
+ */
+function buildSkinnedInto(root, opts) {
+  if (!charactersReady()) return false;
+  const archetype = opts.archetype || inferArchetype(opts);
+  // The player must look the same every session; everything else varies per
+  // spawn, which is the entire point of this change.
+  let seed = opts.seed;
+  if (seed == null) {
+    if (archetype === 'player') seed = 'player';
+    else {
+      const n = (_spawnSeq.get(archetype) || 0) % APPEARANCE_VARIANTS;
+      _spawnSeq.set(archetype, n + 1);
+      seed = `${archetype}:${n}`;
+    }
+  }
+
+  warmRank(opts.rank || 'E');
+
+  const inst = makeCharacter({
+    seed,
+    archetype,
+    rank: opts.rank || 'E',
+    scale: 1,                       // the caller's scale rides on `root`
+    glow: opts.glow,
+    color: opts.color,
+    ghost: opts.ghost,
+    // The telegraph mote costs 2 draw calls (main pass + glow pass) and only
+    // earns them on something that winds up an attack at you. The player can
+    // see his own swing and shadows are already emissive head to foot.
+    eyes: archetype !== 'player' && !opts.ghost,
+    armed: opts.weapon && opts.weapon !== 'none',
+    ignoreBudget: archetype === 'player' || archetype === 'boss',
+  });
+  if (!inst) return false;
+
+  // Tear the procedural body out, but never the DecalPool proxies — the ground
+  // ring is parented here by game.js and releasing its slot would strand it.
+  const equipped = root.userData.weapon || null;
+  if (equipped?.main) equipped.main.removeFromParent();
+  if (equipped?.offhand) equipped.offhand.removeFromParent();
+  for (const child of [...root.children]) {
+    if (child.isDecal) continue;
+    root.remove(child);
+    disposeObject3D(child);
+  }
+  root.userData.cape = null;
+
+  root.add(inst.root);
+  root.userData.character = inst;
+  root.userData.appearance = inst.appearance;
+
+  const legL = _dummy(); const legR = _dummy();
+  inst.root.add(legL, legR);
+  root.userData.rig = {
+    body: inst.root,
+    torso: inst.mesh,
+    head: inst.sockets.head || inst.root,
+    armL: inst.sockets.handL || inst.root,
+    armR: inst.sockets.hand || inst.root,
+    legL,
+    legR,
+    blade: null,
+    eyeL: inst.eyes || legL,
+    eyeR: inst.eyes || legL,
+    // weapons.js prefers these over the arm fallback, and they are the only
+    // sockets on a skinned rig that are actually a hand.
+    hand: inst.sockets.hand || null,
+    handL: inst.sockets.handL || null,
+  };
+
+  // A corpse is the one humanoid game.js never calls animateRig on: it builds
+  // it ghosted-but-uncloaked, tips it by -PI/2.4 and lets it sink. A rigid
+  // A-posed person tipped over reads as a mannequin, so corpses get posed by
+  // the Death clip once and the tip is cancelled on the inner group — the
+  // outer root's rotation is game.js's and stays untouched.
+  if (opts.ghost && !opts.cloak && archetype === 'shadow') {
+    inst.play('die', { fade: 0, once: true, clamp: true });
+    inst.mixer.update(Math.max(0.01, inst.clipDuration('die')));
+    inst.root.rotation.x = Math.PI / 2.4;
+  }
+
+  if (equipped?.main && inst.sockets.hand) {
+    inst.sockets.hand.add(equipped.main);
+    root.userData.rig.blade = equipped.main;
+    if (equipped.offhand && inst.sockets.handL) inst.sockets.handL.add(equipped.offhand);
+  } else {
+    root.userData.rig.blade = attachProceduralWeapon(
+      inst.sockets.hand, opts.weapon, opts.glow, opts.ghost,
+    );
+  }
+  return true;
+}
+
+/**
+ * Swap every humanoid built before the pack finished loading. Without this the
+ * player — who is constructed during Game's constructor, long before a 3.2 MB
+ * GLB can arrive — would be a box-man for the whole session.
+ */
+export function upgradePendingHumanoids() {
+  if (!charactersReady()) return 0;
+  let n = 0;
+  for (const [root, opts] of Array.from(_pending)) {
+    _pending.delete(root);
+    if (!root.parent && !opts.keepDetached) continue;   // already thrown away
+    if (buildSkinnedInto(root, opts)) n++;
+  }
+  return n;
+}
+
 // ------------------------------------------------------------------- rig
 
-export function makeHumanoid({
-  color = 0x7c5cff,
-  glow = 0xffffff,
-  accent = 0x2b2f4a,
-  scale = 1,
-  weapon = 'sword',
-  cloak = false,
-  ghost = false,
-  boss = false, // reserved: difficulty.js passes it, nothing reads it yet
-} = {}) {
+export function makeHumanoid(opts = {}) {
+  const {
+    color = 0x7c5cff,
+    glow = 0xffffff,
+    accent = 0x2b2f4a,
+    scale = 1,
+    weapon = 'sword',
+    cloak = false,
+    ghost = false,
+    boss = false, // reserved: difficulty.js passes it, nothing reads it yet
+  } = opts;
+
+  // Fire-and-forget; resolves FALSE when public/models/characters.glb is absent.
+  preloadCharacters();
+
+  const built = { color, glow, accent, scale, weapon, cloak, ghost, boss, ...opts };
+  if (charactersReady() && opts.characters !== false) {
+    const skinned = new THREE.Group();
+    if (buildSkinnedInto(skinned, built)) {
+      skinned.scale.setScalar(scale);
+      return skinned;
+    }
+  }
+
   const root = new THREE.Group();
   const body = new THREE.Group();
   root.add(body);
@@ -277,6 +542,13 @@ export function makeHumanoid({
   root.userData.rig = {
     body, torso, head: torso, armL, armR, legL, legR, blade, eyeL: eyes, eyeR: eyes,
   };
+  // If the pack is still in flight this box-man is provisional: remember what
+  // it was asked for so upgradePendingHumanoids can rebuild it as a real
+  // character the moment characters.glb resolves. Bounded, because the map is
+  // drained on the first upgrade pass and entries are removed on disposal.
+  if (!charactersReady() && opts.characters !== false && _pending.size < 128) {
+    _pending.set(root, built);
+  }
   return root;
 }
 
@@ -397,7 +669,20 @@ export function setHealthBar(bar, ratio) {
 }
 
 // Simple walk / idle / attack pose driver shared by every humanoid.
-export function animateRig(root, { moving, speed, t, attackPhase = 0, hurt = 0, airborne = false, riseRate = 0 }) {
+//
+// SIGNATURE UNCHANGED: game.js calls this in three places and weapons.js
+// authors its swing curves against the same option bag. A GLB-backed humanoid
+// is routed to its AnimationMixer here rather than at the call site, which is
+// what lets the skinned characters land without touching game.js at all.
+//
+// `dt` is an OPTIONAL extra key. Without it the mixer measures wall-clock,
+// which is right except that hit-stop and level-up time dilation do not slow
+// the animation down; passing dt makes them match.
+export function animateRig(root, opts = {}) {
+  const character = root.userData?.character;
+  if (character) { character.animate(opts); return; }
+
+  const { moving, speed, t, attackPhase = 0, hurt = 0, airborne = false, riseRate = 0 } = opts;
   const rig = root.userData.rig;
   if (!rig) return;
   const { armL, armR, legL, legR, body, head } = rig;

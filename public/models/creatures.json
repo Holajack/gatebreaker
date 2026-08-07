@@ -1,0 +1,739 @@
+{
+  "generated": "2026-08-06T23:04:34.959Z",
+  "glb": "models/creatures.glb",
+  "bytes": 2049980,
+  "note": "Creature keys are lowercase and are DIRECT children of the single scene. Every clip is named `<creature key>__<clip>` and binds to that creature ONLY -- the four KayKit skeletons each carry their own namespaced copy of the shared KayKit vocabulary, because three.js GLTFLoader renames duplicate node names on load and a genuinely shared clip library binds to exactly one of them. Build the AnimationMixer against a SkeletonUtils.clone of the creature subtree.",
+  "sources": [
+    {
+      "pack": "Quaternius Ultimate Monsters",
+      "licence": "CC0",
+      "url": "https://quaternius.com/packs/ultimatemonsters.html",
+      "used": 13,
+      "available": 50
+    },
+    {
+      "pack": "KayKit Character Pack: Skeletons (FREE tier)",
+      "licence": "CC0",
+      "url": "https://kaylousberg.itch.io/kaykit-skeletons",
+      "used": 4,
+      "available": 4
+    },
+    {
+      "pack": "KayKit Character Animations (FREE tier)",
+      "licence": "CC0",
+      "url": "https://kaylousberg.itch.io/kaykit-character-animations",
+      "used": 26,
+      "available": 133
+    }
+  ],
+  "kaykitClipVocabulary": [
+    "Dodge_Backward",
+    "Hit_A",
+    "Hit_B",
+    "Idle_A",
+    "Melee_1H_Attack_Chop",
+    "Melee_1H_Attack_Stab",
+    "Melee_2H_Attack_Chop",
+    "Melee_2H_Attack_Spinning",
+    "Melee_Blocking",
+    "Melee_Unarmed_Attack_Punch_A",
+    "Ranged_2H_Aiming",
+    "Ranged_2H_Reload",
+    "Ranged_2H_Shoot",
+    "Ranged_Magic_Shoot",
+    "Ranged_Magic_Spellcasting",
+    "Ranged_Magic_Summon",
+    "Running_A",
+    "Skeletons_Awaken_Floor",
+    "Skeletons_Awaken_Standing",
+    "Skeletons_Death",
+    "Skeletons_Death_Resurrect",
+    "Skeletons_Idle",
+    "Skeletons_Spawn_Ground",
+    "Skeletons_Taunt",
+    "Skeletons_Walking",
+    "Walking_A"
+  ],
+  "creatures": {
+    "greenblob": {
+      "pack": "quaternius",
+      "rank": "E",
+      "alsoRanks": [
+        "D"
+      ],
+      "role": "trash",
+      "archetype": "grunt",
+      "boss": null,
+      "note": "Dark-green single-eyed ooze. The one Quaternius blob whose palette is muddy enough for the Warren.",
+      "clips": [
+        "greenblob__bite_front",
+        "greenblob__death",
+        "greenblob__hitrecieve",
+        "greenblob__idle",
+        "greenblob__jump",
+        "greenblob__walk"
+      ],
+      "triangles": 1520,
+      "size": [
+        2.249,
+        1.869,
+        2.144
+      ],
+      "meshNodes": [
+        "greenblob_Green_Blob",
+        "greenblob_Green_Blob_001"
+      ]
+    },
+    "greenspikyblob": {
+      "pack": "quaternius",
+      "rank": "E",
+      "alsoRanks": [
+        "D",
+        "C"
+      ],
+      "role": "trash",
+      "archetype": "grunt",
+      "boss": null,
+      "note": "Spiked variant of the same ooze; the spines read as a hazard tell.",
+      "clips": [
+        "greenspikyblob__bite_front",
+        "greenspikyblob__death",
+        "greenspikyblob__hitrecieve",
+        "greenspikyblob__idle",
+        "greenspikyblob__jump",
+        "greenspikyblob__walk"
+      ],
+      "triangles": 4888,
+      "size": [
+        3.5,
+        4.159,
+        4.089
+      ],
+      "meshNodes": [
+        "greenspikyblob_GreenSpiky_Blob",
+        "greenspikyblob_GreenSpiky_Blob_002"
+      ]
+    },
+    "tribal": {
+      "pack": "quaternius",
+      "rank": "E",
+      "alsoRanks": [
+        "D"
+      ],
+      "role": "trash",
+      "archetype": "grunt",
+      "boss": null,
+      "note": "Masked humanoid with a feather crest. Best plain-grunt silhouette in the pack.",
+      "clips": [
+        "tribal__death",
+        "tribal__hitreact",
+        "tribal__idle",
+        "tribal__jump",
+        "tribal__punch",
+        "tribal__run",
+        "tribal__walk",
+        "tribal__weapon"
+      ],
+      "triangles": 6620,
+      "size": [
+        3.28,
+        3.741,
+        1.425
+      ],
+      "meshNodes": [
+        "tribal_Tribal"
+      ]
+    },
+    "orc": {
+      "pack": "quaternius",
+      "rank": "E",
+      "alsoRanks": [
+        "D",
+        "C"
+      ],
+      "role": "elite",
+      "archetype": "brute",
+      "boss": null,
+      "note": "Green club-swinging goblinoid. Reads as a heavy without reading as a joke.",
+      "clips": [
+        "orc__death",
+        "orc__hitreact",
+        "orc__idle",
+        "orc__jump",
+        "orc__punch",
+        "orc__run",
+        "orc__walk",
+        "orc__weapon"
+      ],
+      "triangles": 7344,
+      "size": [
+        3.271,
+        3.05,
+        1.676
+      ],
+      "meshNodes": [
+        "orc_Orc",
+        "orc_Orc_Weapon"
+      ]
+    },
+    "orc_skull": {
+      "pack": "quaternius",
+      "rank": "D",
+      "alsoRanks": [
+        "C"
+      ],
+      "role": "boss",
+      "archetype": "brute",
+      "boss": "gravelord",
+      "note": "Skull-headed spiked brute. THE GRAVELORD: a ground heavy, which is what the D boss stats describe (900hp, scale 2.7).",
+      "clips": [
+        "orc_skull__death",
+        "orc_skull__hitreact",
+        "orc_skull__idle",
+        "orc_skull__jump",
+        "orc_skull__punch",
+        "orc_skull__run",
+        "orc_skull__walk",
+        "orc_skull__weapon"
+      ],
+      "triangles": 7364,
+      "size": [
+        3.223,
+        3.124,
+        1.706
+      ],
+      "meshNodes": [
+        "orc_skull_Orc_Skull",
+        "orc_skull_Orc_Weapon"
+      ]
+    },
+    "ghost": {
+      "pack": "quaternius",
+      "rank": "D",
+      "alsoRanks": [
+        "C",
+        "A"
+      ],
+      "role": "trash",
+      "archetype": "stalker",
+      "boss": null,
+      "note": "Black hooded wraith. Reads undead and moves on the flying rig, so it can hover the Ossuary.",
+      "clips": [
+        "ghost__death",
+        "ghost__fast_flying",
+        "ghost__flying_idle",
+        "ghost__headbutt",
+        "ghost__hitreact",
+        "ghost__punch"
+      ],
+      "triangles": 3192,
+      "size": [
+        2.953,
+        3.06,
+        1.892
+      ],
+      "meshNodes": [
+        "ghost_Ghost"
+      ]
+    },
+    "ghost_skull": {
+      "pack": "quaternius",
+      "rank": "D",
+      "alsoRanks": [
+        "C",
+        "A"
+      ],
+      "role": "elite",
+      "archetype": "howler",
+      "boss": null,
+      "note": "Bone-skulled wraith. The bare skull is the strongest undead read in the pack after the KayKit set.",
+      "clips": [
+        "ghost_skull__death",
+        "ghost_skull__fast_flying",
+        "ghost_skull__flying_idle",
+        "ghost_skull__headbutt",
+        "ghost_skull__hitreact",
+        "ghost_skull__punch"
+      ],
+      "triangles": 3146,
+      "size": [
+        2.953,
+        3.045,
+        2.116
+      ],
+      "meshNodes": [
+        "ghost_skull_Ghost_Skull"
+      ]
+    },
+    "yeti": {
+      "pack": "quaternius",
+      "rank": "C",
+      "alsoRanks": [
+        "B"
+      ],
+      "role": "boss",
+      "archetype": "brute",
+      "boss": "frostcaller",
+      "note": "Pale white/blue ghoul, open jaw. FROSTCALLER: already the right palette for Deepglass, no recolour needed.",
+      "clips": [
+        "yeti__death",
+        "yeti__hitreact",
+        "yeti__idle",
+        "yeti__jump",
+        "yeti__punch",
+        "yeti__run",
+        "yeti__walk",
+        "yeti__weapon"
+      ],
+      "triangles": 6094,
+      "size": [
+        3.221,
+        2.641,
+        1.531
+      ],
+      "meshNodes": [
+        "yeti_Yeti"
+      ]
+    },
+    "goleling_evolved": {
+      "pack": "quaternius",
+      "rank": "B",
+      "alsoRanks": [
+        "A"
+      ],
+      "role": "trash",
+      "archetype": "howler",
+      "boss": null,
+      "note": "Crowned imp caught mid-scream. Literally a howler; the open mouth sells the support-shout tell.",
+      "clips": [
+        "goleling_evolved__death",
+        "goleling_evolved__fast_flying",
+        "goleling_evolved__flying_idle",
+        "goleling_evolved__headbutt",
+        "goleling_evolved__hitreact",
+        "goleling_evolved__punch"
+      ],
+      "triangles": 5864,
+      "size": [
+        4.382,
+        2.563,
+        2.182
+      ],
+      "meshNodes": [
+        "goleling_evolved_Goleling_Evolved"
+      ]
+    },
+    "dragon": {
+      "pack": "quaternius",
+      "rank": "B",
+      "alsoRanks": [
+        "A",
+        "S"
+      ],
+      "role": "trash",
+      "archetype": "stalker",
+      "boss": null,
+      "note": "Small horned bat-dragon, ember palette. Flying trash for Emberfall.",
+      "clips": [
+        "dragon__death",
+        "dragon__fast_flying",
+        "dragon__flying_idle",
+        "dragon__headbutt",
+        "dragon__hitreact",
+        "dragon__punch"
+      ],
+      "triangles": 4562,
+      "size": [
+        4.382,
+        1.511,
+        2.451
+      ],
+      "meshNodes": [
+        "dragon_Dragon_Fly"
+      ]
+    },
+    "demon": {
+      "pack": "quaternius",
+      "rank": "B",
+      "alsoRanks": [
+        "A",
+        "S"
+      ],
+      "role": "boss",
+      "archetype": "brute",
+      "boss": "infernus",
+      "note": "Red horned demon with a trident. INFERNUS. TWO CAVEATS, both checked by rendering it: (1) it wears a black halo hoop, which is a visual gag, and the halo is welded into the body mesh -- there is no node to hide, so removing it means editing geometry. (2) the trident IS a separate node (`demon_Trident`) and can be hidden or swapped for an item-pack weapon. It is the most cartoonish thing admitted to this set; at the B boss scale of 2.9 that will show.",
+      "clips": [
+        "demon__death",
+        "demon__hitreact",
+        "demon__idle",
+        "demon__jump",
+        "demon__punch",
+        "demon__run",
+        "demon__walk",
+        "demon__weapon"
+      ],
+      "triangles": 6712,
+      "size": [
+        3.641,
+        2.929,
+        1.985
+      ],
+      "meshNodes": [
+        "demon_Demon",
+        "demon_Trident"
+      ]
+    },
+    "alien": {
+      "pack": "quaternius",
+      "rank": "A",
+      "alsoRanks": [
+        "S"
+      ],
+      "role": "boss",
+      "archetype": "stalker",
+      "boss": "weaver",
+      "note": "Purple tentacle-headed humanoid. THE VOIDWEAVER: the tentacles and the Riven Waste palette line up exactly.",
+      "clips": [
+        "alien__death",
+        "alien__hitreact",
+        "alien__idle",
+        "alien__jump",
+        "alien__punch",
+        "alien__run",
+        "alien__walk",
+        "alien__weapon"
+      ],
+      "triangles": 7676,
+      "size": [
+        3.224,
+        3.359,
+        1.614
+      ],
+      "meshNodes": [
+        "alien_Alien"
+      ]
+    },
+    "dragon_evolved": {
+      "pack": "quaternius",
+      "rank": "S",
+      "alsoRanks": [
+        "A"
+      ],
+      "role": "boss",
+      "archetype": "lancer",
+      "boss": "archon",
+      "note": "WEAKEST MATCH IN THE SET, flagged deliberately. Nothing in this pack is a credible THE RIFT ARCHON (9800hp, scale 3.4) -- this is a chibi bat-dragon and will look like one when scaled 3.4x. Treat it as a placeholder and source the S boss elsewhere.",
+      "clips": [
+        "dragon_evolved__death",
+        "dragon_evolved__fast_flying",
+        "dragon_evolved__flying_idle",
+        "dragon_evolved__headbutt",
+        "dragon_evolved__hitreact",
+        "dragon_evolved__punch"
+      ],
+      "triangles": 7440,
+      "size": [
+        4.385,
+        2.834,
+        2.672
+      ],
+      "meshNodes": [
+        "dragon_evolved_Dragon"
+      ]
+    },
+    "skeleton_minion": {
+      "pack": "kaykit",
+      "rank": "D",
+      "alsoRanks": [
+        "E",
+        "C"
+      ],
+      "role": "trash",
+      "archetype": "grunt",
+      "boss": null,
+      "note": "Bare skeleton, no kit. The Ossuary's baseline body.",
+      "clips": [
+        "skeleton_minion__skeletons_awaken_floor",
+        "skeleton_minion__skeletons_awaken_standing",
+        "skeleton_minion__skeletons_death",
+        "skeleton_minion__skeletons_idle",
+        "skeleton_minion__skeletons_spawn_ground",
+        "skeleton_minion__skeletons_taunt",
+        "skeleton_minion__skeletons_walking",
+        "skeleton_minion__hit_a",
+        "skeleton_minion__hit_b",
+        "skeleton_minion__idle_a",
+        "skeleton_minion__running_a",
+        "skeleton_minion__walking_a",
+        "skeleton_minion__melee_1h_attack_chop",
+        "skeleton_minion__melee_unarmed_attack_punch_a"
+      ],
+      "triangles": 5288,
+      "size": [
+        1.938,
+        2.166,
+        0.912
+      ],
+      "meshNodes": [
+        "skeleton_minion_Skeleton_Minion_ArmLeft",
+        "skeleton_minion_Skeleton_Minion_ArmRight",
+        "skeleton_minion_Skeleton_Minion_Body",
+        "skeleton_minion_Skeleton_Minion_Cloak",
+        "skeleton_minion_Skeleton_Minion_Eyes",
+        "skeleton_minion_Skeleton_Minion_Head",
+        "skeleton_minion_Skeleton_Minion_Jaw",
+        "skeleton_minion_Skeleton_Minion_LegLeft",
+        "skeleton_minion_Skeleton_Minion_LegRight"
+      ]
+    },
+    "skeleton_rogue": {
+      "pack": "kaykit",
+      "rank": "D",
+      "alsoRanks": [
+        "C",
+        "B"
+      ],
+      "role": "trash",
+      "archetype": "stalker",
+      "boss": null,
+      "note": "Hooded, caped, dagger. Fast-lunge body.",
+      "clips": [
+        "skeleton_rogue__skeletons_awaken_standing",
+        "skeleton_rogue__skeletons_death",
+        "skeleton_rogue__skeletons_idle",
+        "skeleton_rogue__skeletons_taunt",
+        "skeleton_rogue__skeletons_walking",
+        "skeleton_rogue__hit_a",
+        "skeleton_rogue__hit_b",
+        "skeleton_rogue__idle_a",
+        "skeleton_rogue__running_a",
+        "skeleton_rogue__walking_a",
+        "skeleton_rogue__melee_1h_attack_stab",
+        "skeleton_rogue__dodge_backward",
+        "skeleton_rogue__ranged_2h_aiming",
+        "skeleton_rogue__ranged_2h_reload",
+        "skeleton_rogue__ranged_2h_shoot"
+      ],
+      "triangles": 5278,
+      "size": [
+        1.943,
+        2.271,
+        1.249
+      ],
+      "meshNodes": [
+        "skeleton_rogue_Skeleton_Rogue_ArmLeft",
+        "skeleton_rogue_Skeleton_Rogue_ArmRight",
+        "skeleton_rogue_Skeleton_Rogue_Body",
+        "skeleton_rogue_Skeleton_Rogue_Cape",
+        "skeleton_rogue_Skeleton_Rogue_Eyes",
+        "skeleton_rogue_Skeleton_Rogue_Head",
+        "skeleton_rogue_Skeleton_Rogue_Hood",
+        "skeleton_rogue_Skeleton_Rogue_Jaw",
+        "skeleton_rogue_Skeleton_Rogue_LegLeft",
+        "skeleton_rogue_Skeleton_Rogue_LegRight"
+      ]
+    },
+    "skeleton_mage": {
+      "pack": "kaykit",
+      "rank": "D",
+      "alsoRanks": [
+        "C",
+        "B"
+      ],
+      "role": "elite",
+      "archetype": "caster",
+      "boss": null,
+      "note": "Hat and robe. The only credible Hexcaster in either pack.",
+      "clips": [
+        "skeleton_mage__skeletons_awaken_standing",
+        "skeleton_mage__skeletons_death",
+        "skeleton_mage__skeletons_idle",
+        "skeleton_mage__skeletons_taunt",
+        "skeleton_mage__skeletons_walking",
+        "skeleton_mage__hit_a",
+        "skeleton_mage__hit_b",
+        "skeleton_mage__idle_a",
+        "skeleton_mage__running_a",
+        "skeleton_mage__walking_a",
+        "skeleton_mage__ranged_magic_shoot",
+        "skeleton_mage__ranged_magic_spellcasting",
+        "skeleton_mage__ranged_magic_summon"
+      ],
+      "triangles": 4588,
+      "size": [
+        1.938,
+        2.604,
+        1.786
+      ],
+      "meshNodes": [
+        "skeleton_mage_Skeleton_Mage_ArmLeft",
+        "skeleton_mage_Skeleton_Mage_ArmRight",
+        "skeleton_mage_Skeleton_Mage_Body",
+        "skeleton_mage_Skeleton_Mage_Eyes",
+        "skeleton_mage_Skeleton_Mage_Hat",
+        "skeleton_mage_Skeleton_Mage_Jaw",
+        "skeleton_mage_Skeleton_Mage_LegLeft",
+        "skeleton_mage_Skeleton_Mage_LegRight",
+        "skeleton_mage_Skeleton_Mage_Skull"
+      ]
+    },
+    "skeleton_warrior": {
+      "pack": "kaykit",
+      "rank": "E",
+      "alsoRanks": [
+        "D",
+        "C"
+      ],
+      "role": "boss",
+      "archetype": "lancer",
+      "boss": "warden",
+      "note": "Horned helm, shield, axe. THE HOLLOW WARDEN: an armoured undead guardian is what that name and the E-gate blurb describe.",
+      "clips": [
+        "skeleton_warrior__skeletons_awaken_floor",
+        "skeleton_warrior__skeletons_awaken_standing",
+        "skeleton_warrior__skeletons_death",
+        "skeleton_warrior__skeletons_death_resurrect",
+        "skeleton_warrior__skeletons_idle",
+        "skeleton_warrior__skeletons_taunt",
+        "skeleton_warrior__skeletons_walking",
+        "skeleton_warrior__hit_a",
+        "skeleton_warrior__hit_b",
+        "skeleton_warrior__idle_a",
+        "skeleton_warrior__running_a",
+        "skeleton_warrior__walking_a",
+        "skeleton_warrior__melee_2h_attack_chop",
+        "skeleton_warrior__melee_2h_attack_spinning",
+        "skeleton_warrior__melee_blocking"
+      ],
+      "triangles": 5934,
+      "size": [
+        1.943,
+        2.544,
+        1.465
+      ],
+      "meshNodes": [
+        "skeleton_warrior_Skeleton_Warrior_ArmLeft",
+        "skeleton_warrior_Skeleton_Warrior_ArmRight",
+        "skeleton_warrior_Skeleton_Warrior_Body",
+        "skeleton_warrior_Skeleton_Warrior_Cloak",
+        "skeleton_warrior_Skeleton_Warrior_Eyes",
+        "skeleton_warrior_Skeleton_Warrior_Head",
+        "skeleton_warrior_Skeleton_Warrior_Helmet",
+        "skeleton_warrior_Skeleton_Warrior_Jaw",
+        "skeleton_warrior_Skeleton_Warrior_LegLeft",
+        "skeleton_warrior_Skeleton_Warrior_LegRight"
+      ]
+    }
+  },
+  "props": {
+    "kaykit_axe": {
+      "pack": "kaykit",
+      "attach": "handslot_r",
+      "attachNodeFor": {
+        "skeleton_warrior": "skeleton_warrior_handslot_r"
+      },
+      "suits": [
+        "skeleton_warrior"
+      ],
+      "size": [
+        0.989,
+        1.252,
+        0.282
+      ]
+    },
+    "kaykit_blade": {
+      "pack": "kaykit",
+      "attach": "handslot_r",
+      "attachNodeFor": {
+        "skeleton_minion": "skeleton_minion_handslot_r",
+        "skeleton_rogue": "skeleton_rogue_handslot_r"
+      },
+      "suits": [
+        "skeleton_minion",
+        "skeleton_rogue"
+      ],
+      "size": [
+        0.573,
+        1.497,
+        0.222
+      ]
+    },
+    "kaykit_crossbow": {
+      "pack": "kaykit",
+      "attach": "handslot_r",
+      "attachNodeFor": {
+        "skeleton_rogue": "skeleton_rogue_handslot_r"
+      },
+      "suits": [
+        "skeleton_rogue"
+      ],
+      "size": [
+        1.111,
+        0.508,
+        1.419
+      ]
+    },
+    "kaykit_staff": {
+      "pack": "kaykit",
+      "attach": "handslot_r",
+      "attachNodeFor": {
+        "skeleton_mage": "skeleton_mage_handslot_r"
+      },
+      "suits": [
+        "skeleton_mage"
+      ],
+      "size": [
+        0.598,
+        2.102,
+        0.753
+      ]
+    },
+    "kaykit_shield_large_a": {
+      "pack": "kaykit",
+      "attach": "handslot_l",
+      "attachNodeFor": {
+        "skeleton_warrior": "skeleton_warrior_handslot_l"
+      },
+      "suits": [
+        "skeleton_warrior"
+      ],
+      "size": [
+        0.877,
+        1.135,
+        0.362
+      ]
+    },
+    "kaykit_shield_small_a": {
+      "pack": "kaykit",
+      "attach": "handslot_l",
+      "attachNodeFor": {
+        "skeleton_minion": "skeleton_minion_handslot_l"
+      },
+      "suits": [
+        "skeleton_minion"
+      ],
+      "size": [
+        0.832,
+        0.832,
+        0.156
+      ]
+    },
+    "kaykit_quiver": {
+      "pack": "kaykit",
+      "attach": "spine",
+      "attachNodeFor": {
+        "skeleton_rogue": "skeleton_rogue_spine"
+      },
+      "suits": [
+        "skeleton_rogue"
+      ],
+      "size": [
+        0.305,
+        0.929,
+        0.22
+      ]
+    }
+  },
+  "measurementNote": "size is the world-space bounding box of a SkeletonUtils.clone in bind pose, in metres, measured through three.js. meshNodes are the named handles under each creature -- hide or swap these to change a creature's kit."
+}

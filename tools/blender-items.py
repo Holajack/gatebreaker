@@ -79,6 +79,13 @@ for name in names:
     for o in meshes:
         o.select_set(True)
     bpy.context.view_layer.objects.active = meshes[0]
+    # join() DELETES every merged-away object, which invalidates the Python
+    # references in `fresh`. Touching o.name afterwards raises
+    # "ReferenceError: StructRNA of type Object has been removed". Snapshot the
+    # names BEFORE the join and clean up by name. The item pack never tripped
+    # this because its FBX are one mesh each, so the guard below skipped join();
+    # 44 of the 78 ruins pieces are multi-mesh and hit it every time.
+    fresh_names = [o.name for o in fresh]
     if len(meshes) > 1:
         bpy.ops.object.join()
     joined = bpy.context.view_layer.objects.active
@@ -86,8 +93,9 @@ for name in names:
     joined.data.name = '%s__mesh' % name
 
     # Drop anything that was not a mesh (stray empties/armatures in the FBX).
-    for o in fresh:
-        if o is not joined and o.name in bpy.data.objects:
+    for n in fresh_names:
+        o = bpy.data.objects.get(n)
+        if o is not None and o is not joined:
             bpy.data.objects.remove(o, do_unlink=True)
 
     # STEP 4 — the handle. This is the node the game looks up by name.

@@ -47,7 +47,15 @@ export async function launchBrowser({ headless = true, swiftshader = true } = {}
 
 // A phone-shaped page with error and console capture already wired, because
 // every tool wants both and half of them used to forget the pageerror hook.
-export async function newPhonePage(browser, { width = 412, height = 892, dpr = 2, hmr = false } = {}) {
+//
+// LANDSCAPE BY DEFAULT, and it must stay that way. index.html ships a
+// rotate-gate overlay that covers the whole screen whenever innerHeight >
+// innerWidth, and it swallows pointer events. The old 412x892 portrait default
+// meant every tool that did not pass its own size (smoke, loot, playtest,
+// pillartest, screenshots) hung on its first page.click() with a baffling
+// "<div id="rotate"> intercepts pointer events". 892x412 is the same size the
+// tools that already worked were passing by hand.
+export async function newPhonePage(browser, { width = 892, height = 412, dpr = 2, hmr = false } = {}) {
   const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: dpr });
   // Vite's HMR client full-reloads the page whenever anyone saves a file in
   // src/. Mid-test that destroys the execution context and the tool dies with

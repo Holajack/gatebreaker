@@ -1,0 +1,558 @@
+{
+  "generator": "tools/build-characters-glb.mjs",
+  "source": [
+    {
+      "pack": "Quaternius Ultimate Modular Men",
+      "licence": "CC0-1.0",
+      "characters": 11
+    },
+    {
+      "pack": "Quaternius Ultimate Modular Women",
+      "licence": "CC0-1.0",
+      "characters": 10
+    }
+  ],
+  "file": "models/characters.glb",
+  "usage": "One scene, two rig roots. Each rig root holds its 62-bone skeleton PLUS every\ncharacter group that uses it, so cloning a rig clones all of its characters.\nTo instantiate one character:\n  const rig = gltf.scene.getObjectByName(m.rigs[c.rig].node);\n  const inst = SkeletonUtils.clone(rig);\n  for (const g of [...inst.children]) if (g.name.startsWith(\"char_\") && g.name !== c.node) inst.remove(g);\n  const mixer = new THREE.AnimationMixer(inst);\n  mixer.clipAction(byName(m.rigs[c.rig].clipPrefix + \"Walk\")).play();\nPart swapping works within a rig: any char_*_head from the same rig can be\nre-parented onto another character group and skins correctly, because every\ncharacter in a pack shares one skeleton and one skin.\nWeapon sockets: rigs[sex].bonePrefix + \"Wrist_R\" / \"Wrist_L\" / \"Head\".",
+  "rigs": {
+    "male": {
+      "node": "rig_male",
+      "bonePrefix": "m_",
+      "clipPrefix": "male_",
+      "boneCount": 62,
+      "bones": [
+        "m_Root",
+        "m_Body",
+        "m_Hips",
+        "m_Abdomen",
+        "m_Torso",
+        "m_Chest",
+        "m_Neck",
+        "m_Head",
+        "m_Shoulder_L",
+        "m_UpperArm_L",
+        "m_LowerArm_L",
+        "m_Wrist_L",
+        "m_Index1_L",
+        "m_Index2_L",
+        "m_Index3_L",
+        "m_Index4_L",
+        "m_Middle1_L",
+        "m_Middle2_L",
+        "m_Middle3_L",
+        "m_Middle4_L",
+        "m_Ring1_L",
+        "m_Ring2_L",
+        "m_Ring3_L",
+        "m_Ring4_L",
+        "m_Pinky1_L",
+        "m_Pinky2_L",
+        "m_Pinky3_L",
+        "m_Pinky4_L",
+        "m_Thumb1_L",
+        "m_Thumb2_L",
+        "m_Thumb3_L",
+        "m_Shoulder_R",
+        "m_UpperArm_R",
+        "m_LowerArm_R",
+        "m_Wrist_R",
+        "m_Index1_R",
+        "m_Index2_R",
+        "m_Index3_R",
+        "m_Index4_R",
+        "m_Middle1_R",
+        "m_Middle2_R",
+        "m_Middle3_R",
+        "m_Middle4_R",
+        "m_Ring1_R",
+        "m_Ring2_R",
+        "m_Ring3_R",
+        "m_Ring4_R",
+        "m_Pinky1_R",
+        "m_Pinky2_R",
+        "m_Pinky3_R",
+        "m_Pinky4_R",
+        "m_Thumb1_R",
+        "m_Thumb2_R",
+        "m_Thumb3_R",
+        "m_UpperLeg_L",
+        "m_LowerLeg_L",
+        "m_UpperLeg_R",
+        "m_LowerLeg_R",
+        "m_Foot_L",
+        "m_PT_L",
+        "m_Foot_R",
+        "m_PT_R"
+      ],
+      "skeletonRoot": "m_Root"
+    },
+    "female": {
+      "node": "rig_female",
+      "bonePrefix": "f_",
+      "clipPrefix": "female_",
+      "boneCount": 62,
+      "bones": [
+        "f_Root",
+        "f_Body",
+        "f_Hips",
+        "f_Abdomen",
+        "f_Torso",
+        "f_Chest",
+        "f_Neck",
+        "f_Head",
+        "f_Shoulder_L",
+        "f_UpperArm_L",
+        "f_LowerArm_L",
+        "f_Wrist_L",
+        "f_Index1_L",
+        "f_Index2_L",
+        "f_Index3_L",
+        "f_Index4_L",
+        "f_Middle1_L",
+        "f_Middle2_L",
+        "f_Middle3_L",
+        "f_Middle4_L",
+        "f_Ring1_L",
+        "f_Ring2_L",
+        "f_Ring3_L",
+        "f_Ring4_L",
+        "f_Pinky1_L",
+        "f_Pinky2_L",
+        "f_Pinky3_L",
+        "f_Pinky4_L",
+        "f_Thumb1_L",
+        "f_Thumb2_L",
+        "f_Thumb3_L",
+        "f_Shoulder_R",
+        "f_UpperArm_R",
+        "f_LowerArm_R",
+        "f_Wrist_R",
+        "f_Index1_R",
+        "f_Index2_R",
+        "f_Index3_R",
+        "f_Index4_R",
+        "f_Middle1_R",
+        "f_Middle2_R",
+        "f_Middle3_R",
+        "f_Middle4_R",
+        "f_Ring1_R",
+        "f_Ring2_R",
+        "f_Ring3_R",
+        "f_Ring4_R",
+        "f_Pinky1_R",
+        "f_Pinky2_R",
+        "f_Pinky3_R",
+        "f_Pinky4_R",
+        "f_Thumb1_R",
+        "f_Thumb2_R",
+        "f_Thumb3_R",
+        "f_UpperLeg_L",
+        "f_LowerLeg_L",
+        "f_UpperLeg_R",
+        "f_LowerLeg_R",
+        "f_Foot_L",
+        "f_PT_L",
+        "f_Foot_R",
+        "f_PT_R"
+      ],
+      "skeletonRoot": "f_Root"
+    }
+  },
+  "characters": {
+    "men_adventurer": {
+      "node": "char_men_adventurer",
+      "rig": "male",
+      "pack": "men",
+      "sourceName": "Adventurer",
+      "parts": {
+        "body": "char_men_adventurer_body",
+        "feet": "char_men_adventurer_feet",
+        "head": "char_men_adventurer_head",
+        "legs": "char_men_adventurer_legs",
+        "backpack": "char_men_adventurer_backpack"
+      },
+      "primitives": 15,
+      "triangles": 10202
+    },
+    "men_beach": {
+      "node": "char_men_beach",
+      "rig": "male",
+      "pack": "men",
+      "sourceName": "Beach",
+      "parts": {
+        "body": "char_men_beach_body",
+        "feet": "char_men_beach_feet",
+        "head": "char_men_beach_head",
+        "legs": "char_men_beach_legs"
+      },
+      "primitives": 12,
+      "triangles": 6578
+    },
+    "men_casual_2": {
+      "node": "char_men_casual_2",
+      "rig": "male",
+      "pack": "men",
+      "sourceName": "Casual_2",
+      "parts": {
+        "body": "char_men_casual_2_body",
+        "feet": "char_men_casual_2_feet",
+        "head": "char_men_casual_2_head",
+        "legs": "char_men_casual_2_legs"
+      },
+      "primitives": 10,
+      "triangles": 5776
+    },
+    "men_casual_hoodie": {
+      "node": "char_men_casual_hoodie",
+      "rig": "male",
+      "pack": "men",
+      "sourceName": "Casual_Hoodie",
+      "parts": {
+        "body": "char_men_casual_hoodie_body",
+        "feet": "char_men_casual_hoodie_feet",
+        "head": "char_men_casual_hoodie_head",
+        "legs": "char_men_casual_hoodie_legs"
+      },
+      "primitives": 10,
+      "triangles": 6206
+    },
+    "men_farmer": {
+      "node": "char_men_farmer",
+      "rig": "male",
+      "pack": "men",
+      "sourceName": "Farmer",
+      "parts": {
+        "body": "char_men_farmer_body",
+        "feet": "char_men_farmer_feet",
+        "head": "char_men_farmer_head",
+        "legs": "char_men_farmer_legs"
+      },
+      "primitives": 12,
+      "triangles": 5476
+    },
+    "men_king": {
+      "node": "char_men_king",
+      "rig": "male",
+      "pack": "men",
+      "sourceName": "King",
+      "parts": {
+        "body": "char_men_king_body",
+        "feet": "char_men_king_feet",
+        "head": "char_men_king_head",
+        "legs": "char_men_king_legs"
+      },
+      "primitives": 13,
+      "triangles": 11110
+    },
+    "men_punk": {
+      "node": "char_men_punk",
+      "rig": "male",
+      "pack": "men",
+      "sourceName": "Punk",
+      "parts": {
+        "body": "char_men_punk_body",
+        "feet": "char_men_punk_feet",
+        "head": "char_men_punk_head",
+        "legs": "char_men_punk_legs"
+      },
+      "primitives": 13,
+      "triangles": 5500
+    },
+    "men_spacesuit": {
+      "node": "char_men_spacesuit",
+      "rig": "male",
+      "pack": "men",
+      "sourceName": "Spacesuit",
+      "parts": {
+        "body": "char_men_spacesuit_body",
+        "feet": "char_men_spacesuit_feet",
+        "head": "char_men_spacesuit_head",
+        "legs": "char_men_spacesuit_legs"
+      },
+      "primitives": 13,
+      "triangles": 10558
+    },
+    "men_suit": {
+      "node": "char_men_suit",
+      "rig": "male",
+      "pack": "men",
+      "sourceName": "Suit",
+      "parts": {
+        "pistol": "char_men_suit_pistol",
+        "body": "char_men_suit_body",
+        "feet": "char_men_suit_feet",
+        "head": "char_men_suit_head",
+        "legs": "char_men_suit_legs"
+      },
+      "primitives": 13,
+      "triangles": 7674
+    },
+    "men_swat": {
+      "node": "char_men_swat",
+      "rig": "male",
+      "pack": "men",
+      "sourceName": "Swat",
+      "parts": {
+        "pistol": "char_men_swat_pistol",
+        "body": "char_men_swat_body",
+        "feet": "char_men_swat_feet",
+        "head": "char_men_swat_head",
+        "legs": "char_men_swat_legs"
+      },
+      "primitives": 12,
+      "triangles": 8794
+    },
+    "men_worker": {
+      "node": "char_men_worker",
+      "rig": "male",
+      "pack": "men",
+      "sourceName": "Worker",
+      "parts": {
+        "body": "char_men_worker_body",
+        "feet": "char_men_worker_feet",
+        "head": "char_men_worker_head",
+        "legs": "char_men_worker_legs"
+      },
+      "primitives": 13,
+      "triangles": 5240
+    },
+    "women_adventurer": {
+      "node": "char_women_adventurer",
+      "rig": "female",
+      "pack": "women",
+      "sourceName": "Adventurer",
+      "parts": {
+        "body": "char_women_adventurer_body",
+        "feet": "char_women_adventurer_feet",
+        "head": "char_women_adventurer_head",
+        "legs": "char_women_adventurer_legs"
+      },
+      "primitives": 17,
+      "triangles": 6812
+    },
+    "women_casual": {
+      "node": "char_women_casual",
+      "rig": "female",
+      "pack": "women",
+      "sourceName": "Casual",
+      "parts": {
+        "body": "char_women_casual_body",
+        "feet": "char_women_casual_feet",
+        "head": "char_women_casual_head",
+        "legs": "char_women_casual_legs"
+      },
+      "primitives": 9,
+      "triangles": 6424
+    },
+    "women_formal": {
+      "node": "char_women_formal",
+      "rig": "female",
+      "pack": "women",
+      "sourceName": "Formal",
+      "parts": {
+        "head": "char_women_formal_head",
+        "body": "char_women_formal_body",
+        "feet": "char_women_formal_feet",
+        "legs": "char_women_formal_legs"
+      },
+      "primitives": 10,
+      "triangles": 6108
+    },
+    "women_medieval": {
+      "node": "char_women_medieval",
+      "rig": "female",
+      "pack": "women",
+      "sourceName": "Medieval",
+      "parts": {
+        "body": "char_women_medieval_body",
+        "feet": "char_women_medieval_feet",
+        "head": "char_women_medieval_head",
+        "legs": "char_women_medieval_legs"
+      },
+      "props": {
+        "sword": {
+          "node": "char_women_medieval_sword",
+          "attachBone": "f_Middle1_R"
+        }
+      },
+      "primitives": 17,
+      "triangles": 7276
+    },
+    "women_punk": {
+      "node": "char_women_punk",
+      "rig": "female",
+      "pack": "women",
+      "sourceName": "Punk",
+      "parts": {
+        "body": "char_women_punk_body",
+        "feet": "char_women_punk_feet",
+        "head": "char_women_punk_head",
+        "legs": "char_women_punk_legs"
+      },
+      "primitives": 12,
+      "triangles": 5956
+    },
+    "women_scifi": {
+      "node": "char_women_scifi",
+      "rig": "female",
+      "pack": "women",
+      "sourceName": "SciFi",
+      "parts": {
+        "body": "char_women_scifi_body",
+        "feet": "char_women_scifi_feet",
+        "head": "char_women_scifi_head",
+        "legs": "char_women_scifi_legs"
+      },
+      "props": {
+        "pistol": {
+          "node": "char_women_scifi_pistol",
+          "attachBone": "f_Middle1_R"
+        }
+      },
+      "primitives": 18,
+      "triangles": 8038
+    },
+    "women_soldier": {
+      "node": "char_women_soldier",
+      "rig": "female",
+      "pack": "women",
+      "sourceName": "Soldier",
+      "parts": {
+        "body": "char_women_soldier_body",
+        "feet": "char_women_soldier_feet",
+        "head": "char_women_soldier_head",
+        "legs": "char_women_soldier_legs"
+      },
+      "primitives": 11,
+      "triangles": 7900
+    },
+    "women_suit": {
+      "node": "char_women_suit",
+      "rig": "female",
+      "pack": "women",
+      "sourceName": "Suit",
+      "parts": {
+        "body": "char_women_suit_body",
+        "feet": "char_women_suit_feet",
+        "head": "char_women_suit_head",
+        "legs": "char_women_suit_legs"
+      },
+      "primitives": 10,
+      "triangles": 6482
+    },
+    "women_witch": {
+      "node": "char_women_witch",
+      "rig": "female",
+      "pack": "women",
+      "sourceName": "Witch",
+      "parts": {
+        "body": "char_women_witch_body",
+        "feet": "char_women_witch_feet",
+        "head": "char_women_witch_head",
+        "legs": "char_women_witch_legs"
+      },
+      "primitives": 13,
+      "triangles": 6872
+    },
+    "women_worker": {
+      "node": "char_women_worker",
+      "rig": "female",
+      "pack": "women",
+      "sourceName": "Worker",
+      "parts": {
+        "body": "char_women_worker_body",
+        "feet": "char_women_worker_feet",
+        "head": "char_women_worker_head",
+        "legs": "char_women_worker_legs"
+      },
+      "primitives": 12,
+      "triangles": 6112
+    }
+  },
+  "slots": [
+    "head",
+    "body",
+    "legs",
+    "feet",
+    "backpack",
+    "pistol"
+  ],
+  "clips": [
+    "female_Death",
+    "female_Gun_Shoot",
+    "female_HitRecieve",
+    "female_HitRecieve_2",
+    "female_Idle",
+    "female_Idle_Gun",
+    "female_Idle_Gun_Pointing",
+    "female_Idle_Gun_Shoot",
+    "female_Idle_Neutral",
+    "female_Idle_Sword",
+    "female_Interact",
+    "female_Kick_Left",
+    "female_Kick_Right",
+    "female_Punch_Left",
+    "female_Punch_Right",
+    "female_Roll",
+    "female_Run",
+    "female_Run_Back",
+    "female_Run_Left",
+    "female_Run_Right",
+    "female_Run_Shoot",
+    "female_Sword_Slash",
+    "female_Walk",
+    "female_Wave",
+    "male_Death",
+    "male_Gun_Shoot",
+    "male_HitRecieve",
+    "male_HitRecieve_2",
+    "male_Idle",
+    "male_Idle_Gun",
+    "male_Idle_Gun_Pointing",
+    "male_Idle_Gun_Shoot",
+    "male_Idle_Neutral",
+    "male_Idle_Sword",
+    "male_Interact",
+    "male_Kick_Left",
+    "male_Kick_Right",
+    "male_Punch_Left",
+    "male_Punch_Right",
+    "male_Roll",
+    "male_Run",
+    "male_Run_Back",
+    "male_Run_Left",
+    "male_Run_Right",
+    "male_Run_Shoot",
+    "male_Sword_Slash",
+    "male_Walk",
+    "male_Wave"
+  ],
+  "clipNames": [
+    "Death",
+    "Gun_Shoot",
+    "HitRecieve",
+    "HitRecieve_2",
+    "Idle",
+    "Idle_Gun",
+    "Idle_Gun_Pointing",
+    "Idle_Gun_Shoot",
+    "Idle_Neutral",
+    "Idle_Sword",
+    "Interact",
+    "Kick_Left",
+    "Kick_Right",
+    "Punch_Left",
+    "Punch_Right",
+    "Roll",
+    "Run",
+    "Run_Back",
+    "Run_Left",
+    "Run_Right",
+    "Run_Shoot",
+    "Sword_Slash",
+    "Walk",
+    "Wave"
+  ],
+  "bytes": 3354964,
+  "triangles": 151094
+}

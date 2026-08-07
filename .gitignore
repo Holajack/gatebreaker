@@ -7,6 +7,18 @@ out/
 _stray-site-files-backup/
 Ultimate RPG Items Pack - Aug 2019/
 
+# Downloaded CC0 source art: ~190 MB of FBX/glTF/zip build INPUT across
+# characters (65 MB), creatures (96 MB) and world (31 MB). Nothing at runtime
+# reads from here — tools/build-*-glb.mjs consume it and emit public/models/.
+# The provenance and licence files stay tracked so the packs can be re-fetched
+# and the CC0 attribution survives without the art.
+assets/source/**
+!assets/source/*/
+!assets/source/**/PROVENANCE.md
+!assets/source/**/CREDITS.md
+!assets/source/**/LICENSE*
+!assets/source/**/License*
+
 # Android build output
 android/.gradle/
 android/build/
@@ -28,3 +40,11 @@ android/app/src/main/assets/capacitor.plugins.json
 !public/models/items.glb
 !public/models/icons.webp
 !public/models/icons.json
+!public/models/characters.glb
+!public/models/characters.json
+!public/models/creatures.glb
+!public/models/creatures.json
+!public/models/citykit.glb
+!public/models/citykit.json
+!public/models/nature.glb
+!public/models/nature.json
