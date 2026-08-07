@@ -10,6 +10,52 @@
 <body>
   <canvas id="scene"></canvas>
 
+  <!-- Shown only if the device ends up in portrait despite everything below.
+       The manifest asks for sensorLandscape, but that request is advisory: an
+       OEM shell or a large-screen policy can overrule it, and this game's HUD
+       assumes a wide viewport. Better an explicit prompt than a broken layout. -->
+  <div id="rotate" class="rotate-gate hidden">
+    <div class="rotate-icon">⟳</div>
+    <p>ROTATE YOUR DEVICE</p>
+    <small>Gatebreaker is played in landscape.</small>
+  </div>
+
+  <script>
+    // Belt and braces on top of android:screenOrientation. The Screen
+    // Orientation API works inside the Android WebView and is enforced by the
+    // browser rather than the activity, so it still applies where the OS has
+    // decided to ignore the manifest's orientation request.
+    (function () {
+      var gate = document.getElementById('rotate');
+
+      function apply() {
+        var portrait = window.innerHeight > window.innerWidth;
+        gate.classList.toggle('hidden', !portrait);
+        // Pause the run rather than let it play under the overlay.
+        document.documentElement.classList.toggle('is-portrait', portrait);
+      }
+
+      function lock() {
+        var o = screen.orientation;
+        if (!o || typeof o.lock !== 'function') return Promise.reject();
+        return o.lock('landscape');
+      }
+
+      // lock() rejects on any platform that refuses it — that is the expected
+      // path on desktop and on locked-down shells, and the overlay covers it.
+      lock().catch(function () {}).finally(apply);
+
+      addEventListener('resize', apply);
+      addEventListener('orientationchange', function () { setTimeout(apply, 80); });
+      // Some shells only honour a lock after a user gesture.
+      addEventListener('touchend', function retry() {
+        lock().then(function () { removeEventListener('touchend', retry); }).catch(function () {});
+      }, { passive: true });
+
+      apply();
+    })();
+  </script>
+
   <!-- ===== Boot / loading ===== -->
   <div id="boot" class="screen">
     <div class="boot-mark">
@@ -25,6 +71,7 @@
   <div id="title" class="screen hidden">
     <div class="title-inner">
       <h1 class="game-title">GATEBREAKER</h1>
+      <span class="build-stamp">BUILD 1.1-fullscreen</span>
       <p class="game-sub">RIFT ASCENSION</p>
       <div class="title-hunter">
         <span id="titleName">UNRANKED BREAKER</span>

@@ -91,7 +91,16 @@ kbd{
 #title{background:radial-gradient(ellipse at 50% 30%,rgba(28,20,68,.75) 0%,rgba(5,6,13,.94) 70%)}
 .title-inner{width:min(420px,100%);display:flex;flex-direction:column;gap:12px;text-align:center}
 .game-title{
-  font-size:clamp(38px,12vw,68px);letter-spacing:.14em;font-weight:800;line-height:.98;
+  /* letter-spacing adds a trailing gap after the LAST glyph too, so at the
+     clamp's upper end the final letter was pushed past the viewport and
+     clipped — 'GATEBREAKE'. The negative margin reclaims exactly that gap. */
+  /* "GATEBREAKER" at .14em tracking needs ~7.3x the font size in width, and
+     .title-inner caps at 420px — so the old 68px maximum wanted 495px and the
+     last letters were simply cut off. 56px is the largest that fits the
+     container at every viewport, and the negative margin reclaims the trailing
+     gap letter-spacing adds after the final glyph. */
+  font-size:clamp(26px,11vw,56px);letter-spacing:.14em;margin-right:-.14em;
+  max-width:100%;font-weight:800;line-height:.98;
   background:linear-gradient(180deg,#fff,#8f7bff);
   -webkit-background-clip:text;background-clip:text;color:transparent;
   filter:drop-shadow(0 0 24px rgba(124,92,255,.55));
@@ -387,4 +396,34 @@ kbd{
   .skill-row{gap:8px}
   .skill-btn{width:50px;height:50px}
   .skill-btn.big{width:74px;height:74px}
+}
+
+/* ---------- portrait gate ---------- */
+.rotate-gate{
+  position:fixed;inset:0;z-index:60;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
+  background:#05060d;color:var(--ink);text-align:center;
+  padding:24px;letter-spacing:.2em;
+}
+.rotate-gate p{font-size:16px;font-weight:800}
+.rotate-gate small{color:var(--dim);letter-spacing:.08em;font-size:12.5px}
+.rotate-icon{
+  font-size:52px;color:var(--accent);
+  animation:rotate-hint 2.2s ease-in-out infinite;
+  filter:drop-shadow(0 0 18px rgba(124,92,255,.7));
+}
+@keyframes rotate-hint{
+  0%,100%{transform:rotate(0deg)}
+  45%,70%{transform:rotate(90deg)}
+}
+/* Hide the game entirely behind the gate so nothing renders half-laid-out. */
+html.is-portrait #hud,
+html.is-portrait #scene{visibility:hidden}
+
+/* A visible build id. Debug APKs install over each other silently, so without
+   this there is no way to tell from a screenshot which build is on the phone —
+   which is exactly the ambiguity that cost a round trip. */
+.build-stamp{
+  display:block;color:var(--dim);opacity:.55;
+  font-size:10px;letter-spacing:.26em;margin-top:-6px;
 }
