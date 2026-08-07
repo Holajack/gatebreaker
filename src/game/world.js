@@ -196,6 +196,91 @@ export class World {
     this.shards.layers.enable(GLOW_LAYER);
     this.group.add(this.shards);
 
+    // --- beyond the membrane: ground apron + crag silhouettes ---
+    // The floor used to end at the rim with nothing behind it: past the wall
+    // you saw the sky dome's below-horizon band, which tonemaps to near-black,
+    // so every arena looked like a disc floating in a void. Everything in this
+    // section is scenery only — World.resolve clamps every mover inside
+    // `radius`, so none of it registers obstacles, and the shadow camera is
+    // fitted to the player, so none of it touches the shadow map.
+    const apronOuter = this.radius * 2.8;   // past the fog far plane (2.6r)
+    const apronGeo = new THREE.RingGeometry(this.radius, apronOuter, 72, 6);
+    apronGeo.rotateX(-Math.PI / 2);
+    const apos = apronGeo.attributes.position;
+    const acol = new Float32Array(apos.count * 3);
+    // No convertSRGBToLinear here: ColorManagement already put these in the
+    // linear working space, and a second conversion is the eighth-brightness
+    // bug city.js documents. The inner edge must equal the floor material's
+    // colour exactly or the seam reads as a painted circle.
+    const apronGround = new THREE.Color(biome.ground);
+    const apronFog = new THREE.Color(biome.fog);
+    const apronC = new THREE.Color();
+    for (let i = 0; i < apos.count; i++) {
+      const x = apos.getX(i), z = apos.getZ(i);
+      const f = Math.min(1, Math.max(0, (Math.hypot(x, z) - this.radius) / (apronOuter - this.radius)));
+      // Bigger, slower swells than the floor noise: at fog distance only
+      // silhouette-scale relief survives tonemapping. smoothstep(f) holds the
+      // inner edge at 0 so it meets the floor rim without a step, and the
+      // gentle outward rise tilts the far apron up to cover the sliver of
+      // below-horizon sky a grounded camera can see past it.
+      const roll = Math.sin(x * 0.05 + seed) * Math.cos(z * 0.055 - seed * 1.3)
+                 + Math.sin((x - z) * 0.023 + seed * 0.7) * 0.8;
+      const lift = f * f * (3 - 2 * f);
+      apos.setY(i, roll * 2.6 * lift + f * 1.8);
+      // Vertex colour walks from the floor colour into the fog colour so the
+      // far edge dissolves into the fog band instead of ending in a cliff.
+      apronC.copy(apronGround).lerp(apronFog, Math.min(1, f * 1.25));
+      acol[i * 3] = apronC.r; acol[i * 3 + 1] = apronC.g; acol[i * 3 + 2] = apronC.b;
+    }
+    apronGeo.setAttribute('color', new THREE.BufferAttribute(acol, 3));
+    apronGeo.computeVertexNormals();
+    const apronMat = new THREE.MeshStandardMaterial({
+      vertexColors: true, roughness: 0.96, metalness: 0.02,
+      envMapIntensity: 0.5, flatShading: true, dithering: true,
+    });
+    const apron = new THREE.Mesh(apronGeo, apronMat);
+    apron.receiveShadow = false;   // the fitted shadow frustum never reaches out here
+    this.group.add(apron);
+    this._disposables.push(apronGeo, apronMat);
+
+    // Distant crags between the apron swells and the fog wall, so the horizon
+    // has shapes on it instead of an empty gradient. One instanced draw.
+    // Forked PRNG stream, same seed: drawing these from `rnd` would shift the
+    // pillar/rock/shard sequence above and silently reshuffle the playable
+    // layout of every gate players have already learned.
+    const cragRnd = mulberry32((seed ^ 0x5f356495) >>> 0);
+    const CRAGS = 16;
+    const cragGeo = new THREE.ConeGeometry(1, 1, 5, 1);
+    cragGeo.translate(0, 0.5, 0);   // origin at the base, so scale.y is height
+    const cragMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(biome.pillar).multiplyScalar(0.55),
+      roughness: 1, metalness: 0, envMapIntensity: 0.4, flatShading: true,
+    });
+    const crags = new THREE.InstancedMesh(cragGeo, cragMat, CRAGS);
+    for (let i = 0; i < CRAGS; i++) {
+      // Even azimuth slots with jitter: pure random angles can clump every
+      // crag on one side and leave half the horizon as empty as before.
+      const a = ((i + cragRnd() * 0.8) / CRAGS) * Math.PI * 2;
+      const d = (1.3 + cragRnd()) * this.radius;
+      const h = 7 + cragRnd() * 17;
+      const cr = h * (0.22 + cragRnd() * 0.16);
+      v.set(Math.cos(a) * d, -1.2, Math.sin(a) * d);   // base sunk below the swells
+      e.set((cragRnd() - 0.5) * 0.16, cragRnd() * Math.PI * 2, (cragRnd() - 0.5) * 0.16);
+      q.setFromEuler(e);
+      sc.set(cr, h, cr);
+      m4.compose(v, q, sc);
+      crags.setMatrixAt(i, m4);
+    }
+    crags.instanceMatrix.needsUpdate = true;
+    crags.castShadow = false;
+    crags.receiveShadow = false;
+    // The geometry bound is a unit cone at the origin while the instances live
+    // 50–90 m out, so default frustum culling would drop the whole batch the
+    // moment the arena centre leaves view. One draw call — always submit it.
+    crags.frustumCulled = false;
+    this.group.add(crags);
+    this._disposables.push(cragGeo, cragMat);
+
     // --- lighting ---
     // The environment map now supplies ambient *with direction*, so a flat
     // AmbientLight would only double-count and wash the scene out.

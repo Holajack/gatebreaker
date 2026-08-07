@@ -48,3 +48,4 @@ android/app/src/main/assets/capacitor.plugins.json
 !public/models/citykit.json
 !public/models/nature.glb
 !public/models/nature.json
+.handoffs/

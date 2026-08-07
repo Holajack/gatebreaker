@@ -128,22 +128,28 @@ export function weaponCacheStats() {
 // axe visibly winds further back and the daggers barely wind up at all.
 
 export const ARCHETYPES = {
+  // The rx pitches were retuned against the SKINNED rig (they were authored on
+  // the box-man): the pack models run straight up +Y from a guard pivot, and
+  // on the Idle_Sword arms-down pose anything shallower than ~25 degrees
+  // leaves the blade vertical inside the arm silhouette — "held" only in the
+  // scene graph. Forward pitch puts the blade visibly out of the body at rest
+  // and reads as a ready stance mid-combo.
   sword: {
     name: 'Sword', feel: 'Balanced. Three chops, moderate reach, cancels cleanly.',
     build: buildSword,
-    grip: { y: 0, z: 0.06, rx: -0.25, rz: 0 },
+    grip: { y: 0, z: 0.08, rx: -0.45, rz: 0 },
     anim: { lo: -1.50, hi: 1.90, twist: 0.22, twoHand: false, thrust: false, alternate: false },
   },
   greataxe: {
     name: 'Greataxe', feel: 'Slow, enormous, wide. You are committed the moment you press.',
     build: buildGreatweapon,
-    grip: { y: -0.02, z: 0.10, rx: -0.14, rz: 0.10 },
+    grip: { y: -0.02, z: 0.10, rx: -0.35, rz: 0.10 },
     anim: { lo: -2.30, hi: 2.40, twist: 0.42, twoHand: true, thrust: false, alternate: false },
   },
   daggers: {
     name: 'Twin Daggers', feel: 'Five hits, short reach, steps into the target, crits constantly.',
     build: buildDaggers,
-    grip: { y: 0.02, z: 0.10, rx: -0.55, rz: 0 },
+    grip: { y: 0.02, z: 0.10, rx: -0.65, rz: 0 },
     anim: { lo: -0.90, hi: 1.55, twist: 0.14, twoHand: false, thrust: false, alternate: true },
   },
   polearm: {
@@ -768,14 +774,26 @@ function buildPackMesh(weapon, archKey, ghost) {
  * around. `tilt` rotates the model away from the body so the blade clears the
  * arm instead of rendering inside it — see the MODEL_TILT note above.
  */
+// `grip` is the same shape ARCHETYPES.grip uses: offsets layered on the hand
+// socket plus a resting pitch, per weapon CLASS, so an axe hangs low off the
+// fist, a hammer rests back over the forearm and a dagger rides high and
+// steeply raked instead of every kind sharing the sword's one pose. rx is the
+// resting pitch about the fist; without it every weapon points the same way
+// out of every hand, which is exactly the "not actually holding it" read.
+// The rx values are large on purpose. These models pivot at the guard and run
+// straight up +Y, which on an arms-down idle puts the whole blade INSIDE the
+// body silhouette — measured on a spawned lancer: blade box x[-0.25,0.06]
+// against a torso half-width of ~0.3, i.e. invisible from behind and "not
+// held" from the front. ~30-40 degrees of forward pitch pushes the head clear
+// of the silhouette from every angle.
 const HELD_MODELS = {
-  sword: { item: 'Sword', scale: 0.60, tilt: -0.30 },
-  bigsword: { item: 'Sword_big', scale: 0.52, tilt: -0.30 },
-  axe: { item: 'Axe_small', scale: 0.62, tilt: -0.26 },
-  greataxe: { item: 'Axe_Double', scale: 0.62, tilt: -0.26 },
-  hammer: { item: 'Hammer_Double', scale: 0.60, tilt: -0.24 },
-  dagger: { item: 'Dagger', scale: 0.55, tilt: -0.20 },
-  bow: { item: 'Bow_Wooden', scale: 0.62, tilt: -0.10 },
+  sword: { item: 'Sword', scale: 0.60, tilt: -0.30, grip: { y: 0, z: 0.08, rx: -0.50 } },
+  bigsword: { item: 'Sword_big', scale: 0.52, tilt: -0.32, grip: { y: -0.02, z: 0.08, rx: -0.55 } },
+  axe: { item: 'Axe_small', scale: 0.62, tilt: -0.34, grip: { y: -0.02, z: 0.08, rx: -0.55 } },
+  greataxe: { item: 'Axe_Double', scale: 0.62, tilt: -0.30, grip: { y: -0.02, z: 0.10, rx: -0.45 } },
+  hammer: { item: 'Hammer_Double', scale: 0.60, tilt: -0.28, grip: { y: -0.03, z: 0.10, rx: -0.45 } },
+  dagger: { item: 'Dagger', scale: 0.55, tilt: -0.24, grip: { y: 0.02, z: 0.10, rx: -0.70 } },
+  bow: { item: 'Bow_Wooden', scale: 0.62, tilt: -0.10, grip: { y: 0, z: 0.04, rx: -0.35 } },
 };
 
 /**
@@ -825,8 +843,32 @@ export function enemyWeaponKind(archetype) {
 const _heldGeo = new Map();
 const _col = new THREE.Color();
 
+/**
+ * Copy an attribute into plain Float32 storage, decoding any normalization.
+ *
+ * items.glb is quantized: positions are raw Uint16 with the dequantisation
+ * carried in the node matrices (KHR_mesh_quantization), normals are packed
+ * ints. That is fine while the node transform is alive — but this pipeline
+ * BAKES matrixWorld into the vertices, and BufferAttribute.applyMatrix4
+ * writes its float results straight back into the integer array. Every vertex
+ * truncated to almost-zero and each held weapon rendered as an invisible
+ * point cloud: armed enemies looked EMPTY-HANDED in every shipped build.
+ * Floating the attributes first is what makes the bake legal.
+ */
+function toFloatAttribute(att) {
+  if (att.array instanceof Float32Array && !att.normalized) return att.clone();
+  const out = new Float32Array(att.count * att.itemSize);
+  for (let i = 0; i < att.count; i++) {
+    for (let j = 0; j < att.itemSize; j++) out[i * att.itemSize + j] = att.getComponent(i, j);
+  }
+  return new THREE.BufferAttribute(out, att.itemSize, false);
+}
+
 function bakeColour(mesh) {
   const g = mesh.geometry.clone();
+  for (const name of ['position', 'normal']) {
+    if (g.attributes[name]) g.setAttribute(name, toFloatAttribute(g.attributes[name]));
+  }
   const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
   _col.copy(mat?.color || new THREE.Color(0xffffff));
   const n = g.attributes.position.count;
@@ -882,6 +924,15 @@ function heldMaterial() {
     metalness: 0.55,
     roughness: 0.42,
     envMapIntensity: 1.4,
+    // NOT FrontSide: mergedItemGeometry bakes node matrixWorld into the
+    // vertices, and several items.glb nodes carry mirrored (negative
+    // determinant) transforms, which flips their triangle winding. Under the
+    // default FrontSide every such weapon back-face-culled to nothing — armed
+    // enemies rendered EMPTY-HANDED, swinging at you with a bare fist while a
+    // fully-built invisible axe hung in the socket. The pack's own materials
+    // are doubleSided for the same reason; these few hundred triangles are not
+    // where the fill-rate budget lives.
+    side: THREE.DoubleSide,
   }));
 }
 
@@ -903,7 +954,10 @@ function ghostHeldMaterial() {
     roughness: 0.35,
     transparent: true,
     opacity: 0.7,
-    side: THREE.FrontSide,
+    // DoubleSide for the same mirrored-winding reason as heldMaterial. The
+    // transparent-speckle risk FrontSide was guarding is minor on a blade-thin
+    // shape, and an invisible weapon is strictly worse.
+    side: THREE.DoubleSide,
   });
   mat.userData = {};   // NOT shared: disposeObject3D must be allowed to free it
   return mat;
@@ -934,9 +988,13 @@ export function buildHeldWeapon(kind, { ghost = false } = {}) {
 
   const outer = new THREE.Group();
   outer.add(holder);
-  // Same grip the procedural sword used, so nothing downstream has to move.
-  outer.position.set(HAND_SOCKET.x, HAND_SOCKET.y, HAND_SOCKET.z + 0.06);
-  outer.rotation.x = -0.25;
+  const grip = spec.grip || {};
+  outer.position.set(
+    HAND_SOCKET.x,
+    HAND_SOCKET.y + (grip.y || 0),
+    HAND_SOCKET.z + (grip.z ?? 0.06),
+  );
+  outer.rotation.set(grip.rx ?? -0.25, grip.ry || 0, grip.rz || 0);
   outer.userData.packModel = spec.item;
   outer.userData.heldKind = kind;
   return outer;
@@ -999,6 +1057,9 @@ export function equipWeapon(root, weapon, { ghost = false } = {}) {
   // Existing code reads rig.blade for the held weapon; keep that contract.
   rig.blade = main;
   root.userData.weapon = { instance: weapon, main, offhand, ghost };
+  // A skinned character idles differently with a blade out (Idle_Sword) and
+  // attacks with a slash instead of a punch — tell it the fist is full.
+  root.userData.character?.setArmed?.(true);
   return main;
 }
 
@@ -1010,6 +1071,7 @@ export function unequipWeapon(root) {
   held.offhand?.parent?.remove(held.offhand);
   if (root.userData.rig) root.userData.rig.blade = null;
   root.userData.weapon = null;
+  root.userData.character?.setArmed?.(false);
   return held.instance;
 }
 

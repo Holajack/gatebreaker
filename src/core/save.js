@@ -26,6 +26,7 @@ export function freshSave() {
     points: 0,
     stats: { str: 0, agi: 0, vit: 0, int: 0, per: 0 },
     autoStats: 0,       // the +1-to-everything counter; one per level gained
+    playerBody: 'male', // 'male' | 'female' — the combat layer picks the rig off this
     cleared: {},        // { E: bestTimeSeconds }
     shadows: { roster: [], deployed: [], nextId: 1 },
     ash: 0,
@@ -46,12 +47,17 @@ export function freshSave() {
 export function migrate(raw) {
   const base = freshSave();
   if (!raw || typeof raw !== 'object') return base;
+  // The rig loader switches on this value, so the contract is exactly the two
+  // strings — anything else (absent on older saves, or hand-edited) snaps back
+  // to the default rather than leaking into entities.js.
+  const playerBody = raw.playerBody === 'female' ? 'female' : 'male';
   if (raw.version === SCHEMA_VERSION && raw.shadows && Array.isArray(raw.shadows.roster)) {
     // Already v2: merge onto fresh so a build that adds a field stays safe.
     return {
       ...base,
       ...raw,
       version: SCHEMA_VERSION,
+      playerBody,
       stats: { ...base.stats, ...(raw.stats || {}) },
       cleared: { ...(raw.cleared || {}) },
       daily: { ...base.daily, ...(raw.daily || {}) },
@@ -70,6 +76,7 @@ export function migrate(raw) {
     ...base,
     ...raw,
     version: SCHEMA_VERSION,
+    playerBody,
     level,
     stats: { ...base.stats, ...(raw.stats || {}) },   // seeds per:0
     cleared: { ...(raw.cleared || {}) },

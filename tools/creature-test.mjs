@@ -51,6 +51,7 @@ function probeField(game) {
     const entry = {
       label,
       backed: inst ? (inst.isCreature ? 'creature' : 'character') : 'procedural',
+      bound: Boolean(inst?.isShadow),
       creature: inst?.creature || null,
       appearance: inst?.appearance?.key || null,
       weaponSlot: inst?.weaponSlot || null,
@@ -182,10 +183,10 @@ function probeMixers(game) {
 /**
  * Raise a shadow soldier next to the player.
  *
- * Shadows are the OTHER thing that used to hold the plank — they are
- * character-backed on purpose (raised from the fallen) and game.js hands them
- * `weapon: 'sword'`, which is the exact call site the plank lived at. Without
- * this the plank assertion never sees the case it was written for.
+ * Shadows are the OTHER thing that used to hold the plank. With the pack live
+ * a fresh record is dealt a creature key and rises as a bound creature clone;
+ * the humanoid-ghost path (the plank's old home) is still reachable when the
+ * pack is absent, so the plank assertion keeps its case either way.
  */
 function summonShadow(game) {
   try {
@@ -342,13 +343,20 @@ try {
   );
   const liveShadows = after.field.entries.filter((e) => e.label.startsWith('shadow:'));
   note(after.shadowOk === true, `could not raise a shadow soldier: ${after.shadowOk}`);
+  // Bind raises the fallen's OWN figure: with the pack live a fresh record is
+  // dealt a creature key (lazy migration) and takes the field as a dark
+  // creature clone wearing the bound treatment. The humanoid ghost is now the
+  // pack-absent fallback only — the old "must stay humanoid" contract died
+  // with that feature.
   note(
-    liveShadows.length > 0 && liveShadows.every((e) => e.backed === 'character'),
-    `shadows must stay humanoid, got ${liveShadows.map((e) => e.backed).join(', ') || 'none'}`,
+    liveShadows.length > 0 && liveShadows.every((e) => e.backed === 'creature' && e.bound),
+    `shadows must be bound creature clones, got ${liveShadows.map((e) => `${e.backed}${e.bound ? '+bound' : ''}`).join(', ') || 'none'}`,
   );
+  // Bound clones keep (darkened) kit/native weapons but drop items.glb-kind
+  // ones, so an empty fist is legal; the procedural plank never is.
   note(
-    liveShadows.every((e) => e.held.length > 0),
-    `shadow soldiers are holding nothing from the item pack: ${liveShadows.map((e) => e.held.join('+') || '-').join(', ')}`,
+    liveShadows.every((e) => !e.plank),
+    `shadow soldiers holding the procedural plank: ${liveShadows.filter((e) => e.plank).map((e) => e.label).join(', ')}`,
   );
   note(after.field.sharedSkeletons === 0, `${after.field.sharedSkeletons} skeletons shared between instances`);
   note(after.field.sharedBoneRoots === 0, `${after.field.sharedBoneRoots} bone roots shared between instances`);
@@ -405,7 +413,7 @@ try {
       held: e.held, triangles: e.triangles, height: e.height,
     })),
     shadows: liveShadows.map((e) => ({
-      label: e.label, backed: e.backed, held: e.held, plank: e.plank, triangles: e.triangles,
+      label: e.label, backed: e.backed, bound: e.bound, held: e.held, plank: e.plank, triangles: e.triangles,
     })),
     fallback: fallbackEnemies.map((e) => ({
       label: e.label, backed: e.backed, appearance: e.appearance,
@@ -437,9 +445,9 @@ for (const b of report.boss) {
     + `${String(b.weaponSlot).padEnd(8)} held=${b.held.join('+') || '-'} `
     + `${b.triangles} tris  h=${b.height}`);
 }
-console.log('\nshadow soldiers (must stay humanoid, must not hold the plank):');
+console.log('\nshadow soldiers (bound creature clones, never the plank):');
 for (const s of report.shadows) {
-  console.log(`  ${s.label.padEnd(22)} ${s.backed.padEnd(10)} plank=${s.plank} `
+  console.log(`  ${s.label.padEnd(22)} ${s.backed.padEnd(10)} bound=${s.bound} plank=${s.plank} `
     + `held=${s.held.join('+') || '-'} ${s.triangles} tris`);
 }
 console.log('\nfallback (creatures.glb blocked):');

@@ -38,7 +38,7 @@ export function nameFor(type, grade, seedId) {
   return cycle > 0 ? `${p}${s} ${cycle + 1}` : `${p}${s}`;
 }
 
-export function makeShadow(save, { type = 'grunt', level = 1, grade = 0 } = {}) {
+export function makeShadow(save, { type = 'grunt', level = 1, grade = 0, creature = null } = {}) {
   const roster = save.shadows.roster;
   const id = save.shadows.nextId || roster.length + 1;
   save.shadows.nextId = id + 1;
@@ -47,6 +47,13 @@ export function makeShadow(save, { type = 'grunt', level = 1, grade = 0 } = {}) 
     name: nameFor(type, grade, id),
     grade: clampGrade(grade),
     type,
+    // WHICH creature this used to be (a creatures.json key). Binding keeps the
+    // fallen's own figure, so the roster must remember more than the archetype.
+    // Nullable on purpose: rosters saved before this field existed (and kills
+    // made with creatures.glb absent) carry null, and game.js assigns a stable
+    // default the first time the record takes the field — a lazy migration, so
+    // save.js never needs a schema bump for it.
+    creature: creature || null,
     level: Math.max(1, Math.floor(level)),
     kills: 0,
     bornAt: Date.now(),

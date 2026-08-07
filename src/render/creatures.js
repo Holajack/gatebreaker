@@ -4,6 +4,7 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLOW_LAYER } from './glow.js';
+import { applyRim } from './rim.js';
 import { PROCEDURAL_HEIGHT } from './characters.js';
 import { Quality, TIERS } from '../core/quality.js';
 
@@ -174,6 +175,11 @@ const _live = new Set();
 
 let _mergeFailures = 0;
 let _liveInstances = 0;
+// Bound-shadow clones, counted separately: the field cap in progression.js is
+// already the tier's declared shadow budget (maxFieldShadows), so letting them
+// also eat the ENEMY budget would swap monsters for humanoid fallbacks mid-gate
+// the moment a full company deployed.
+let _shadowInstances = 0;
 
 // ---------------------------------------------------------------- quality
 //
@@ -213,7 +219,7 @@ export function setCreatureQuality(tier) {
 
 /** True when another creature fits inside the tier's budget. */
 export function creatureBudgetAvailable() {
-  return _loaded && _liveInstances < _quality.budget;
+  return _loaded && (_liveInstances - _shadowInstances) < _quality.budget;
 }
 
 // ------------------------------------------------------------------ seeds
@@ -242,6 +248,139 @@ function mulberry32(a) {
 // ---------------------------------------------------------------- loading
 
 function lower(s) { return String(s || '').toLowerCase(); }
+
+// ------------------------------------------------------------ albedo balance
+//
+// The KayKit skeletons are textured bone-white: the texels their UVs actually
+// reference average 0.825 sRGB luma (measured offline through sharp against
+// creatures.glb; every Quaternius monster sits at or below 0.574, and the
+// player's merged albedo averages 0.425 with skin peaking at 0.695). Under the
+// arena key light that makes a skeleton the brightest humanoid in any fight,
+// so the eye tracks the trash instead of the hero. The player may not be
+// brightened with rim or emissive — those are banned on living characters —
+// so the fix is on this side: scale the hot albedos DOWN, once, at load,
+// before any template is cloned. material.color multiplies the sampled map,
+// so the mesh keeps all of its texture detail; it just stops out-shining a
+// person.
+//
+// WHOLE-TEXTURE MEANS ARE THE WRONG MEASUREMENT and were tried first: the
+// Quaternius atlas is mostly white PADDING its UVs never touch (whole-image
+// mean 0.906!), while the skeleton sheet averages 0.505 because of dark
+// armour regions the bone body never samples. Judging by those numbers dims
+// exactly the wrong pack. Only the texels the UVs reference tell the truth,
+// so that is what referencedLuma samples.
+const DIM_LUMA_THRESHOLD = 0.70; // skeletons sit at 0.82+, next monster 0.57
+const DIM_MAX = 0.88;            // factor right at the threshold...
+const DIM_MIN = 0.82;            // ...easing to this for a pure-white albedo
+
+/**
+ * Decode a texture's pixels once, downsampled. 128px is plenty for a mean:
+ * this is a load-time estimate, not a lookup table, and a 1024^2 readback
+ * would cost 4 MB of transient ImageData on a phone for no better answer.
+ * Returns null on ANY failure (headless DOM, closed bitmap, tainted canvas) —
+ * a creature that cannot be measured is left exactly as authored.
+ */
+function readAlbedoPixels(texture) {
+  const img = texture?.image;
+  if (!img || !img.width || !img.height) return null;
+  try {
+    const w = Math.min(img.width, 128);
+    const h = Math.min(img.height, 128);
+    let canvas = null;
+    if (typeof OffscreenCanvas !== 'undefined') canvas = new OffscreenCanvas(w, h);
+    else if (typeof document !== 'undefined') {
+      canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+    }
+    const ctx = canvas?.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, 0, w, h);
+    return { data: ctx.getImageData(0, 0, w, h).data, w, h };
+  } catch {
+    return null;
+  }
+}
+
+/** Rec.709 luma of the sRGB bytes — the same convention tools/visual-test.mjs
+ *  measures screenshots with, so these numbers compare directly. */
+function texelLuma(d, i) {
+  return (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
+}
+
+/**
+ * Mean sRGB luma of the albedo a set of meshes actually displays: the texels
+ * their UVs reference when the material has a map, or the flat base colour
+ * when it does not. Sampled at a stride — this is a per-material average over
+ * thousands of texels, not a picture.
+ */
+function referencedLuma(material, meshes, texCache) {
+  if (!material.map) {
+    // No map: base colour IS the albedo. Linear -> sRGB before taking luma so
+    // flat and textured materials are judged on the same scale.
+    const c = material.color.clone().convertLinearToSRGB();
+    return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+  }
+  let px = texCache.get(material.map);
+  if (px === undefined) { px = readAlbedoPixels(material.map); texCache.set(material.map, px); }
+  if (!px) return null;
+  let sum = 0; let n = 0;
+  for (const mesh of meshes) {
+    const uv = mesh.geometry?.attributes?.uv;
+    if (!uv) continue;
+    const stride = Math.max(1, Math.floor(uv.count / 300));
+    for (let i = 0; i < uv.count; i += stride) {
+      // getX/getY denormalize the quantized Uint16 UVs; wrap for repeat.
+      let u = uv.getX(i); let v = uv.getY(i);
+      u -= Math.floor(u); v -= Math.floor(v);
+      const x = Math.min(px.w - 1, Math.max(0, Math.round(u * (px.w - 1))));
+      const y = Math.min(px.h - 1, Math.max(0, Math.round(v * (px.h - 1))));
+      const k = (y * px.w + x) * 4;
+      if (px.data[k + 3] < 8) continue;      // padding, not albedo
+      sum += texelLuma(px.data, k);
+      n++;
+    }
+  }
+  return n ? sum / n : null;
+}
+
+/**
+ * Dim every material whose displayed albedo out-brightens a person. Runs once
+ * in adopt(), before any template exists, so every instance inherits the
+ * corrected colour with zero per-spawn or per-frame cost. Never throws.
+ */
+function balanceAlbedos(scene) {
+  const byMat = new Map();
+  scene.traverse((o) => {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      if (!m || !m.color) continue;
+      // Emissive materials are the pack's own eye glow — the sanctioned bright
+      // thing on a skeleton, and a base-colour scale would not touch it anyway.
+      if (m.emissive && (m.emissive.r || m.emissive.g || m.emissive.b)) continue;
+      let list = byMat.get(m);
+      if (!list) { list = []; byMat.set(m, list); }
+      list.push(o);
+    }
+  });
+  const texCache = new Map();
+  for (const [m, meshes] of byMat) {
+    let luma = null;
+    try { luma = referencedLuma(m, meshes, texCache); } catch { luma = null; }
+    if (luma == null || luma <= DIM_LUMA_THRESHOLD) continue;
+    // Ease from 0.88 at the threshold toward 0.82, saturating at luma 0.9
+    // rather than 1.0: bone (0.824) lands at ~0.84 instead of a token 0.855.
+    // The band itself is not exceeded — this is a correction, not a repaint,
+    // and under a 1.9-intensity key light the lit faces of a white albedo
+    // clip to full brightness anyway, so pulling harder than this buys
+    // nothing a screenshot can measure.
+    const t = Math.min(1, (luma - DIM_LUMA_THRESHOLD) / (0.9 - DIM_LUMA_THRESHOLD));
+    const f = DIM_MAX + (DIM_MIN - DIM_MAX) * t;
+    m.color.multiplyScalar(f);
+    // Bookkeeping for tests and for anyone bisecting "why is bone grey now".
+    m.userData.albedoDim = { luma: +luma.toFixed(3), factor: +f.toFixed(3) };
+  }
+}
 
 /**
  * Load creatures.glb + creatures.json.
@@ -318,6 +457,10 @@ function adopt(gltf, manifest) {
       if (!m.transparent && m.opacity < 1) m.opacity = 1;
     }
   });
+
+  // Bone-white albedos are pulled below the player's before any template is
+  // built — see the albedo-balance block above for the measured numbers.
+  balanceAlbedos(_scene);
 
   _recs.clear();
   for (const [k, rec] of Object.entries(manifest.creatures)) {
@@ -533,6 +676,77 @@ export function creatureFor(seed, { archetype = 'grunt', rank = 'E', boss = null
   return { key: rec.key, creature: rec, archetype, rank, role: rec.role, look: rec.look };
 }
 
+/**
+ * Cast a NAMED creature instead of rolling one. Bind is why this exists: a
+ * roster record remembers exactly what died, and the summon must produce that
+ * figure, not whatever the seed pool would deal for the archetype. Returns null
+ * for an unknown key so the caller can fall back (a save written against a
+ * future pack must degrade, not crash).
+ */
+function castForKey(key, { archetype = null, rank = 'E' } = {}) {
+  const rec = _recs.get(lower(key));
+  if (!rec || !_templates.has(rec.key)) return null;
+  return {
+    key: rec.key, creature: rec, archetype: archetype || rec.archetype || 'grunt',
+    rank, role: rec.role, look: rec.look,
+  };
+}
+
+// ------------------------------------------------------------ bound shadows
+//
+// The Bind treatment: the creature keeps its silhouette and loses everything
+// else. Same recipe as characters.js's ghostMaterial — near-black base, the
+// summoner's accent as a faint emissive and a restrained rim (the ONE
+// documented exception to "no rims on characters") — but built per MESH here
+// because a creature's albedo lives in texture maps, not vertex colours:
+// dropping the map is what turns an orc INTO a shadow of an orc.
+//
+// Per-clone materials, never the pack's: enemies of the same species stand in
+// the same fight, and game.js fades a decaying corpse by writing
+// material.opacity — through a shared material that would dim every living orc
+// on the field. The clone's dispose path frees them (they are unflagged, so
+// entities.disposeObject3D reaps them by traversal, and _owned covers callers
+// that dispose the instance directly).
+//
+// The numbers deliberately diverge from ghostMaterial's 0.45/0.25/0.16/0.72:
+// screenshot-tuned against a living skeleton in the pinned harness arena,
+// where that recipe read as a bright teal hologram, not a shadow. Isolating
+// the terms one at a time showed the whole teal wash was emitted, not lit —
+// under ACES at exposure 1.25 even emissiveIntensity 0.05 repaints a black
+// body cyan — while roughness 0.45 specular, metalness 0.25 env pickup and
+// the rift sky bleeding through 0.72 opacity each added their own glaze.
+// Matte, near-opaque, emissive at a whisper: the RIM alone is the cold edge
+// that says ally, which is what "really really dark" leaves room for.
+function applyShadowSkin(inst3d, inst, glow) {
+  inst3d.traverse((o) => {
+    if (!o.isMesh) return;
+    const src = Array.isArray(o.material) ? o.material[0] : o.material;
+    // The pack's own emissive primitives are the KayKit eye glow — merged into
+    // their own mesh by material, and the one sanctioned bright thing on a
+    // skeleton. On a bound one they burn in the summoner's accent instead:
+    // two cyan points on a black skull, not a lit body.
+    const wasGlow = Boolean(src?.emissive && (src.emissive.r || src.emissive.g || src.emissive.b));
+    const m = applyRim(new THREE.MeshStandardMaterial({
+      color: 0x0a1220,
+      roughness: 0.9,
+      metalness: 0.05,
+      envMapIntensity: 0.12,
+      emissive: new THREE.Color(glow),
+      emissiveIntensity: wasGlow ? 0.55 : 0.025,
+      // Still transparent at 0.94: the corpse fade writes material.opacity and
+      // only touches materials that declare transparent.
+      transparent: true,
+      opacity: 0.94,
+      // The authored side is kept, not forced like the humanoid ghost: this
+      // pack carries mirrored-winding primitives (the invisible held-weapon
+      // bug), and culling the wrong side opens holes.
+      side: src?.side ?? THREE.FrontSide,
+    }), { preset: 'shadow', color: glow });
+    o.material = m;
+    inst._owned.push(m);
+  });
+}
+
 // ----------------------------------------------------------------- sockets
 
 const _v = new THREE.Vector3();
@@ -705,20 +919,36 @@ class CreatureInstance {
   }
 
   /** The animateRig bridge — identical option bag to CharacterInstance.animate. */
-  animate({ moving = false, speed = 0, attackPhase = 0, hurt = 0, airborne = false, dt = null } = {}) {
+  animate({
+    moving = false, speed = 0, attackPhase = 0, attackContact = 0.5,
+    hurt = 0, airborne = false, dt = null,
+  } = {}) {
     const d = dt == null ? this._wallDt() : Math.min(0.05, Math.max(0, dt));
 
     if (this._dead) { this.mixer.update(d); return; }
 
     if (attackPhase > 0) {
-      this.play('attack', { fade: 0.06 });
+      this.play('attack', { fade: 0.08 });
       const a = this._cur;
       if (a) {
         // Drive the swing off the game's own timer rather than guessing a
-        // timeScale, so the contact frame cannot drift off the hitbox.
+        // timeScale, so the contact frame cannot drift off the hitbox. Since
+        // game.js now spans the phase across telegraph + strike, the clip's
+        // windup plays DURING the telegraph and its blow lands on the frame
+        // _enemyStrike applies the damage: attackContact is the fraction of
+        // that span where the strike fires, CONTACT is where this pack's
+        // chop/bite clips visually connect (~55%, eyeballed per vocabulary in
+        // the harness — the KayKit chops and Quaternius bites all land there
+        // within a few frames).
         a.paused = true;
         const dur = a.getClip().duration;
-        a.time = Math.min(dur, Math.max(0, (1 - Math.min(1, attackPhase)) * dur));
+        const CONTACT = 0.55;
+        const elapsed = 1 - Math.min(1, attackPhase);
+        const cDmg = Math.min(0.95, Math.max(0.05, attackContact));
+        const f = elapsed <= cDmg
+          ? (elapsed / cDmg) * CONTACT
+          : CONTACT + ((elapsed - cDmg) / (1 - cDmg)) * (1 - CONTACT);
+        a.time = Math.min(dur, Math.max(0, f * dur));
       }
       this._hurtT = 0;
     } else {
@@ -745,6 +975,7 @@ class CreatureInstance {
     this._disposed = true;
     _live.delete(this);
     _liveInstances = Math.max(0, _liveInstances - 1);
+    if (this.isShadow) _shadowInstances = Math.max(0, _shadowInstances - 1);
     try {
       this.mixer.stopAllAction();
       this.mixer.uncacheRoot(this.root);
@@ -799,6 +1030,10 @@ function attachKit(inst3d, key, spec) {
  * @param {number} opts.scale         game-space scale (1 == the procedural humanoid)
  * @param {number} opts.glow          telegraph-mote colour
  * @param {boolean} opts.eyes         emissive telegraph mote (default true)
+ * @param {string} [opts.creature]    exact creature key — Bind summons pass the
+ *                                    roster's remembered key instead of a seed
+ * @param {boolean} [opts.shadow]     bound-shadow treatment: dark per-clone
+ *                                    materials in `glow`'s accent, no mote
  * @returns {CreatureInstance|null}   null when the pack is absent or over budget
  */
 export function makeCreature({
@@ -810,11 +1045,15 @@ export function makeCreature({
   glow = 0xffffff,
   eyes = true,
   ignoreBudget = false,
+  creature = null,
+  shadow = false,
 } = {}) {
   if (!_loaded) return null;
-  if (!ignoreBudget && _liveInstances >= _quality.budget) return null;
+  if (!ignoreBudget && (_liveInstances - _shadowInstances) >= _quality.budget) return null;
 
-  const cast = creatureFor(seed, { archetype, rank, boss });
+  const cast = creature
+    ? castForKey(creature, { archetype, rank })
+    : creatureFor(seed, { archetype, rank, boss });
   if (!cast) return null;
   const tpl = _templates.get(cast.key);
   if (!tpl) return null;
@@ -881,7 +1120,17 @@ export function makeCreature({
     inst.weaponSlot = 'none';
   }
 
-  if (eyes && inst.sockets.head && cast.look.eye) {
+  // After the weapon block on purpose: the KayKit props are parented by now, so
+  // one traversal darkens the axe with the arm that swings it.
+  if (shadow) {
+    applyShadowSkin(inst3d, inst, glow);
+    inst.isShadow = true;
+    _shadowInstances++;
+  }
+
+  // A bound shadow never gets the telegraph mote: it is emissive head to foot,
+  // and the mote is an ENEMY tell.
+  if (eyes && !shadow && inst.sockets.head && cast.look.eye) {
     // The telegraph mote, on an ANCHOR rather than positioned directly.
     // game.js flares it by writing rig.eyeL.scale, which would stomp any scale
     // set on the mote itself — and it needs one: a creature has a real face, so
@@ -917,6 +1166,7 @@ export function creatureStats() {
     props: _props.size,
     clips: _clips.size,
     instances: _liveInstances,
+    shadowInstances: _shadowInstances,
     budget: _quality.budget,
     tier: _quality.tier,
     mergeFailures: _mergeFailures,
@@ -953,5 +1203,6 @@ export function disposeCreatureModels() {
   _loaded = false;
   _loading = null;
   _liveInstances = 0;
+  _shadowInstances = 0;
   _mergeFailures = 0;
 }

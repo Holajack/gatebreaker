@@ -196,7 +196,11 @@ export class CityUI {
     const color = prompt.rank ? PORTAL_COLORS[prompt.rank] : null;
     this.promptEl.style.borderLeftColor = color ? hex(color) : 'rgba(190,210,255,0.5)';
     this.promptTitle.textContent = prompt.label || '';
-    this.promptSub.textContent = prompt.sub || (prompt.kind === 'portal' ? 'ENTER THE GATE' : 'OPEN');
+    // citymode still labels unbuilt doors "NOT YET OPEN", which reads as a dev
+    // teaser for missing content. Until every district door leads somewhere,
+    // present the same door as a place that is merely shut right now.
+    const sub = prompt.sub === 'NOT YET OPEN' ? 'CLOSED' : prompt.sub;
+    this.promptSub.textContent = sub || (prompt.kind === 'portal' ? 'ENTER THE GATE' : 'OPEN');
     this.promptEl.classList.toggle('locked', Boolean(prompt.locked));
     this.promptEl.classList.add('on');
 

@@ -4,8 +4,55 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="theme-color" content="#05060d" />
-  <title>Gatebreaker: Rift Ascension</title>
+  <title>Gatebound — open-world gate-hunting RPG</title>
   <link rel="stylesheet" href="/src/styles.css" />
+  <style>
+    /* Identity-wave additions live here rather than styles.css, which another
+       workstream owns. Every override below is id-scoped on purpose: in the
+       BUILT page Vite hoists the compiled stylesheet link to the END of head,
+       behind this block, so equal-specificity overrides win in dev and then
+       silently lose in production. Id specificity is order-proof. */
+
+    /* "AN OPEN-WORLD GATE-HUNTING RPG" is 30 glyphs; at styles.css's .44em
+       tracking it wants roughly twice the 420px title column. Tighter tracking
+       keeps the subtitle on one line down to the smallest phones. */
+    #title .game-sub, #boot .sub { letter-spacing: .18em; }
+
+    /* Hunter body select: a two-segment control, thumb-sized on a phone. */
+    .body-select { display: flex; gap: 8px; }
+    .body-btn {
+      flex: 1; padding: 12px; border: 1px solid var(--edge); border-radius: 10px;
+      background: transparent; color: var(--dim);
+      font: inherit; font-size: 13px; letter-spacing: .16em; cursor: pointer;
+      transition: background .15s ease, color .15s ease, border-color .15s ease;
+    }
+    .body-btn.active {
+      background: rgba(124,92,255,.18); color: var(--ink);
+      border-color: var(--accent); font-weight: 800;
+    }
+
+    /* Desktop-only affordances. Touch devices get immersive mode from the
+       Android shell; a mouse user has to opt in with a gesture, so the polite
+       version is a button that only exists where a mouse is the pointer. */
+    .desktop-only { display: none; }
+    @media (hover: hover) and (pointer: fine) {
+      .desktop-only { display: block; }
+    }
+
+    /* A landscape phone is ~412px tall, and the hunter select pushed the
+       title column past that — .screen centers its child, so the wordmark
+       clipped off the TOP. Compact everything below the height every phone
+       actually has; portrait and desktop windows keep the roomy layout. */
+    @media (max-height: 520px) {
+      #title .title-inner { gap: 7px; }
+      #title .game-title { font-size: clamp(26px, 9vh, 40px); }
+      #title .game-sub { margin-bottom: 2px; }
+      #title .title-hunter { margin-bottom: 0; padding: 7px 14px; }
+      #title .btn { padding: 10px; }
+      #title .body-btn { padding: 9px; }
+      #title .credit { margin-top: 0; }
+    }
+  </style>
 </head>
 <body>
   <canvas id="scene"></canvas>
@@ -17,7 +64,7 @@
   <div id="rotate" class="rotate-gate hidden">
     <div class="rotate-icon">⟳</div>
     <p>ROTATE YOUR DEVICE</p>
-    <small>Gatebreaker is played in landscape.</small>
+    <small>Gatebound is played in landscape.</small>
   </div>
 
   <script>
@@ -28,8 +75,15 @@
     (function () {
       var gate = document.getElementById('rotate');
 
+      // The gate exists for handsets, where rotating the device is the fix. A
+      // desktop Chrome window is routinely taller than it is wide — snapped to
+      // half the screen, devtools docked right — and a mouse user cannot
+      // rotate anything, so the overlay would be a dead end that also swallows
+      // every pointer event. Coarse primary pointer is the handset signal.
+      var handheld = matchMedia('(pointer: coarse)').matches;
+
       function apply() {
-        var portrait = window.innerHeight > window.innerWidth;
+        var portrait = handheld && window.innerHeight > window.innerWidth;
         gate.classList.toggle('hidden', !portrait);
         // Pause the run rather than let it play under the overlay.
         document.documentElement.classList.toggle('is-portrait', portrait);
@@ -60,8 +114,8 @@
   <div id="boot" class="screen">
     <div class="boot-mark">
       <div class="rune"></div>
-      <h1>GATEBREAKER</h1>
-      <p class="sub">RIFT ASCENSION</p>
+      <h1>GATEBOUND</h1>
+      <p class="sub">AN OPEN-WORLD GATE-HUNTING RPG</p>
     </div>
     <div class="boot-bar"><i id="bootFill"></i></div>
     <p id="bootMsg" class="boot-msg">Calibrating rift resonance…</p>
@@ -70,15 +124,22 @@
   <!-- ===== Title ===== -->
   <div id="title" class="screen hidden">
     <div class="title-inner">
-      <h1 class="game-title">GATEBREAKER</h1>
-      <span class="build-stamp">BUILD 1.1-fullscreen</span>
-      <p class="game-sub">RIFT ASCENSION</p>
+      <h1 class="game-title">GATEBOUND</h1>
+      <span class="build-stamp">BUILD 1.2-gatebound</span>
+      <p class="game-sub">AN OPEN-WORLD GATE-HUNTING RPG</p>
       <div class="title-hunter">
         <span id="titleName">UNRANKED BREAKER</span>
         <span id="titleLevel">LV 1</span>
       </div>
+      <!-- Writes save.playerBody ('male' | 'female'); the combat layer picks
+           the rig and clips off that exact field. -->
+      <div class="body-select" role="group" aria-label="Hunter body">
+        <button class="body-btn" id="btnBodyMale" data-body="male">MALE</button>
+        <button class="body-btn" id="btnBodyFemale" data-body="female">FEMALE</button>
+      </div>
       <button class="btn primary" id="btnPlay">ENTER THE RIFT</button>
       <button class="btn" id="btnHow">HOW TO PLAY</button>
+      <button class="btn ghost desktop-only" id="btnFullscreen">FULLSCREEN</button>
       <button class="btn ghost" id="btnReset">ERASE BREAKER DATA</button>
       <p class="credit">An original rift-hunter ARPG. Procedurally generated — no two gates alike.</p>
     </div>

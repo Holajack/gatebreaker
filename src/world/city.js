@@ -4,6 +4,8 @@ import {
   KIT_CELL, KIT_STOREY, KitField, cityKitLoaded, cityMaterials,
   disposeCityKit, cityKitStats, loadCityKit,
 } from './citykit.js';
+import { NatureField, loadNatureKit, natureKitStats } from './naturekit.js';
+import { Citizens } from './citizens.js';
 import { GLOW_LAYER } from '../render/glow.js';
 import { makeSky } from '../render/sky.js';
 import { buildBiomeEnvironment } from '../render/env.js';
@@ -92,12 +94,24 @@ export const DISTRICTS = [
 
 // Doors the player can stand in front of. Radii are generous because a phone
 // player steers with a thumb, not a mouse.
+//
+// `open` gates the PROMPT, not the record. A door whose feature does not exist
+// yet must not stop the player and announce "NOT YET OPEN" — the playtest
+// called the stash prompt out as exactly that. The closed entries stay in
+// this.interactables (their districts, pads and layout all still stand, and
+// the ids are part of the module's contract), but interactAt() skips them, so
+// nothing in the world advertises a system that is not built. Flip `open` when
+// the feature ships — citymode's confirmPrompt already routes by id.
+//
+// assay sits at z = -32, not -30: at -30 its 4.5 m radius overlapped the C
+// portal's prompt zone (radius 5.2 + 2.2 slack from y = -22) and the two
+// systems fought over the same strip of pavement.
 const INTERACTABLES = [
-  { id: 'barracks', label: 'THE ASHWORKS',   pos: { x: 44, z: 12 },  radius: 4.5 },
-  { id: 'assay',    label: 'THE ASSAY HALL', pos: { x: 0, z: -30 },  radius: 4.5 },
-  { id: 'trial',    label: 'THE SEALED STAIR', pos: { x: -7, z: -38 }, radius: 3.5 },
-  { id: 'exchange', label: 'THE EXCHANGE',   pos: { x: -4, z: 26 },  radius: 4.5 },
-  { id: 'stash',    label: 'THE STASH',      pos: { x: 6, z: 34 },   radius: 3.5 },
+  { id: 'barracks', label: 'THE ASHWORKS',   pos: { x: 44, z: 12 },  radius: 4.5, open: false },
+  { id: 'assay',    label: 'THE ASSAY HALL', pos: { x: 0, z: -32 },  radius: 4.5, open: true },
+  { id: 'trial',    label: 'THE SEALED STAIR', pos: { x: -7, z: -38 }, radius: 3.5, open: false },
+  { id: 'exchange', label: 'THE EXCHANGE',   pos: { x: -4, z: 26 },  radius: 4.5, open: false },
+  { id: 'stash',    label: 'THE STASH',      pos: { x: 6, z: 34 },   radius: 3.5, open: false },
 ];
 
 // Late afternoon, not dusk.
@@ -356,6 +370,9 @@ export class City {
     this._hashCell = 8;
     this._triangles = 0;
     this._prevScene = null;
+    this.citizens = null;
+    this._flags = null;
+    this._flagMesh = null;
   }
 
   // ------------------------------------------------------------------ build
@@ -368,6 +385,9 @@ export class City {
    */
   build(seed = 20260806, save = null) {
     this.dispose();
+    // dispose() detaches the group from the scene; a rebuilt City must come
+    // back, whether this instance is fresh or reused across city entries.
+    if (!this.group.parent) this.scene.add(this.group);
     const rnd = mulberry32((seed ^ 0x9e3779b9) >>> 0);
 
     // 1. Ground first: everything else is placed onto it.
@@ -399,10 +419,18 @@ export class City {
     this._buildBuildings(buildings, rnd);
     this._buildProps(rnd, buildings);
     this._buildPortals(rnd, save);
+    this._buildFlags(rnd);
+    this._buildNature(rnd);
     this._buildInteractables();
 
     for (const f of this.fields) { f.finalize().addTo(this.group); this._triangles += f.triangles; }
     this._buildHash();
+
+    // Last, and after _buildHash on purpose: the crowd steers with the same
+    // resolve() the player uses, so the spatial hash must already exist.
+    this.citizens = new Citizens(this);
+    this.citizens.build(rnd);
+
     this.built = true;
     return this;
   }
@@ -410,6 +438,12 @@ export class City {
   // --------------------------------------------------------------- teardown
 
   dispose() {
+    // Citizens first: their skinned meshes hold shared geometry/materials the
+    // instance refcounts, plus per-instance skeleton bone textures — the
+    // generic traversal below knows nothing about either.
+    if (this.citizens) { this.citizens.dispose(); this.citizens = null; }
+    this._flags = null;
+    this._flagMesh = null;
     this.group.traverse((o) => {
       if (o.isInstancedMesh) o.dispose();
     });
@@ -419,7 +453,18 @@ export class City {
     this._ownedMaterials.length = 0;
     for (const f of this.fields) f.dispose();
     this.fields.length = 0;
+    // The key light's depth map is a render target, not a mesh resource, so
+    // neither the InstancedMesh traversal nor the owned lists above ever saw
+    // it — one leaked depth texture per city visit (same bug world.js clear()
+    // fixes for gates). Detach the group too: clear() empties it but leaves
+    // the husk on the scene, and city<->gate cycling strands one per mount.
+    this.key?.shadow?.map?.dispose();
+    if (this.key?.shadow) this.key.shadow.map = null;
+    this.key = null;
+    this.hemi = null;
+    this.sky = null;
     this.group.clear();
+    this.group.removeFromParent();
 
     if (this._envRT) { this._envRT.dispose(); this._envRT = null; }
     if (this._prevScene) {
@@ -489,77 +534,179 @@ export class City {
     const f = this.field;
     const n = f.n, stride = f.stride;
     const verts = stride * stride;
-    const pos = new Float32Array(verts * 3);
-    const col = new Float32Array(verts * 3);
-    const idx = new Uint32Array(n * n * 6);
 
     // No convertSRGBToLinear anywhere in this file: ColorManagement is on, so
     // new THREE.Color(hex) is already in the linear working space and a second
     // conversion squares it — every surface came out at an eighth brightness
     // and read as a lighting bug rather than a colour bug. See citykit.js.
+    //
+    // THREE grass tones, not one. A single 0x6d8c4a across 340 m of ground was
+    // the most-criticised frame in the game: at eye level nearly half the
+    // screen was one flat pale plane. Two independent low-frequency fbm fields
+    // drift between a warm and a cool grass on top of the base — big soft
+    // patches, ~40-60 m across. The first cut of this used gentler tones and
+    // ±7% jitter and was INVISIBLE in a screenshot once ACES tone mapping and
+    // fog had flattened it; these values are tuned against rendered frames,
+    // not against the hex swatches.
     const grass = new THREE.Color(0x6d8c4a);
+    const grassWarm = new THREE.Color(0x8f9c3e);
+    const grassCool = new THREE.Color(0x49764a);
     const dry = new THREE.Color(0xa08f60);
     const rock = new THREE.Color(0x8a8f9e);
     const road = new THREE.Color(0xbbb29a);
-    const flag = new THREE.Color(0xc3c6bb);
+    const roadWorn = new THREE.Color(0x958a67);
+    const kerb = new THREE.Color(0x6e6a55);
+    const flag = new THREE.Color(0xc6c9be);
+    const flagAlt = new THREE.Color(0x9ba18d);
     const ash = new THREE.Color(0x5c5763);
     const c = new THREE.Color();
+    const c2 = new THREE.Color();
+    const seed = f.seed;
+
+    // Deterministic hash — mulberry-style integer mix over grid indices, so
+    // the jitter is stable for a given seed and costs no state.
+    const hash2 = (ix2, jz2) => {
+      let h = (ix2 * 374761393 + jz2 * 668265263 + seed) | 0;
+      h = Math.imul(h ^ (h >>> 13), 1274126177);
+      return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+    };
+
+    // PASS 1 — zone colour and "worked stone" weight per grid vertex.
+    // No jitter here: jitter is per FACE in pass 2, because a per-vertex
+    // offset interpolates across a 3.4 m triangle into a soft gradient the
+    // eye reads as mush, while a constant offset per face is what actually
+    // reads as low-poly patchwork.
+    const gpos = new Float32Array(verts * 3);
+    const vcol = new Float32Array(verts * 3);
+    const vstone = new Float32Array(verts);   // 1 = paving/flagstone, damps jitter
 
     for (let jz = 0; jz <= n; jz++) {
       const z = -f.half + jz * f.cell;
       for (let ix = 0; ix <= n; ix++) {
         const x = -f.half + ix * f.cell;
         const k = jz * stride + ix;
-        pos[k * 3] = x;
-        pos[k * 3 + 1] = f.h[k];
-        pos[k * 3 + 2] = z;
+        gpos[k * 3] = x;
+        gpos[k * 3 + 1] = f.h[k];
+        gpos[k * 3 + 2] = z;
 
-        // Base: grass, drying out toward the walls, rock on steep faces.
+        // Base: grass with large-scale hue drift, drying out toward the
+        // walls, rock on steep faces.
         const r = Math.max(Math.abs(x), Math.abs(z));
-        c.copy(grass).lerp(dry, smoothstep(WALL_HALF - 26, WALL_HALF + 40, r));
+        c.copy(grass);
+        c.lerp(grassWarm, smoothstep(0.38, 0.62, fbm(x * 0.016 + 31, z * 0.016 - 8, seed + 101, 2)));
+        c.lerp(grassCool, smoothstep(0.45, 0.68, fbm(x * 0.041 - 12, z * 0.041 + 4, seed + 202, 2)) * 0.9);
+        c.lerp(dry, smoothstep(WALL_HALF - 26, WALL_HALF + 40, r));
         c.lerp(rock, Math.min(1, f.slope(x, z) / 0.5) * 0.85);
 
-        // Paving.
+        // Paving, with a kerb band just outside each street's width. The band
+        // is ~2 m wide because the grid is 3.4 m: a true 0.5 m kerb would land
+        // on almost no vertices and read as random dashes, while this catches
+        // the row of vertices along every edge and reads as a darker seam
+        // between paving and grass.
         let pave = 0;
+        let kerbW = 0;
         for (const s of this.streets) {
           const d = distToSegment(x, z, s);
-          if (d < s.w + 2.4) pave = Math.max(pave, 1 - smoothstep(s.w - 0.6, s.w + 2.4, d));
+          if (d < s.w + 2.4) {
+            pave = Math.max(pave, 1 - smoothstep(s.w - 0.6, s.w + 2.4, d));
+            kerbW = Math.max(kerbW,
+              smoothstep(s.w - 0.6, s.w + 0.1, d) * (1 - smoothstep(s.w + 1.7, s.w + 3.0, d)));
+          }
         }
-        if (pave > 0) c.lerp(road, pave);
+        if (pave > 0) {
+          // Wear drift along the surface so paving is not one flat tone: a
+          // browner, dustier patchwork at a shorter wavelength than the grass.
+          c2.copy(road).lerp(roadWorn, smoothstep(0.35, 0.7, fbm(x * 0.055 + 7, z * 0.055 + 19, seed + 57, 2)));
+          c.lerp(c2, pave);
+        }
+        if (kerbW > 0) c.lerp(kerb, kerbW * 0.8);
 
+        // Plaza flagstones: concentric rings crossed with 10 sectors in two
+        // tones, offset like brickwork by the ring index. Feature sizes are
+        // dictated by the 3.4 m grid: the first cut used 3.9 m rings and 20
+        // sectors, which is under the sampling rate — vertices caught tones
+        // near-randomly and the face-mean turned the pattern into noise. At
+        // 6.5 m rings and 36° sectors every plate spans ≥2 cells and survives.
         const dPlaza = Math.hypot(x, z);
-        if (dPlaza < PLAZA_R + 2) c.lerp(flag, 1 - smoothstep(PLAZA_R - 1, PLAZA_R + 2, dPlaza));
+        const inPlaza = dPlaza < PLAZA_R + 2;
+        if (inPlaza) {
+          const ringI = Math.floor(dPlaza / 6.5);
+          const sectorI = Math.floor((Math.atan2(z, x) + Math.PI) / (Math.PI / 5));
+          c2.copy((ringI + sectorI) % 2 ? flagAlt : flag);
+          c.lerp(c2, 1 - smoothstep(PLAZA_R - 1, PLAZA_R + 2, dPlaza));
+        }
 
         const dBreach = Math.hypot(x, z - BREACH_Z);
         if (dBreach < 20) c.lerp(ash, 1 - smoothstep(13, 20, dBreach));
 
-        col[k * 3] = c.r; col[k * 3 + 1] = c.g; col[k * 3 + 2] = c.b;
+        vcol[k * 3] = c.r; vcol[k * 3 + 1] = c.g; vcol[k * 3 + 2] = c.b;
+        vstone[k] = Math.max(pave, inPlaza ? 1 : 0);
       }
     }
 
-    // Winding (a, c, b) / (a, d, c) puts the face normal up, and matches the
-    // a-c diagonal that HeightField.height() interpolates across.
+    // PASS 2 — NON-INDEXED triangles with one flat colour per face.
+    //
+    // This is deliberate and it is the whole fix. The indexed mesh with
+    // smoothed normals and interpolated colours was "the worst thing in the
+    // game": every variation averaged away and 45% of an eye-level frame read
+    // as one untextured plane. Un-welding trades ~10k shared vertices for 60k
+    // (≈2 MB of attributes, still far under one character mesh) and buys per-
+    // face colour + per-face normals — real low-poly patchwork, the same
+    // language as the flat-shaded kit pieces standing on it.
+    //
+    // Face colour = mean of its three corner zone colours (so street/plaza
+    // edges keep their soft blend) × a face-constant luminance jitter: ±10%
+    // on grass and ash, ±4.5% on paving and flagstones where heavy noise
+    // reads as dirt rather than texture.
+    //
+    // Triangle split and winding — (a, cc, b) / (a, d, cc) on the a-c
+    // diagonal — are EXACTLY what HeightField.height() interpolates across;
+    // the vertex positions are untouched, so heightAt still agrees with the
+    // rendered mesh to the millimetre and the city-test raycast check keeps
+    // passing.
+    const triCount = n * n * 2;
+    const pos = new Float32Array(triCount * 9);
+    const col = new Float32Array(triCount * 9);
     let o = 0;
+    const corners = [0, 0, 0];
     for (let jz = 0; jz < n; jz++) {
       for (let ix = 0; ix < n; ix++) {
         const a = jz * stride + ix;
         const b = a + 1;
         const d = a + stride;
         const cc = d + 1;
-        idx[o++] = a; idx[o++] = cc; idx[o++] = b;
-        idx[o++] = a; idx[o++] = d; idx[o++] = cc;
+        for (let t = 0; t < 2; t++) {
+          if (t === 0) { corners[0] = a; corners[1] = cc; corners[2] = b; } else { corners[0] = a; corners[1] = d; corners[2] = cc; }
+          let mr = 0, mg = 0, mb = 0, ms = 0;
+          for (let v = 0; v < 3; v++) {
+            const k = corners[v];
+            mr += vcol[k * 3]; mg += vcol[k * 3 + 1]; mb += vcol[k * 3 + 2];
+            ms += vstone[k];
+          }
+          const amp = ms > 1.5 ? 0.035 : 0.10;
+          const jit = (1 + (hash2(ix * 2 + t, jz * 2 + 1013) - 0.5) * 2 * amp) / 3;
+          mr *= jit; mg *= jit; mb *= jit;
+          for (let v = 0; v < 3; v++) {
+            const k = corners[v];
+            pos[o] = gpos[k * 3]; col[o++] = mr;
+            pos[o] = gpos[k * 3 + 1]; col[o++] = mg;
+            pos[o] = gpos[k * 3 + 2]; col[o++] = mb;
+          }
+        }
       }
     }
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    geo.setIndex(new THREE.BufferAttribute(idx, 1));
-    geo.computeVertexNormals();
+    geo.computeVertexNormals();     // non-indexed, so these ARE face normals
     geo.computeBoundingSphere();
 
+    // flatShading matches the arena ground and every kit material. With the
+    // mesh un-welded the normals above are already per-face, so this is
+    // belt-and-braces consistency rather than the mechanism.
     const mat = new THREE.MeshStandardMaterial({
-      vertexColors: true, roughness: 0.97, metalness: 0.0,
+      vertexColors: true, flatShading: true, roughness: 0.97, metalness: 0.0,
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.name = 'city_ground';
@@ -569,7 +716,7 @@ export class City {
     this.group.add(mesh);
     this._ownedGeometries.push(geo);
     this._ownedMaterials.push(mat);
-    this._triangles += n * n * 2;
+    this._triangles += triCount;
   }
 
   // ------------------------------------------------------------- city wall
@@ -593,24 +740,74 @@ export class City {
     const WH = 6.6;             // wall height
     const runs = [];            // {x, z, w, d} collision boxes
 
+    // SEGMENTED runs, not monoliths. The first wall pushed one 81 m slab per
+    // half-side, based at a single _wallBase sample — over sloping ground the
+    // far end either floated (daylight underneath) or towered a full storey
+    // over the terrain, which is exactly what the playtest called out. Short
+    // segments each read their OWN ground; MAXSTEP caps how far one segment's
+    // base may sit above a neighbour's, and it only ever clamps DOWNWARD, so a
+    // capped segment buries deeper instead of ever lifting off the ground.
+    // OVER makes adjacent slabs interpenetrate so a stepped joint shows a
+    // stone face, never a gap.
+    const SEG = 9;              // target segment length
+    const SINK = 0.9;           // below the lowest sampled ground on the span
+    const MAXSTEP = 1.3;        // max rise base-to-base between neighbours
+    const OVER = 0.45;          // horizontal overlap at every joint
+
+    // Lowest ground across a segment span, sampled on both faces — the mesh
+    // is 3.4 m cells, so ~2 m sampling cannot miss a dip deeper than SINK.
+    const spanLow = (axis, fixed, m0, m1) => {
+      let lo = Infinity;
+      const steps = Math.max(2, Math.ceil((m1 - m0) / 2));
+      for (let i = 0; i <= steps; i++) {
+        const a = m0 + ((m1 - m0) * i) / steps;
+        for (const off of [-T, 0, T]) {
+          const x = axis === 'x' ? a : fixed + off;
+          const z = axis === 'x' ? fixed + off : a;
+          lo = Math.min(lo, this.field.height(x, z));
+        }
+      }
+      return lo;
+    };
+
     // Three walls, each broken by one gate on its centre line.
     const straight = (axis, sign) => {
       for (const side of [-1, 1]) {
         const a0 = side < 0 ? -H : GATE;
         const a1 = side < 0 ? -GATE : H;
-        if (axis === 'x') {
-          const z = sign * H;
-          const y = this._wallBase(0, z);
-          push(a0, a1, y, y + WH, z - T / 2, z + T / 2, 0xa39b8b);
-          push(a0, a1, y + WH, y + WH + 0.7, z - T / 2 - 0.25, z + T / 2 + 0.25, 0x8b8577);
-          runs.push({ x: (a0 + a1) / 2, z, w: a1 - a0, d: T, rot: 0 });
-        } else {
-          const x = sign * H;
-          const y = this._wallBase(x, 0);
-          push(x - T / 2, x + T / 2, y, y + WH, a0, a1, 0xa39b8b);
-          push(x - T / 2 - 0.25, x + T / 2 + 0.25, y + WH, y + WH + 0.7, a0, a1, 0x8b8577);
-          runs.push({ x, z: (a0 + a1) / 2, w: T, d: a1 - a0, rot: 0 });
+        const fixed = sign * H;
+        const nSeg = Math.max(1, Math.round((a1 - a0) / SEG));
+        const segLen = (a1 - a0) / nSeg;
+
+        const bases = [];
+        for (let s = 0; s < nSeg; s++) {
+          bases.push(spanLow(axis, fixed, a0 + s * segLen, a0 + (s + 1) * segLen) - SINK);
         }
+        for (let s = 1; s < nSeg; s++) bases[s] = Math.min(bases[s], bases[s - 1] + MAXSTEP);
+        for (let s = nSeg - 2; s >= 0; s--) bases[s] = Math.min(bases[s], bases[s + 1] + MAXSTEP);
+
+        for (let s = 0; s < nSeg; s++) {
+          const m0 = a0 + s * segLen - OVER;
+          const m1 = a0 + (s + 1) * segLen + OVER;
+          const y = bases[s];
+          // Alternating two-tone courses: with every segment at its own base
+          // the joints are visible anyway, so lean in — slight tone steps are
+          // what makes the run read as laid blocks rather than as seams.
+          const tone = s % 2 ? 0xa39b8b : 0x9c9484;
+          const cap = s % 2 ? 0x8b8577 : 0x857f6f;
+          if (axis === 'x') {
+            push(m0, m1, y, y + WH, fixed - T / 2, fixed + T / 2, tone);
+            push(m0, m1, y + WH, y + WH + 0.7, fixed - T / 2 - 0.25, fixed + T / 2 + 0.25, cap);
+          } else {
+            push(fixed - T / 2, fixed + T / 2, y, y + WH, m0, m1, tone);
+            push(fixed - T / 2 - 0.25, fixed + T / 2 + 0.25, y + WH, y + WH + 0.7, m0, m1, cap);
+          }
+        }
+        // Collision stays one box per half-side: the visual segments never
+        // deviate from the run's line, so the equivalent collider is the same
+        // rectangle it always was — and ~8x fewer hash entries.
+        if (axis === 'x') runs.push({ x: (a0 + a1) / 2, z: fixed, w: a1 - a0, d: T, rot: 0 });
+        else runs.push({ x: fixed, z: (a0 + a1) / 2, w: T, d: a1 - a0, rot: 0 });
       }
       // Gate towers either side of the opening.
       for (const s2 of [-1, 1]) {
@@ -912,17 +1109,17 @@ export class City {
     // Lamp flames, so the streets read at night without a single PointLight.
     this._buildLampGlow(lantern);
 
-    // --- plaza ring: pillars and banners -----------------------------------
+    // --- plaza ring: pillars ------------------------------------------------
+    // The pillars used to alternate the kit's red/green banners — decorative
+    // noise in exactly the colour language the portals use for RANK. The ring
+    // now carries rank-coloured cloth instead (_buildFlags), so the plaza
+    // reads as gate signage rather than as bunting.
     const pillar = add('town_pillar_stone', 40);
-    const banner = add('town_banner_red', 30);
-    const banner2 = add('town_banner_green', 30);
     for (let i = 0; i < 24; i++) {
       const a = (i / 24) * Math.PI * 2;
       const x = Math.cos(a) * (PLAZA_R + 2.4), z = -Math.sin(a) * (PLAZA_R + 2.4);
       const y = this.field.height(x, z);
       pillar.place(x, y, z, -a);
-      const b = i % 2 ? banner : banner2;
-      b.place(x, y + 1.6, z, -a + Math.PI);
       this.obstacles.push({ pos: { x, z }, radius: 0.5 });
     }
 
@@ -1060,6 +1257,142 @@ export class City {
       if (Math.abs(x - b.x) < b.w / 2 + clearance && Math.abs(z - b.z) < b.d / 2 + clearance) return true;
     }
     return false;
+  }
+
+  // ----------------------------------------------------------------- nature
+
+  /**
+   * Ground scatter from nature.glb — grass tufts, flowers, low plants, bushes
+   * and mossy rocks — so the space between streets reads as ground cover
+   * instead of bare vertex paint. The 1.4 MB pack has shipped in the APK since
+   * the first asset pass and was imported by nothing; this is what draws it.
+   *
+   * Two honesty rules, both load-bearing:
+   *   * Everything under stepHeight (0.4 m, physics.js) is walk-through
+   *     decoration with no collider — brushing through grass is expected,
+   *     clipping through a bush is a bug. Tuft scales are chosen so they top
+   *     out at ~0.4 m.
+   *   * Everything taller (bushes, rocks) goes into this.obstacles exactly
+   *     like the round props above, BEFORE _buildHash and attachNavGrid run,
+   *     so collision and the navgrid stay honest.
+   *
+   * Runs after _buildPortals on purpose: the portal-surround exclusion in
+   * _natureSpotOk reads this.portals.
+   */
+  _buildNature(rnd) {
+    const q = this.quality?.current || { instanceScale: 1 };
+    const density = Math.max(0.35, Math.min(1.35, q.instanceScale ?? 1));
+
+    // n is the count at density 1 (~430 instances, ~90k triangles — the grass
+    // meshes are 192 tris each, which is why the counts are bounded and the
+    // quality governor's instanceScale multiplies them). sx/sy are scale
+    // ranges — see NatureField.place for why grass squashes vertically
+    // instead of shrinking. solid is the obstacle radius at scale 1, or 0 for
+    // walk-through decoration. clump seeds 2-4 neighbours around a successful
+    // placement, which is what makes grass read as growth instead of confetti.
+    // Tuft footprints are pushed WIDE (sx up to 1.7) while sy keeps them
+    // under stepHeight: a 0.3 m tuft is four pixels at fifteen metres and the
+    // first screenshots of this pass looked bare despite 490 placed instances.
+    // Width is what makes ground cover read; height is what breaks the
+    // walk-through rule. The two scales are independent on purpose.
+    const SCATTER = [
+      { key: 'grass_short', n: 200, sx: [1.1, 1.7], sy: [0.85, 1.0], solid: 0, clump: true },
+      { key: 'grass',       n: 130, sx: [1.0, 1.35], sy: [0.34, 0.42], solid: 0, clump: true },
+      { key: 'grass_2',     n: 80,  sx: [1.0, 1.35], sy: [0.28, 0.34], solid: 0, clump: true },
+      { key: 'flowers',     n: 40,  sx: [1.0, 1.4], sy: [0.42, 0.48], solid: 0, clump: true },
+      { key: 'plant_1',     n: 40,  sx: [0.9, 1.3], sy: [0.6, 0.78],  solid: 0, clump: false },
+      { key: 'bush_1',      n: 16,  sx: [0.75, 1.05], sy: null, solid: 0.85, clump: false },
+      { key: 'bush_2',      n: 12,  sx: [0.75, 1.05], sy: null, solid: 0.7,  clump: false },
+      { key: 'rock_moss_2', n: 18,  sx: [0.7, 1.15], sy: null, solid: 0.4,  clump: false },
+      { key: 'rock_moss_5', n: 16,  sx: [0.7, 1.15], sy: null, solid: 0.5,  clump: false },
+    ];
+
+    for (const spec of SCATTER) {
+      const target = Math.max(1, Math.round(spec.n * density));
+      // Grass casts no shadow: ~400 tuft silhouettes through the shadow pass
+      // cost real fill on a phone and their shadows are subpixel anyway.
+      // Bushes and rocks do cast — a shadow is most of what visually grounds
+      // a solid object the player can collide with.
+      const field = new NatureField(spec.key, target + 4, { castShadow: spec.solid > 0 });
+      this.fields.push(field);
+      let placed = 0;
+      for (let tries = 0; tries < target * 14 && placed < target; tries++) {
+        // Sampling is biased toward where the player LOOKS, not uniform.
+        // Uniform over the 268 m square put most of the scatter in the outer
+        // belt; the first screenshots of this pass showed grass on the
+        // horizon and bare paint at the player's feet. 40% of tries now hug a
+        // street verge (0.5-3 m past the kerb — every eye-level frame is
+        // mostly street corridor), 40% the walled interior, 20% the outskirts.
+        let x, z;
+        const pick = rnd();
+        if (pick < 0.4 && !spec.solid) {
+          const s = this.streets[Math.floor(rnd() * this.streets.length)];
+          const t = rnd();
+          const nx = s.x2 - s.x1, nz = s.z2 - s.z1;
+          const len = Math.hypot(nx, nz) || 1;
+          const side = rnd() < 0.5 ? -1 : 1;
+          const off = s.w + 0.5 + rnd() * 2.5;
+          x = s.x1 + nx * t - (nz / len) * side * off;
+          z = s.z1 + nz * t + (nx / len) * side * off;
+        } else {
+          const range = pick < 0.8 ? WALL_HALF - 3 : WALL_HALF + 40;
+          x = (rnd() * 2 - 1) * range;
+          z = (rnd() * 2 - 1) * range;
+        }
+        if (!this._natureSpotOk(x, z, spec.solid > 0 ? 1.2 : 0.35)) continue;
+        placed += this._placeNature(field, spec, x, z, rnd);
+        if (spec.clump) {
+          const extra = 3 + Math.floor(rnd() * 4);
+          for (let e = 0; e < extra && placed < target; e++) {
+            const a = rnd() * 6.283;
+            const rr = 0.6 + rnd() * 1.6;
+            const nx = x + Math.cos(a) * rr, nz = z + Math.sin(a) * rr;
+            if (!this._natureSpotOk(nx, nz, 0.35)) continue;
+            placed += this._placeNature(field, spec, nx, nz, rnd);
+          }
+        }
+      }
+    }
+  }
+
+  _placeNature(field, spec, x, z, rnd) {
+    const s = spec.sx[0] + rnd() * (spec.sx[1] - spec.sx[0]);
+    const sy = spec.sy ? spec.sy[0] + rnd() * (spec.sy[1] - spec.sy[0]) : s;
+    // Sunk 3 cm so a base edge never floats above a flat-shaded facet.
+    if (!field.place(x, this.field.height(x, z) - 0.03, z, rnd() * 6.283, s, sy)) return 0;
+    if (spec.solid > 0) this.obstacles.push({ pos: { x, z }, radius: spec.solid * s });
+    return 1;
+  }
+
+  /**
+   * Where ground scatter may stand: on grass or the dry belt, off every
+   * surface that is already something — streets and kerbs, the plaza and its
+   * pillar ring, district pads, portal surrounds, the Breach ash, building
+   * plots, existing props — and never on rock-steep faces or past the lip.
+   */
+  _natureSpotOk(x, z, clearance) {
+    if (x < CLIFF_X + 3) return false;
+    if (Math.max(Math.abs(x), Math.abs(z)) > WALK_LIMIT - 6) return false;
+    if (Math.hypot(x, z) < PLAZA_R + 3) return false;
+    if (Math.hypot(x, z - BREACH_Z) < 23) return false;
+    for (const d of this.districts) {
+      if (d.id === 'plaza' || d.id === 'breach') continue;
+      if (Math.hypot(x - d.pos.x, z - d.pos.z) < d.pad) return false;
+    }
+    for (const p of this.portals) {
+      if (Math.hypot(x - p.pos.x, z - p.pos.z) < p.radius + 2.5) return false;
+    }
+    if (this.field.slope(x, z) > 0.45) return false;
+    if (this._blockedForProp(x, z, clearance)) return false;
+    // Not inside an existing prop's collider: a tuft poking out of a fountain
+    // bowl or a tree trunk reads as a bug, not as undergrowth. Linear scan is
+    // fine at build time — _buildHash has not run yet, and this is a few
+    // million scalar ops once per city entry, not per frame.
+    for (const o of this.obstacles) {
+      const dx = x - o.pos.x, dz = z - o.pos.z;
+      if (dx * dx + dz * dz < o.radius * o.radius) return false;
+    }
+    return true;
   }
 
   // ---------------------------------------------------------------- portals
@@ -1212,6 +1545,237 @@ export class City {
     }
   }
 
+  // ------------------------------------------------------------- rank flags
+
+  /**
+   * Rank signage in cloth, derived from this.portals — never from a hardcoded
+   * rank list, so a city built with only E and D gates shows exactly two
+   * colours. Three layers, cheapest first:
+   *
+   *   * every plaza pillar carries a hanging cloth coloured by the NEAREST
+   *     plaza portal, so the ring reads as coloured sectors from anywhere on
+   *     the flagstones — an arriving player takes one look and knows which
+   *     gates this city holds;
+   *   * two flying flags flank each plaza portal's dais;
+   *   * portals outside the wall (the S Breach today) get a flag pair where
+   *     their road leaves the wall gate and another where it arrives, because
+   *     "there is a red gate out there" is worth saying at the gate mouth.
+   *
+   * All the cloth is ONE non-indexed mesh (two triangles per flag) whose
+   * vertices _updateFlags rewrites in place each frame — one draw call, zero
+   * per-frame allocation. Poles and pillar posts are one merged static mesh.
+   * Nothing here is emissive: rank colour is dye, not light; glow stays
+   * reserved for the portals themselves.
+   */
+  _buildFlags(rnd) {
+    const plaza = this.portals.filter((p) => Math.hypot(p.pos.x, p.pos.z) < PLAZA_R + 4);
+    const away = this.portals.filter((p) => !plaza.includes(p));
+    const flags = [];       // { fly, x, z, topY, w, h, yaw, phase, color }
+    const poles = [];
+
+    // Wind is one direction for the whole city; flags flying every which way
+    // read as bugs, not weather. Slightly north of east, so plaza flags face
+    // the arriving player's camera.
+    const WIND = Math.atan2(-0.42, 0.91);
+
+    const pole = (x, z, h, r0 = 0.075, r1 = 0.05) => {
+      const y = this.field.height(x, z);
+      const g = new THREE.CylinderGeometry(r1, r0, h, 5, 1);
+      g.translate(x, y + h / 2, z);
+      paintGeo(g, 0x6b5138);
+      poles.push(g);
+      this.obstacles.push({ pos: { x, z }, radius: 0.28 });
+      return y + h;
+    };
+
+    // --- pillar-ring sectors ----------------------------------------------
+    if (plaza.length) {
+      for (let i = 0; i < 24; i++) {
+        const a = (i / 24) * Math.PI * 2;
+        const x = Math.cos(a) * (PLAZA_R + 2.4), z = -Math.sin(a) * (PLAZA_R + 2.4);
+        let best = plaza[0], bestD = Infinity;
+        for (const p of plaza) {
+          const pa = Math.atan2(-p.pos.z, p.pos.x);
+          let d = Math.abs(pa - a);
+          if (d > Math.PI) d = Math.PI * 2 - d;
+          if (d < bestD) { bestD = d; best = p; }
+        }
+        // A short standard on the pillar top; the cloth hangs from it. The
+        // kit pillar is 2 m tall, so the cloth band sits at 2.0-3.4 m — eye
+        // level from across the plaza.
+        const y = this.field.height(x, z);
+        const g = new THREE.CylinderGeometry(0.042, 0.055, 1.55, 5, 1);
+        g.translate(x, y + 1.95 + 0.775, z);
+        paintGeo(g, 0x6b5138);
+        poles.push(g);
+        flags.push({
+          fly: false, x, z, topY: y + 3.42, w: 0.62, h: 1.7,
+          yaw: Math.atan2(-z, -x),        // face the plaza centre
+          phase: rnd() * 6.283, color: best.color,
+        });
+      }
+    }
+
+    // --- flying pairs flanking each plaza dais ----------------------------
+    for (const p of plaza) {
+      const len = Math.hypot(p.pos.x, p.pos.z) || 1;
+      const tx = -p.pos.z / len, tz = p.pos.x / len;
+      for (const s of [-1, 1]) {
+        const x = p.pos.x + tx * s * 6.8;
+        const z = p.pos.z + tz * s * 6.8;
+        const top = pole(x, z, 4.6);
+        flags.push({
+          fly: true, x, z, topY: top - 0.12, w: 1.45, h: 0.85,
+          yaw: WIND, phase: rnd() * 6.283, color: p.color,
+        });
+      }
+    }
+
+    // --- road pairs for portals outside the wall --------------------------
+    for (const p of away) {
+      // The only out-of-wall road today runs due north; if another is ever
+      // added, generalise the gate mouth below — the colours already follow
+      // the portal, which is the part that must not be hardcoded.
+      const spots = [
+        { x: -6.8, z: p.pos.z + 15 }, { x: 6.8, z: p.pos.z + 15 },   // arrival
+        { x: -(7 + 1.7), z: -WALL_HALF + 8 }, { x: 7 + 1.7, z: -WALL_HALF + 8 }, // gate mouth
+      ];
+      for (const sp of spots) {
+        if (this._blockedForProp(sp.x, sp.z, 0.5)) continue;
+        const top = pole(sp.x, sp.z, 4.6);
+        flags.push({
+          fly: true, x: sp.x, z: sp.z, topY: top - 0.12, w: 1.45, h: 0.85,
+          yaw: WIND, phase: rnd() * 6.283, color: p.color,
+        });
+      }
+    }
+
+    if (!flags.length) return;
+
+    // Poles: one merged static draw.
+    const poleGeo = mergeAll(poles);
+    const poleMat = new THREE.MeshStandardMaterial({
+      vertexColors: true, flatShading: true, roughness: 0.9, metalness: 0.0,
+    });
+    const poleMesh = new THREE.Mesh(poleGeo, poleMat);
+    poleMesh.name = 'city_flag_poles';
+    poleMesh.castShadow = false;    // a 5 cm pole's shadow is subpixel noise
+    poleMesh.receiveShadow = false;
+    this.group.add(poleMesh);
+    this._ownedGeometries.push(poleGeo);
+    this._ownedMaterials.push(poleMat);
+    this._triangles += (poleGeo.index ? poleGeo.index.count : poleGeo.attributes.position.count) / 3;
+
+    // Cloth: 6 verts per flag, rewritten each frame in _updateFlags.
+    const n = flags.length;
+    const pos = new Float32Array(n * 18);
+    const nor = new Float32Array(n * 18);
+    const col = new Float32Array(n * 18);
+    const c = new THREE.Color();
+    for (let i = 0; i < n; i++) {
+      // A shade more saturated than the portal glow itself: cloth is lit and
+      // fogged where the portal is emissive, so dye at the portal's exact hex
+      // came out grey-ish in the rendered frame.
+      c.setHex(flags[i].color).offsetHSL(0, 0.12, 0);
+      // Bottom of the cloth drops to 68% — the two-tone is what stops a flat
+      // quad from reading as a coloured sticker.
+      for (let v = 0; v < 6; v++) {
+        const dimmed = v === 2 || v === 4 || v === 5;   // verts written as bottom
+        const k = dimmed ? 0.68 : 1.0;
+        col[i * 18 + v * 3] = c.r * k;
+        col[i * 18 + v * 3 + 1] = c.g * k;
+        col[i * 18 + v * 3 + 2] = c.b * k;
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    const mat = new THREE.MeshStandardMaterial({
+      vertexColors: true, flatShading: true, roughness: 0.85, metalness: 0.0,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.name = 'city_flags';
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    // Hand-set bounds instead of per-frame recompute: the cloth never moves
+    // more than ~1.6 m from its pole, so pad the static extent and be done.
+    this._flags = flags;
+    this._flagMesh = mesh;
+    this._updateFlags(0);
+    geo.computeBoundingSphere();
+    geo.boundingSphere.radius += 3;
+    this.group.add(mesh);
+    this._ownedGeometries.push(geo);
+    this._ownedMaterials.push(mat);
+    this._triangles += n * 2;
+  }
+
+  /** Rewrite every cloth vertex for time t. Scalar math only — no allocation. */
+  _updateFlags(t) {
+    const flags = this._flags;
+    if (!flags) return;
+    const pos = this._flagMesh.geometry.attributes.position;
+    const nor = this._flagMesh.geometry.attributes.normal;
+    const P = pos.array, N = nor.array;
+    let o = 0;
+    for (let i = 0; i < flags.length; i++) {
+      const f = flags[i];
+      let x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3;
+      if (f.fly) {
+        // Hoist edge on the pole; the fly edge swings around it and flutters.
+        const sway = Math.sin(t * 1.7 + f.phase) * 0.22;
+        const d = f.yaw + sway;
+        const dx = Math.cos(d), dz = Math.sin(d);
+        const flut = Math.sin(t * 3.1 + f.phase * 1.7) * 0.09;
+        x0 = f.x; y0 = f.topY; z0 = f.z;                                   // hoist top
+        x1 = f.x + dx * f.w; y1 = f.topY - 0.10 + flut * 0.5; z1 = f.z + dz * f.w; // fly top
+        x2 = f.x; y2 = f.topY - f.h; z2 = f.z;                             // hoist bottom
+        x3 = f.x + dx * f.w; y3 = f.topY - f.h - 0.16 + flut; z3 = f.z + dz * f.w; // fly bottom
+      } else {
+        // Hanging standard: fixed top bar, tapered bottom edge that breathes.
+        // The taper is what makes it read as a BANNER; a straight rectangle
+        // hanging off a post read as a blank sign in the first screenshots.
+        const dx = Math.cos(f.yaw), dz = Math.sin(f.yaw);
+        const tx = -dz, tz = dx;
+        const sw = Math.sin(t * 1.9 + f.phase) * 0.07 + 0.05;
+        const hw = f.w / 2;
+        const bw = hw * 0.55;
+        x0 = f.x - tx * hw; y0 = f.topY; z0 = f.z - tz * hw;               // top A
+        x1 = f.x + tx * hw; y1 = f.topY; z1 = f.z + tz * hw;               // top B
+        x2 = f.x - tx * bw + dx * sw; y2 = f.topY - f.h; z2 = f.z - tz * bw + dz * sw; // bottom A
+        x3 = f.x + tx * bw + dx * sw; y3 = f.topY - f.h; z3 = f.z + tz * bw + dz * sw; // bottom B
+      }
+      // Two triangles: (t0, t1, b0) and (b0, t1, b1). The colour attribute
+      // was laid down against this exact vertex order in _buildFlags.
+      P[o] = x0; P[o + 1] = y0; P[o + 2] = z0;
+      P[o + 3] = x1; P[o + 4] = y1; P[o + 5] = z1;
+      P[o + 6] = x2; P[o + 7] = y2; P[o + 8] = z2;
+      P[o + 9] = x1; P[o + 10] = y1; P[o + 11] = z1;
+      P[o + 12] = x2; P[o + 13] = y2; P[o + 14] = z2;
+      P[o + 15] = x3; P[o + 16] = y3; P[o + 17] = z3;
+      // One face normal per triangle, DoubleSide handles the back.
+      let ax = x1 - x0, ay = y1 - y0, az = z1 - z0;
+      let bx = x2 - x0, by = y2 - y0, bz = z2 - z0;
+      let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+      let il = 1 / (Math.hypot(nx, ny, nz) || 1);
+      for (let v = 0; v < 3; v++) {
+        N[o + v * 3] = nx * il; N[o + v * 3 + 1] = ny * il; N[o + v * 3 + 2] = nz * il;
+      }
+      ax = x2 - x1; ay = y2 - y1; az = z2 - z1;
+      bx = x3 - x1; by = y3 - y1; bz = z3 - z1;
+      nx = ay * bz - az * by; ny = az * bx - ax * bz; nz = ax * by - ay * bx;
+      il = 1 / (Math.hypot(nx, ny, nz) || 1);
+      for (let v = 3; v < 6; v++) {
+        N[o + v * 3] = nx * il; N[o + v * 3 + 1] = ny * il; N[o + v * 3 + 2] = nz * il;
+      }
+      o += 18;
+    }
+    pos.needsUpdate = true;
+    nor.needsUpdate = true;
+  }
+
   _applyPortalState(p) {
     const { oval, ring, marker } = p.meshes;
     const base = new THREE.Color(p.locked ? dim(p.color) : p.color);
@@ -1229,6 +1793,7 @@ export class City {
         id: it.id,
         label: it.label,
         radius: it.radius,
+        open: it.open !== false,
         pos: new THREE.Vector3(it.pos.x, this.field.height(it.pos.x, it.pos.z), it.pos.z),
       });
     }
@@ -1278,6 +1843,9 @@ export class City {
         marker.material.opacity = 0.17 + pulse * 0.14;
       }
     }
+
+    this._updateFlags(t);
+    this.citizens?.update(dt, playerPos);
 
     if (playerPos) this.updateShadowCamera(playerPos, 22);
   }
@@ -1435,6 +2003,8 @@ export class City {
   interactAt(pos) {
     let best = null, bestD = Infinity;
     for (const it of this.interactables) {
+      // Closed doors never prompt — see the `open` note on INTERACTABLES.
+      if (!it.open) continue;
       const d = Math.hypot(pos.x - it.pos.x, pos.z - it.pos.z);
       if (d < it.radius && d < bestD) { bestD = d; best = it; }
     }
@@ -1549,6 +2119,8 @@ export class City {
         .map((f) => ({ key: f.key, count: f.count, triangles: f.triangles }))
         .sort((a, b) => b.triangles - a.triangles),
       kit: cityKitStats(),
+      nature: natureKitStats(),
+      citizens: this.citizens ? this.citizens.stats : null,
     };
   }
 }
@@ -1570,15 +2142,19 @@ function dim(hex) {
   return c.getHex();
 }
 
-function cylinder(rTop, rBottom, h, seg, hex) {
-  const g = new THREE.CylinderGeometry(rTop, rBottom, h, seg, 1);
-  g.translate(0, h / 2, 0);
+function paintGeo(g, hex) {
   const c = new THREE.Color(hex);
   const n = g.attributes.position.count;
   const arr = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) { arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b; }
   g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
   return g;
+}
+
+function cylinder(rTop, rBottom, h, seg, hex) {
+  const g = new THREE.CylinderGeometry(rTop, rBottom, h, seg, 1);
+  g.translate(0, h / 2, 0);
+  return paintGeo(g, hex);
 }
 
 // Stack geometries without importing BufferGeometryUtils twice; the daises and
@@ -1623,9 +2199,18 @@ function mergeAll(geos) {
   return out;
 }
 
-/** Convenience for callers that want the kit ready before build(). */
+/**
+ * Convenience for callers that want the kits ready before build().
+ *
+ * Returns the CITY kit's result, matching the old contract — main.js warns on
+ * false with a citykit-specific message. The nature kit rides along: its
+ * failure is non-fatal by design (the scatter falls back to procedural tufts
+ * inside naturekit.js) and it logs its own warning, so no caller changes.
+ */
 export async function preloadCity() {
-  return loadCityKit();
+  const [cityOk, natureOk] = await Promise.all([loadCityKit(), loadNatureKit()]);
+  if (!natureOk) console.warn('[city] models/nature.glb unavailable — using procedural ground scatter');
+  return cityOk;
 }
 
 export { KIT_CELL, cityKitLoaded, cityMaterials, disposeCityKit };

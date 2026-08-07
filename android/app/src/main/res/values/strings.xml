@@ -1,7 +1,9 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Gatebreaker</string>
-    <string name="title_activity_main">Gatebreaker</string>
+    <string name="app_name">Gatebound</string>
+    <string name="title_activity_main">Gatebound</string>
+    <!-- The applicationId stays com.gatebreaker.riftascension: changing it
+         would install a second app beside every copy already on a phone. -->
     <string name="package_name">com.gatebreaker.riftascension</string>
     <string name="custom_url_scheme">com.gatebreaker.riftascension</string>
 </resources>

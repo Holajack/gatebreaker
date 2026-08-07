@@ -1,0 +1,243 @@
+{
+  "doc": "Wave 2 content-pack shortlist. Research only -- NOTHING here has been downloaded. Licenses and inventories verified against the linked pages on 2026-08-07, then independently RE-verified the same day by a second pass (every KEEP/CONDITIONAL/SKIP page fetched again; all license, tier, count and format claims held). Re-verify the license text shipped INSIDE each archive at download time (Quaternius has shipped wrong-headed LICENSE files before -- see assets/source/creatures/PROVENANCE.md).",
+  "generated": "2026-08-07",
+  "integrationContract": "Per docs/DUNGEON_SPEC.json tilesets.afterKitLands: whatever dungeon kit lands is built to public/models/dungeonkit.glb + dungeonkit.json (same schema as citykit.json: pieces[], 2 m grid preferred, meshopt via gltfpack -cc -kn -- never Draco, lowercase keys), loaded by a loadDungeonKit clone of loadCityKit. The ONLY consumer-side change is the DUNGEON_MODULES role->piece table (optionally per-rank WARREN_/OSSUARY_/CAVERN_MODULES). Layout, collision, nav, encounters, tests stay untouched. Static dressing only.",
+  "constraints": {
+    "licenseBar": "CC0 strongly preferred (everything shipped so far is CC0). CC-BY only with an attribution plan. Unity Asset Store / Fab / Synty EULA packs are non-starters regardless of price.",
+    "sizeBudget": "APK is 13.3 MB; keep total planned additions under ~6 MB post-meshopt. Reference densities from shipped GLBs: citykit 245 static pieces -> 1.2 MB (~5 KB/piece); nature 140 pieces -> 1.4 MB (~10 KB/piece, foliage-heavy); creatures 17 rigged + 26 clips -> 2.0 MB (~100-150 KB per rigged creature incl. clip share); items 106 -> 736 KB.",
+    "pipeline": "FBX/GLTF source -> headless Blender (/Applications/Blender.app/Contents/MacOS/Blender) or direct gltf-transform -> meshopt via gltfpack (-cc -kn). NEVER Draco. Skinned meshes must survive SkeletonUtils.clone. All asset keys lowercase. Every .glb load needs a procedural fallback. Flat-shaded low-poly, palette/vertex colours -- no PBR texture realism.",
+    "knownTraps": [
+      "FBX-through-Blender materials can import with opacity 0 (the trap that bit the items build) -- prefer each pack's GLTF distribution when one exists; Blender step only when FBX is the only option.",
+      "gltfpack without -kn strips node names and the result loads fine but getObjectByName returns null everywhere.",
+      "Gradient-atlas textures (KayKit) and palette atlases (Quaternius) must be collapsed to the shared palette / vertex colours at build time -- both paths already exist in tools/build-creatures-glb.mjs and tools/build-world-glb.mjs.",
+      "Authored grid differs per pack: citykit needed a 2x scale baked INTO vertex data to share the 2 m grid. Measure every modular kit's authored cell before assuming it fits; record it in the manifest like citykit.json does."
+    ]
+  },
+  "alreadyShipped": {
+    "note": "Do not re-recommend these. Full provenance in assets/source/creatures/PROVENANCE.md and assets/source/world/CREDITS.md.",
+    "packs": [
+      { "pack": "Quaternius Ultimate Modular Men + Women", "use": "characters.glb (21 player/NPC bodies, 24 clips)" },
+      { "pack": "Quaternius Ultimate Monsters", "use": "creatures.glb (13 of ~40 distinct monsters). MINED OUT: 20 were evaluated, 13 kept, 7 rejected with reasons recorded in tools/build-creatures-glb.mjs; the remaining ~20 were never candidates (cartoon/cute by construction: chicken, cactus in sombrero, bees...). Do not expect more enemy variety from this pack." },
+      { "pack": "KayKit Character Pack: Skeletons FREE", "use": "creatures.glb (4/4 characters, 7/13 accessories) -- fully used" },
+      { "pack": "KayKit Character Animations FREE", "use": "26 of 133 clips shipped. 107 MORE CLIPS ALREADY OWNED AT ZERO DOWNLOAD COST -- the zip is kept at assets/source/creatures/kaykit/animations-free.zip. Any new KayKit-rig character binds to this library." },
+      { "pack": "Kenney Fantasy Town Kit 2.0", "use": "citykit.glb (167 pieces, incl. town_banner_green/red, town_lantern)" },
+      { "pack": "Quaternius Ultimate Modular Ruins", "use": "citykit.glb (78 pieces, incl. ruin_flag_* and ruin_torch)" },
+      { "pack": "Quaternius Ultimate Nature", "use": "nature.glb (140 pieces)" },
+      { "pack": "Quaternius Ultimate RPG Items", "use": "items.glb (106 models)" }
+    ]
+  },
+  "shortlist": {
+    "dungeonInteriors": [
+      {
+        "name": "KayKit Dungeon Remastered Pack",
+        "author": "Kay Lousberg",
+        "license": "CC0 1.0 (verified on itch page 2026-08-07; free tier)",
+        "url": "https://kaylousberg.itch.io/kaykit-dungeon-remastered",
+        "inventory": "Free tier: 200 assets -- walls, floors, stairs, doors, ceilings, plus props (chests, barrels, crates, tables, chairs, beds, traps, BANNERS, tavern/bar pieces). Paid EXTRA ($7.95) adds 75+ assets and 6 alt textures; SOURCE ($11.95) adds .blend. Formats: FBX (+Unity variant), GLTF (.gltf/.bin), OBJ. Static models only -- doors/chests are separate meshes, not pre-animated; hinge/lid animation is ours to do in code (fine: we articulate at the node level).",
+        "estMeshoptSize": "~1.0 MB for all 200 at citykit density; ~0.6 MB for a curated ~120-piece set (skip tavern/bar furniture that duplicates town-kit props)",
+        "pipelineRisks": [
+          "Uses the KayKit 1024 gradient atlas -- same palette-collapse path already proven on the skeletons.",
+          "Authored grid size unverified (KayKit dungeon tiles have historically been larger than 2 m) -- measure the floor tile FIRST and bake the scale into vertices exactly like the town kit's 2x.",
+          "GLTF distribution exists, so no Blender/FBX step and no opacity-0 trap.",
+          "itch.io download is tokenized -- use the same anonymous free-download flow documented in PROVENANCE.md; keep the pristine zip beside the extracted tree."
+        ],
+        "recommendation": "KEEP",
+        "rationale": "The obvious primary tileset for Wave 2 dungeon-crawl gates (docs/DUNGEON_SPEC.json): full structural vocabulary (corridors, rooms, stairs, doors) plus dungeon props AND banners in one CC0 pack, style-adjacent to the KayKit skeletons already in creatures.glb. Free tier alone covers the need; do not buy tiers (house precedent). Lands per the integrationContract above: dungeonkit.glb/dungeonkit.json + DUNGEON_MODULES mapping, nothing else changes.",
+        "useFor": "E/D/C-rank cave-and-crypt gate interiors; boss chambers; dungeon props; banner meshes double as city rank-flag geometry"
+      },
+      {
+        "name": "Quaternius LowPoly Modular Dungeon Pack",
+        "author": "Quaternius",
+        "license": "CC0 1.0 (verified on itch page 2026-08-07)",
+        "url": "https://quaternius.itch.io/lowpoly-modular-dungeon-pack",
+        "inventory": "45+ modular assets: walls, arches, columns, floor tiles, stairs, trap doors, torches, banners, pedestals, statues, cobwebs, barrels, chairs, skulls, coin piles, sword wall-mounts. Formats: FBX, OBJ, Blend -- NO GLTF (2019-era pack).",
+        "estMeshoptSize": "~0.25 MB for the full 45",
+        "pipelineRisks": [
+          "FBX-only source -> needs the headless-Blender path and inherits the opacity-0 material trap; budget a verify pass like blender-items.py's.",
+          "Older Quaternius flat-colour style -- matches our ruins pieces well, but palette differs from KayKit; collapse to shared palette anyway."
+        ],
+        "recommendation": "ALTERNATE",
+        "rationale": "Half-sized vocabulary vs KayKit Remastered and an FBX-only pipeline. Worth pulling ONLY the pieces KayKit lacks (statues, coin piles, sword wall-mounts, cobwebs) as a garnish layer if the KayKit set feels sparse; skip otherwise.",
+        "useFor": "Gap-filler dungeon props if needed after KayKit lands"
+      },
+      {
+        "name": "Kenney Modular Dungeon Kit",
+        "author": "Kenney",
+        "license": "CC0 1.0 (kenney.nl, verified via search results 2026-08-07)",
+        "url": "https://kenney.nl/assets/modular-dungeon-kit",
+        "inventory": "40 modular dungeon segments; FBX, OBJ, GLTF.",
+        "estMeshoptSize": "~0.2 MB",
+        "pipelineRisks": ["Smallest vocabulary of the three; Kenney's chunky-bevel style sits between the town kit and KayKit."],
+        "recommendation": "SKIP",
+        "rationale": "Strictly dominated by KayKit Dungeon Remastered (5x the pieces, closer style match to our creature roster) -- no reason to mix a third dungeon style for 40 pieces.",
+        "useFor": "-"
+      },
+      {
+        "name": "Kenney Graveyard Kit (v5.0 remake)",
+        "author": "Kenney",
+        "license": "CC0 1.0 (verified on kenney.nl 2026-08-07)",
+        "url": "https://kenney.nl/assets/graveyard-kit",
+        "inventory": "90 models: graves, coffins, crypts, fences, benches, lanterns, simple characters; v5.0 'completely remade', v4.0 added animations (simple node animations, not skinned rigs). Formats: FBX, OBJ, GLTF per Kenney's standard kit layout.",
+        "estMeshoptSize": "~0.3 MB for a curated ~50-piece set (graves/crypts/fences; skip its characters -- our creature roster covers undead)",
+        "pipelineRisks": [
+          "Same Kenney FBX/GLTF layout as the town kit -- take the GLTF, avoid Blender entirely.",
+          "Its rigid-animation pieces need checking against the no-per-frame-allocation rule if used; safe to import as static and animate in code."
+        ],
+        "recommendation": "KEEP (second priority; pick ONE of this or KayKit Halloween Bits below)",
+        "rationale": "Cheap, on-style set dressing for the undead D-rank identity ('the dead here were buried standing up') -- gravestone rows, crypt entrances and iron fences turn a generic KayKit corridor into an ossuary at ~0.3 MB. Style already proven to blend: same author as the town kit. Competes head-on with KayKit Halloween Bits (next entry) -- render both contact sheets NEXT TO the dungeon tiles and keep whichever blends; do not ship both graveyard sets.",
+        "useFor": "D-rank gate dressing (Ossuary theme); city outskirts / shrine flavor"
+      },
+      {
+        "name": "KayKit Halloween Bits (FREE tier)",
+        "author": "Kay Lousberg",
+        "license": "CC0 1.0 (verified on itch page 2026-08-07; free tier. EXTRA $3.95 / SOURCE $5.95 not needed)",
+        "url": "https://kaylousberg.itch.io/halloween-bits",
+        "inventory": "60+ low-poly graveyard models free: gravestones, mausoleums, fences, trees, pumpkins. Formats: OBJ, FBX, GLTF. Props, not rigged characters (our undead roster already covers characters).",
+        "estMeshoptSize": "~0.25 MB for a curated ~40 (skip pumpkins -- too Halloween-kitsch for the tone)",
+        "pipelineRisks": [
+          "Same KayKit gradient-atlas -> palette-collapse path as the skeletons and the dungeon pack.",
+          "GLTF distribution exists -- no Blender step.",
+          "Same itch tokenized-download flow as the other KayKit packs (documented in PROVENANCE.md)."
+        ],
+        "recommendation": "ALTERNATE to Kenney Graveyard Kit -- pick exactly one",
+        "rationale": "Graveyard dressing lives INSIDE gates, adjacent to KayKit dungeon tiles and KayKit skeletons, so the KayKit-family set may cohere better than Kenney's chunkier remake; but Kenney's v5.0 has 50% more pieces and crypt interiors. Decide at download time with side-by-side contact sheets against the dungeon tileset; either choice stays ~0.3 MB.",
+        "useFor": "Same slot as Kenney Graveyard Kit: D-rank Ossuary dressing"
+      }
+    ],
+    "abilityVfx": [
+      {
+        "name": "Kenney Particle Pack",
+        "author": "Kenney",
+        "license": "CC0 1.0 (verified on kenney.nl 2026-08-07)",
+        "url": "https://kenney.nl/assets/particle-pack",
+        "inventory": "80 files, 512x512 transparent PNGs: smoke, fire/flame, flares, light rays, magic wisps, muzzle flashes, scorch marks, sparks, stars, symbols, traces, twirls, dirt.",
+        "estMeshoptSize": "N/A (textures, not meshes). Curate 16-24 sprites, downsample to 256, pack into ONE webp atlas via the existing tools/pack-icons.mjs pattern -> ~150-250 KB (compare icons.webp: 310 KB).",
+        "pipelineRisks": [
+          "Ship as a single atlas + JSON manifest like icons.webp/icons.json -- 80 separate textures would blow texture-bind counts on the phone GPU.",
+          "Billboarded quads sampling the atlas, one InstancedMesh (or one Points cloud) per effect type, counts bounded -- same budget rules as everything else.",
+          "Glow discipline: these sprites are for SKILLS, TELEGRAPHS, PORTALS and shadow-army treatment ONLY -- the no-glow-on-living-characters rule stands."
+        ],
+        "recommendation": "KEEP",
+        "rationale": "The owner's 'special abilities' ask is 90% particle sprites: impact bursts, cast flashes, dash smoke, buff twirls. This is the only significant CC0 VFX sprite library, it is tiny after atlasing, and it needs zero Blender work.",
+        "useFor": "Skill impacts, cast/summon flashes, Bind extraction wisps, portal ambience, dodge smoke, telegraph accents"
+      },
+      {
+        "name": "Procedural slash arcs + magic circles (build, don't download)",
+        "author": "in-house",
+        "license": "N/A",
+        "url": null,
+        "inventory": "Slash arcs: ribbon/fan geometry generated in code (arc sweep matched to the *_Sword_Slash clip's contact window), additive material, vertex-alpha falloff. Magic circles: canvas-drawn ring-and-rune texture generated at boot (rings + rune glyph strokes), rendered on a flat quad under casters/summon points.",
+        "estMeshoptSize": "0 bytes shipped",
+        "pipelineRisks": ["Must respect no-per-frame-allocation: pre-build arc geometry pools, animate via shader uniform/UV scroll, register in _disposables/_ownedGeometries."],
+        "recommendation": "KEEP",
+        "rationale": "Every downloadable 3D slash/magic-circle VFX pack found (Synty POLYGON Particle FX, Fab 'Stylized Magic Circles' and 'Stylized Sword Trails VFX', Unity 'Circle Blade Slash', maykerstudio 'Free Slash VFX') is engine-locked or under a store EULA, not CC0 -- and most depend on Unity/Unreal shaders we would rebuild anyway. Negative result re-confirmed by a second search pass 2026-08-07: the only CC0 'slash' meshes surfaced were AI-generated one-offs (Meshy tag pages) with no coherent style and unvetted topology -- worse than building. Procedural arcs are cheaper, style-exact, and zero bytes. This is the recommended path for slashes and circles; Kenney sprites cover the particulate layer.",
+        "useFor": "Melee swing arcs, skill AoE circles, Bind ritual circle, boss telegraph rings"
+      },
+      {
+        "name": "OpenGameArt CC0 magic-circle singles (Magic Summoning Circle; teleport circle sprite sheet)",
+        "author": "City Building Game Art; gfroad",
+        "license": "CC0 (per OGA listings, verified via search 2026-08-07; re-verify on page at download time)",
+        "url": "https://opengameart.org/content/magic-summoning-circle",
+        "inventory": "One 768x512 transparent PNG summoning circle (+ .blend); one animated teleport-circle sprite sheet.",
+        "estMeshoptSize": "~30-60 KB each after webp",
+        "pipelineRisks": ["One-off art style may not match a procedurally generated set; OGA license fields are author-declared -- verify per page."],
+        "recommendation": "SKIP unless the procedural circle disappoints",
+        "rationale": "Fallback only. A single downloaded circle can't produce the per-rank/per-skill variants the procedural generator gives for free.",
+        "useFor": "Reference / emergency fallback for the procedural circle"
+      }
+    ],
+    "enemyVariety": [
+      {
+        "name": "KayKit Character Pack: Adventurers (FREE tier)",
+        "author": "Kay Lousberg",
+        "license": "CC0 1.0 (verified on itch page 2026-08-07)",
+        "url": "https://kaylousberg.itch.io/kaykit-adventurers",
+        "inventory": "5 rigged characters free: Knight, Barbarian, Rogue, Mage, Ranger; 25+ accessories (swords, shields, axes, bow, crossbow, arrows, staff, wand). EXTRA ($7.95) adds Engineer, Druid, big-Barbarian + alt textures. FBX + GLTF. Standard KayKit Rig_Medium.",
+        "estMeshoptSize": "~0.5-0.7 MB (5 skinned characters + curated props; clip library ALREADY SHIPPED -- new bodies bind to the existing 26 clips and can unlock more of the 107 unused clips at negligible cost)",
+        "pipelineRisks": [
+          "Same rig family as the skeletons -- retarget path, palette collapse, and SkeletonUtils.clone handling all already proven in tools/build-creatures-glb.mjs.",
+          "Confirm Rig_Medium on import (the skeletons build already rejects Rig_Large animation sets)."
+        ],
+        "recommendation": "KEEP",
+        "rationale": "Highest value-per-byte in the shortlist: five human combatant silhouettes that solve THREE Wave needs at once -- armed hunter NPCs in the city (Wave 1 citizens.js wants these), human rival-hunter encounters, and gate mini-bosses (a rogue 'fallen hunter' reads great in a dungeon). Zero new animation bytes because the KayKit clip library is already in the repo.",
+        "useFor": "Hunter NPCs, rival hunters, human elites/minibosses, shopkeeper"
+      },
+      {
+        "name": "KayKit Mystery Monthly Series 4 / 5 / 6",
+        "author": "Kay Lousberg",
+        "license": "CC0 1.0 once purchased -- but PAID ($19.99+ per series; no free tier). Verified on Series 6 itch page 2026-08-07.",
+        "url": "https://kaylousberg.itch.io/kaykit-series-6",
+        "inventory": "Series 6: 14 characters incl. Orc Brute, Monstrosity, Plant Warrior, Hoarder, Avian Swordsman, Lorekeeper, Cleric, Marksman -- exactly the monster/elite silhouettes our bestiary lacks. 'Technically identical to the Adventurer characters' = standard KayKit rig = our clip library binds.",
+        "estMeshoptSize": "~1.0-1.4 MB for a curated 8-10 of 14",
+        "pipelineRisks": ["Same proven KayKit path as above. Only risk is the purchase itself."],
+        "recommendation": "CONDITIONAL -- needs owner sign-off on a $19.99 purchase; house precedent so far is free tiers only",
+        "rationale": "The single best style-matched source of NEW monster silhouettes found anywhere (Ultimate Monsters is mined out; its leftovers are 'cute by construction'). Orc Brute/Monstrosity/Plant Warrior would fill the C/B-rank elite gap and give the S-rank a better boss than dragon_evolved (flagged 'WEAKEST MATCH IN THE SET' in creatures.json). Surface to the owner as a one-line decision; do not buy unprompted.",
+        "useFor": "C/B-rank elites, S-rank boss upgrade, Bind-army showpieces"
+      },
+      {
+        "name": "Quaternius Easy Enemy Pack",
+        "author": "Quaternius",
+        "license": "CC0 1.0 (verified on quaternius.com 2026-08-07)",
+        "url": "https://quaternius.com/packs/easyenemy.html",
+        "inventory": "5 animated enemies, each with its own rig + clips. FBX, OBJ, Blend -- no GLTF listed.",
+        "estMeshoptSize": "~0.5-0.7 MB if all 5 survive curation",
+        "pipelineRisks": [
+          "FBX-only -> Blender path + opacity-0 trap.",
+          "Per-model rigs with their own clip vocabulary -- extend QUATERNIUS_KEEP_CLIPS and rely on the MIN_CLIPS guard (the pack page does not list clips; expect another under-animated Demon.gltf situation).",
+          "Style unvetted: Quaternius enemy packs skew cute. MUST pass the same render-and-look contact-sheet gate that culled Ultimate Monsters before any build work."
+        ],
+        "recommendation": "EVALUATE (download-and-render gate before committing)",
+        "rationale": "Cheap possible +5 enemies, but the Ultimate Monsters experience (20 evaluated -> 13 kept) says assume ~half fail the menace test. Only worth the Blender work if the contact sheet clears 3+.",
+        "useFor": "E/D-rank trash variety if curation passes"
+      },
+      {
+        "name": "Quaternius Animated Monster Pack (2018) + Animated Zombie Pack (2018)",
+        "author": "Quaternius",
+        "license": "CC0 1.0 (verified on quaternius.com 2026-08-07)",
+        "url": "https://quaternius.com/packs/animatedmonster.html",
+        "inventory": "4 monsters / 2 zombies, animated, FBX/OBJ/Blend only. 2018-era -- older, chunkier style than Ultimate Monsters.",
+        "estMeshoptSize": "~0.4-0.6 MB combined",
+        "pipelineRisks": ["Oldest packs on the list: style drift risk is real, FBX-only, unknown clip coverage."],
+        "recommendation": "SKIP",
+        "rationale": "Six models across two 8-year-old packs with the worst style-match odds and the most pipeline friction per model. The Adventurers + (conditionally) Mystery Series cover enemy variety better per byte and per hour.",
+        "useFor": "-"
+      }
+    ],
+    "cityFlavor": [
+      {
+        "name": "Rank banners / city props -- NO NEW PACK NEEDED",
+        "author": "-",
+        "license": "-",
+        "url": null,
+        "inventory": "Already shipped in citykit.glb: town_banner_green, town_banner_red, ruin_flag_gothicarch, ruin_flag_roundarch, ruin_flag_wall, ruin_flag_wall2, ruin_torch, town_lantern. The Wave 1 rank-flag feature needs COLOR VARIANTS of existing banner geometry (vertex-colour recolour at build or runtime), not new meshes. KayKit Dungeon Remastered's banners (in the KEEP above) add a second silhouette for free if wanted.",
+        "estMeshoptSize": "0 bytes (recolour) / already counted (KayKit)",
+        "pipelineRisks": [],
+        "recommendation": "KEEP (as a non-download)",
+        "rationale": "Owner's banner ask is already satisfiable from shipped geometry; spending download budget here would be waste.",
+        "useFor": "Per-rank gate advertising banners around the city"
+      }
+    ]
+  },
+  "budget": {
+    "planned": [
+      { "item": "KayKit Dungeon Remastered (curated ~120-200 pieces)", "estMB": 1.0 },
+      { "item": "Graveyard dressing -- Kenney Graveyard Kit OR KayKit Halloween Bits, ONE of the two (curated ~40-50)", "estMB": 0.3 },
+      { "item": "Kenney Particle Pack atlas (webp)", "estMB": 0.25 },
+      { "item": "KayKit Adventurers (5 chars + props)", "estMB": 0.7 },
+      { "item": "Quaternius Easy Enemy (IF curation passes)", "estMB": 0.7 },
+      { "item": "Procedural slash arcs + magic circles", "estMB": 0.0 }
+    ],
+    "coreTotalMB": 2.95,
+    "withConditionalMysterySeriesMB": 4.35,
+    "headroom": "Comfortably under the ~6 MB cap even with the paid conditional; leaves room for Wave 2 audio.",
+    "estimationBasis": "citykit ~5 KB/static piece post-meshopt; ~100-150 KB per rigged creature incl. clip share; sprite atlases sized against icons.webp (310 KB)."
+  },
+  "downloadOrder": [
+    "1. KayKit Dungeon Remastered FREE (unblocks the whole dungeon-crawl feature)",
+    "2. KayKit Adventurers FREE (unblocks hunter NPCs; zero-risk pipeline)",
+    "3. Kenney Particle Pack (unblocks ability VFX)",
+    "4. Graveyard dressing -- contact-sheet Kenney Graveyard Kit vs KayKit Halloween Bits against the dungeon tiles, keep one (any time)",
+    "5. Quaternius Easy Enemy -- contact-sheet gate FIRST, build only what passes",
+    "6. (owner decision) KayKit Mystery Series 6 purchase"
+  ]
+}

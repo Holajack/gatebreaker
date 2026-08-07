@@ -26,7 +26,7 @@ export const STATS = [
   { key: 'agi', name: 'AGILITY',    desc: '+0.09 move speed, +0.55% crit, +4ms dodge window' },
   { key: 'vit', name: 'VITALITY',   desc: '+11 max health, +0.18% damage reduction' },
   { key: 'int', name: 'INTELLECT',  desc: '+7 max mana, +0.45% cooldown cut, bigger shadow army' },
-  { key: 'per', name: 'PERCEPTION', desc: '+1.2% damage floor, earlier enemy tells, +0.4% extraction' },
+  { key: 'per', name: 'PERCEPTION', desc: '+1.2% damage floor, earlier enemy tells, +0.4% bind chance' },
 ];
 
 // Per-point rates and their hard caps. Every derived number in derive() reads

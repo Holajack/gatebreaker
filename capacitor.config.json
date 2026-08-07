@@ -1,6 +1,6 @@
 {
   "appId": "com.gatebreaker.riftascension",
-  "appName": "Gatebreaker",
+  "appName": "Gatebound",
   "webDir": "dist",
   "android": {
     "allowMixedContent": false,

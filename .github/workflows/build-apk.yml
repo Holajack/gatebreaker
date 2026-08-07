@@ -1,4 +1,4 @@
-name: Build Gatebreaker APK
+name: Build Gatebound APK
 
 # The APK is built here rather than in the dev container because the Android
 # SDK, aapt2 and the AndroidX artifacts all live on dl.google.com, which the
@@ -76,13 +76,17 @@ jobs:
       # Workflow artifacts are zipped and need a signed-in session, which makes
       # them impractical to install from a phone. A release asset is a plain
       # public URL that a mobile browser downloads straight to the device.
+      #
+      # The tag and the .apk filename keep the old gatebreaker name on purpose:
+      # the owner's bookmarked download URL points at them, and renaming either
+      # would 404 the stable link. Only the text a person reads says Gatebound.
       - name: Publish APK to the rolling release
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cp android/app/build/outputs/apk/debug/app-debug.apk out/gatebreaker.apk
-          NOTES="Debug-signed build of Gatebreaker: Rift Ascension.
+          NOTES="Debug-signed build of Gatebound.
 
           **[Download gatebreaker.apk](https://github.com/${GITHUB_REPOSITORY}/releases/download/gatebreaker-latest/gatebreaker.apk)**
 
@@ -95,10 +99,10 @@ jobs:
 
           if gh release view gatebreaker-latest >/dev/null 2>&1; then
             gh release upload gatebreaker-latest out/gatebreaker.apk --clobber
-            gh release edit gatebreaker-latest --notes "$NOTES"
+            gh release edit gatebreaker-latest --title "Gatebound — latest build" --notes "$NOTES"
           else
             gh release create gatebreaker-latest out/gatebreaker.apk \
-              --title "Gatebreaker — latest build" \
+              --title "Gatebound — latest build" \
               --notes "$NOTES"
           fi
           echo "APK: https://github.com/${GITHUB_REPOSITORY}/releases/download/gatebreaker-latest/gatebreaker.apk"

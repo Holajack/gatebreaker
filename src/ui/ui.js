@@ -34,6 +34,34 @@ export class UI {
       if (confirm('Erase all Breaker progress? This cannot be undone.')) this.onReset();
     });
 
+    // Hunter body select. The contract with the combat layer is exactly
+    // save.playerBody === 'male' | 'female'; entities.js picks the rig and
+    // clips off that field. game.setPlayerBody is what makes the flip land NOW
+    // — the hero was already built at boot, and without the in-place rebuild
+    // the persisted choice would only show up next session.
+    const body = (id, value) => {
+      const el = $(id);
+      if (el) el.addEventListener('click', () => {
+        if (!this.save || this.save.playerBody === value) return;
+        this.audio.ui();
+        this.save.playerBody = value;
+        this.onStatChange?.();   // main.js wires this to persist()
+        this.game?.setPlayerBody?.(value);
+        this._refreshBodySelect();
+      });
+    };
+    body('btnBodyMale', 'male');
+    body('btnBodyFemale', 'female');
+
+    // Desktop nicety — the CSS removes the button where the pointer is coarse.
+    // Browsers only grant fullscreen from a user gesture, so a button is the
+    // polite web analogue of the Android build's immersive mode; the request
+    // can still be refused (iframe policy, kiosk shells) and that is fine.
+    click('btnFullscreen', () => {
+      if (document.fullscreenElement) document.exitFullscreen?.();
+      else document.documentElement.requestFullscreen?.()?.catch?.(() => {});
+    });
+
     click('btnPause', () => { this.showPause(); });
     click('btnResume', () => { this.hide('pause'); this.onResume(); });
     click('btnAllocate', () => { this.hide('pause'); this.showLevelUp(true); });
@@ -77,6 +105,14 @@ export class UI {
     if (!this.save) return;
     $('titleName').textContent = `${rankOf(this.save.level)}-GRADE BREAKER`;
     $('titleLevel').textContent = `LV ${this.save.level}`;
+    this._refreshBodySelect();
+  }
+
+  _refreshBodySelect() {
+    const current = this.save?.playerBody === 'female' ? 'female' : 'male';
+    document.querySelectorAll('.body-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.body === current);
+    });
   }
 
   showGates() {

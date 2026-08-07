@@ -6,6 +6,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { applyRim } from './rim.js';
 import { GLOW_LAYER } from './glow.js';
 import { Quality, TIERS } from '../core/quality.js';
+import { load as loadSave } from '../core/save.js';
 
 // Real skinned characters, from the two CC0 Quaternius modular packs merged
 // into public/models/characters.glb by tools/build-characters-glb.mjs.
@@ -71,6 +72,11 @@ const CLIP_FOR = {
   walk: ['Walk', 'Run'],
   run: ['Run', 'Walk'],
   attack: ['Sword_Slash', 'Punch_Right', 'Kick_Right'],
+  // The unarmed 3-step combo. Each state lists the mirrored clip second so a
+  // pack shipped with one side still alternates rather than failing to attack.
+  punch_r: ['Punch_Right', 'Punch_Left', 'Sword_Slash'],
+  punch_l: ['Punch_Left', 'Punch_Right', 'Sword_Slash'],
+  kick: ['Kick_Right', 'Kick_Left', 'Punch_Right'],
   hurt: ['HitRecieve', 'HitRecieve_2'],       // upstream spelling, preserved
   die: ['Death', 'HitRecieve'],
   cast: ['Idle_Gun_Pointing', 'Gun_Shoot', 'Idle_Gun'],
@@ -82,6 +88,26 @@ const CLIP_FOR = {
 
 /** Above this ground speed a character runs instead of walking. */
 const RUN_SPEED = 5.0;
+
+// Where inside each attack clip the blow actually LANDS, as a fraction of the
+// clip's duration. Measured by scrubbing the pack clips frame by frame in the
+// harness (tools/character-test.mjs 'contact' screenshots): the sword crosses
+// centreline at ~45% of Sword_Slash, the fists connect at ~40% of the punches,
+// the kick a touch later. animate() warps the game's swing timer around these
+// points so the visual impact lands ON the frame game.js applies the damage —
+// which is the difference between "swinging down in a motion" and a pose that
+// happens to deal damage.
+const CLIP_CONTACT = { attack: 0.45, punch_r: 0.40, punch_l: 0.40, kick: 0.48 };
+
+// The unarmed chain, in combo order. Alternating clips is what stops a mashed
+// attack button restarting the same pose at frame 0 every press.
+const UNARMED_CHAIN = ['punch_r', 'punch_l', 'kick'];
+
+// The slice of the Roll clip a dash scrubs through. The full clip is 1.3 s of
+// crouch, tumble and stand-up; a 0.26 s dash only has room for the tumble, so
+// the entry crouch and the final straighten are cut rather than played at 5x.
+const ROLL_IN = 0.12;
+const ROLL_OUT = 0.78;
 
 // ------------------------------------------------------------ module state
 
@@ -186,7 +212,12 @@ const pick = (rnd, arr) => arr[Math.floor(rnd() * arr.length) % arr.length];
 // crowd; low mix = a boss that looks deliberate.
 
 const LOOKS = {
-  player: { base: ['men_adventurer'], mix: 0, tint: 0.0 },
+  // The player's base is a PAIR, indexed by save.playerBody: the two adventurer
+  // outfits are the same silhouette on the two rigs, so switching body swaps
+  // the female_* clip set for free (clips ride on the rig, fact 1). This entry
+  // is the ONLY place the choice lives — appearanceFor resolves it here rather
+  // than callers branching on gender anywhere else.
+  player: { base: ['men_adventurer'], baseFemale: ['women_adventurer'], mix: 0, tint: 0.0 },
   grunt: {
     base: ['men_casual_2', 'men_casual_hoodie', 'men_beach', 'men_worker', 'men_farmer',
       'women_casual', 'women_worker'],
@@ -225,6 +256,29 @@ const LOOKS = {
 /** Rank rotates each pool so an S-rank grunt is not the same man as an E one. */
 const RANK_OFFSET = { E: 0, D: 1, C: 2, B: 3, A: 4, S: 5 };
 
+// ------------------------------------------------------------- player body
+//
+// save.playerBody is the identity screen's choice. It is read lazily from the
+// save rather than plumbed through game.js, because the player can be built
+// (and rebuilt by the pack-upgrade path) from several call sites and every one
+// of them must agree without carrying the value around.
+let _playerBody = null;
+
+/** Override the hunter's body ('male' | 'female'). Anything else = male. */
+export function setPlayerBody(body) {
+  _playerBody = body === 'female' ? 'female' : 'male';
+}
+
+function playerBody() {
+  if (_playerBody) return _playerBody;
+  try {
+    _playerBody = loadSave()?.playerBody === 'female' ? 'female' : 'male';
+  } catch {
+    _playerBody = 'male';     // headless / storage-denied: the schema default
+  }
+  return _playerBody;
+}
+
 /**
  * Deterministic appearance from a seed.
  *
@@ -240,7 +294,8 @@ export function appearanceFor(seed, { archetype = 'grunt', rank = 'E' } = {}) {
   const rnd = mulberry32(hashSeed(seed));
 
   // base character
-  const pool = (look.base || Array.from(_chars.keys())).filter((k) => _chars.has(k));
+  const basePool = (look.baseFemale && playerBody() === 'female') ? look.baseFemale : look.base;
+  const pool = (basePool || Array.from(_chars.keys())).filter((k) => _chars.has(k));
   if (!pool.length) return null;
   const off = RANK_OFFSET[rank] || 0;
   const base = pool[(Math.floor(rnd() * pool.length) + off) % pool.length];
@@ -528,8 +583,12 @@ function evictGeometries() {
 
 const _matCache = new Map();
 
-function bodyMaterial(glow, tintHex, tintAmount) {
-  const key = `body:${glow}:${tintHex}:${tintAmount.toFixed(2)}`;
+function bodyMaterial(glow, tintHex, tintAmount, hero = false) {
+  // `hero` is part of the key ON PURPOSE: the plain entry is shared by
+  // civilians and by every fallback-humanoid enemy, and mutating that one
+  // material to lift the player would lift the whole crowd with him — which
+  // is the exact "everyone is equally bright" problem this flag exists to fix.
+  const key = `body:${glow}:${tintHex}:${tintAmount.toFixed(2)}${hero ? ':hero' : ''}`;
   let m = _matCache.get(key);
   if (m) return m;
   // material.color multiplies the baked vertex colour, so a light pull toward
@@ -542,7 +601,11 @@ function bodyMaterial(glow, tintHex, tintAmount) {
     roughness: 0.62,
     // Non-zero metalness is what makes scene.environment visible at all.
     metalness: 0.16,
-    envMapIntensity: 1.0,
+    // The hero gets a touch more of the environment, NOT a rim and NOT
+    // emissive (both banned on living characters): with the creature albedo
+    // rebalance and the warm hero light in entities.js this is what keeps the
+    // player the brightest humanoid in a fight without glowing.
+    envMapIntensity: hero ? 1.2 : 1.0,
     // Authored as doubleSided by Quaternius. Left alone deliberately: the
     // packs' normals were not verified and single-siding an unverified
     // low-poly mesh trades fill rate for holes you only see on a phone.
@@ -669,8 +732,30 @@ class CharacterInstance {
     this._hurtT = 0;
     this._armed = false;
     this._lastNow = -1;
+    this._atkPrev = 0;         // last frame's attackPhase, for edge detection
+    this._atkState = 'attack'; // clip chosen at the START of the current swing
+    this._atkOffset = 0;       // windup start offset for restart-with-variation
+    this._unarmedSeq = 0;      // fallback chain position when no combo is given
     _live.add(this);
     _liveInstances++;
+  }
+
+  /**
+   * Whether this character is holding a weapon. Drives the idle pose
+   * (Idle_Sword vs arms-down) and the attack chain (slash vs punch/kick).
+   * weapons.equipWeapon flips it, so it tracks the actual fist contents.
+   *
+   * The cached 'idle' action is invalidated because _clip resolves idle
+   * DIFFERENTLY when armed — without this, a character built bare-handed and
+   * armed a frame later (the player: equipWeapon runs after makeCharacter)
+   * keeps the neutral arms-down idle and the blade hangs inside his leg.
+   */
+  setArmed(armed) {
+    const v = Boolean(armed);
+    if (v === this._armed) return;
+    this._armed = v;
+    this._actions.delete('idle');
+    if (this._state === 'idle' && !this._dead) this.play('idle', { fade: 0.2 });
   }
 
   _clip(state) {
@@ -759,7 +844,10 @@ class CharacterInstance {
    * except that hit-stop and level-up time dilation do not slow the animation.
    * Passing dt (see the game.js handoff) fixes that.
    */
-  animate({ moving = false, speed = 0, attackPhase = 0, hurt = 0, airborne = false, dt = null } = {}) {
+  animate({
+    moving = false, speed = 0, attackPhase = 0, attackContact = 0.5,
+    combo = 0, dashPhase = 0, hurt = 0, airborne = false, dt = null,
+  } = {}) {
     const d = dt == null ? this._wallDt() : Math.min(0.05, Math.max(0, dt));
 
     if (this._dead) { this.mixer.update(d); return; }
@@ -768,15 +856,60 @@ class CharacterInstance {
       // Drive the swing clip directly off the game's own swing timer rather
       // than guessing a timeScale. attackPhase counts 1 -> 0 across the swing,
       // so the animation cannot drift out of sync with the hitbox.
-      this.play('attack', { fade: 0.06 });
+      //
+      // The clip and its restart offset are chosen ONCE, on the swing's rising
+      // edge, and held for the whole swing — re-deriving them per frame would
+      // let a combo counter that resets mid-swing snap the pose.
+      if (this._atkPrev <= 0 || attackPhase > this._atkPrev + 0.2) {
+        if (this._armed) {
+          this._atkState = 'attack';
+          // One slash clip in the pack, so combo steps restart it from partway
+          // into the windup: the arm is already lifted and the repeat press
+          // reads as a return cut rather than the same chop replayed. The
+          // finisher keeps most of its windup — that heave is its weight.
+          this._atkOffset = combo === 2 ? 0.4 : combo >= 3 ? 0.15 : 0;
+        } else {
+          const step = combo > 0 ? (combo - 1) : this._unarmedSeq++;
+          this._atkState = UNARMED_CHAIN[step % UNARMED_CHAIN.length];
+          this._atkOffset = 0;
+        }
+      }
+      this._atkPrev = attackPhase;
+
+      this.play(this._atkState, { fade: 0.08 });
       const a = this._cur;
       if (a) {
         a.paused = true;
         const dur = a.getClip().duration;
-        a.time = Math.min(dur, Math.max(0, (1 - Math.min(1, attackPhase)) * dur));
+        // Piecewise time-warp: the game says WHEN the damage lands
+        // (attackContact, a fraction of the swing timer) and CLIP_CONTACT says
+        // where the clip's blow is; windup and follow-through are stretched so
+        // the two meet exactly. Damage numbers pop on the frame the blade
+        // crosses the target — that sync is most of what makes a 0.34 s swing
+        // read as a real hit.
+        const elapsed = 1 - Math.min(1, attackPhase);
+        const cDmg = Math.min(0.95, Math.max(0.05, attackContact));
+        const contact = CLIP_CONTACT[this._atkState] ?? 0.45;
+        const f = elapsed <= cDmg
+          ? (this._atkOffset + (1 - this._atkOffset) * (elapsed / cDmg)) * contact
+          : contact + ((elapsed - cDmg) / (1 - cDmg)) * (1 - contact);
+        a.time = Math.min(dur, Math.max(0, f * dur));
       }
       this._hurtT = 0;
+    } else if (dashPhase > 0) {
+      // The dash is 0.26 s of i-frames game.js already owns; this only dresses
+      // it. Scrubbed like the attack so the tumble tracks the dash timer.
+      this._atkPrev = 0;
+      this.play('roll', { fade: 0.06 });
+      const a = this._cur;
+      if (a) {
+        a.paused = true;
+        const dur = a.getClip().duration;
+        const e = 1 - Math.min(1, dashPhase);
+        a.time = dur * (ROLL_IN + (ROLL_OUT - ROLL_IN) * e);
+      }
     } else {
+      this._atkPrev = 0;
       if (this._cur && this._cur.paused) this._cur.paused = false;
       if (this._hurtT > 0) {
         this._hurtT -= d;
@@ -786,7 +919,7 @@ class CharacterInstance {
       } else if (airborne) {
         this.play('jump', { fade: 0.12 });
       } else if (moving) {
-        this.play(speed > this.runSpeed ? 'run' : 'walk', { fade: 0.14 });
+        this.play(speed > this.runSpeed ? 'run' : 'walk', { fade: 0.15 });
       } else {
         this.play('idle', { fade: 0.2 });
       }
@@ -861,7 +994,7 @@ export function makeCharacter({
   mesh.geometry = geometry;
   mesh.material = ghost
     ? ghostMaterial(glow)
-    : bodyMaterial(glow, color, appearance.tint);
+    : bodyMaterial(glow, color, appearance.tint, archetype === 'player');
   mesh.castShadow = _quality.castShadow && !ghost;
   mesh.receiveShadow = false;
   mesh.frustumCulled = true;

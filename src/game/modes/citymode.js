@@ -19,17 +19,23 @@ const PROMPT_SLACK = 2.2;
 // is out of the world and gets carried home.
 const VOID_Y = -10;
 
-// Where the camera sits relative to the player. Same orientation as the gate
-// camera on purpose: movement is world-relative (body.move(mv.x, -mv.y) reads
-// the stick directly, not a camera-relative basis), so rotating the city camera
-// would silently invert the controls the player just learned in a dungeon.
-// Deliberately the SAME distance as the arena camera (game.js's camOffset is
-// 0,11,11). Pulling back to see more of the town was the first attempt and it
-// made the plaza read as a car park: the further out the camera goes the more
-// of the frame is empty flagstone. Buildings are handled by the boom probe
-// below, not by backing off.
-const CAM_OFFSET = new THREE.Vector3(0, 11, 11);
-const CAM_MIN = 5.0;          // never pull the camera closer than this
+// Where the camera rests relative to the player when the orbit is untouched.
+// Movement is camera-relative (input.sampleWorld rotates the stick through the
+// drag yaw), so the player is free to swing this rig around Y without the
+// controls inverting — the old "never rotate the city camera" rule died with
+// the world-relative stick.
+// Same 45° pitch as the arena camera (game.js's camOffset is 0,11,11) but
+// CLOSER. Pulling back to see more of the town was the first attempt and it
+// made the plaza read as a car park; matching the arena distance was the
+// second, and at 11,11 the hero projects to ~75 px on a 720 p frame — a speck
+// in an empty plaza. 8,8 puts him at ~105 px, readable, while the streets keep
+// enough depth to navigate by. Buildings are handled by the boom probe below,
+// not by backing off.
+const CAM_OFFSET = new THREE.Vector3(0, 8, 8);
+// Boom floor when a building blocks the probe. Scaled with CAM_OFFSET (was 5.0
+// at 11,11) so a blocked boom retreats to the same fraction of its full length
+// instead of jumping to half of it.
+const CAM_MIN = 3.6;
 const CAM_PROBE_STEPS = 7;
 const EYE = 1.55;             // where the collision probe leaves the body
 
@@ -109,7 +115,9 @@ export class CityMode extends GameMode {
     p.mesh.rotation.y = p.yaw;
 
     // Snap the camera rather than sweeping it in from wherever the last gate
-    // left it — a 200 m lerp across the map reads as a bug.
+    // left it — a 200 m lerp across the map reads as a bug. The orbit resets
+    // with it: a yaw dragged inside a gate must not whip the hub camera.
+    g.input.resetLook?.();
     this._camLook.copy(p.pos);
     this._camLook.z -= 3.4;
     this._cam.copy(this._camLook).add(CAM_OFFSET);
@@ -157,6 +165,9 @@ export class CityMode extends GameMode {
     // Hand the body back to the arena environment so a gate does not start the
     // player standing on a heightfield that no longer exists.
     g.player.body.setEnvironment(FLAT_GROUND, g._arenaResolve);
+    // A yaw dragged while wandering the hub must not carry into the gate — the
+    // arena spawn is authored around the default framing.
+    g.input.resetLook?.();
     this._prompt = null;
     this._camReady = false;
   }
@@ -177,12 +188,14 @@ export class CityMode extends GameMode {
     if (input.consume('jump')) body.jump();
     body.setJumpHeld(input.isHeld('jump'));
 
-    const mv = input.sample();
-    const moving = Math.abs(mv.x) > 0.01 || Math.abs(mv.y) > 0.01;
-    body.move(mv.x, -mv.y, 1);
+    // World-space stick — rotated through the drag yaw, so "up" stays "away
+    // from the camera" from every angle the player can orbit to.
+    const mv = input.sampleWorld();
+    const moving = Math.abs(mv.x) > 0.01 || Math.abs(mv.z) > 0.01;
+    body.move(mv.x, mv.z, 1);
 
     if (moving) {
-      const targetYaw = Math.atan2(mv.x, -mv.y);
+      const targetYaw = Math.atan2(mv.x, mv.z);
       let diff = targetYaw - p.yaw;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
@@ -293,9 +306,14 @@ export class CityMode extends GameMode {
       if (d < bestD) { bestD = d; best = portal; }
     }
     if (!best) { this.ui?.setCompass(NaN, 0, 0); return; }
-    // Screen space: the camera looks down -Z, so world -Z is up on screen and
-    // a positive CSS rotation is clockwise from there.
-    const angle = Math.atan2(best.pos.x - p.pos.x, -(best.pos.z - p.pos.z));
+    // Screen space: with the orbit untouched the camera looks down -Z, so
+    // world -Z is up on screen and a positive CSS rotation is clockwise from
+    // there. A dragged yaw rotates the whole frame with it: the camera's
+    // ground forward sits at world angle -yaw in this convention, so the
+    // as-seen bearing is the world angle plus yaw — the arrow points at the
+    // portal AS SEEN, not as mapped.
+    const angle = Math.atan2(best.pos.x - p.pos.x, -(best.pos.z - p.pos.z))
+      + this.game.input.look.yaw;
     this.ui?.setCompass(angle, bestD, PORTAL_COLORS[best.rank] || 0xbfd0ff);
   }
 
@@ -304,16 +322,39 @@ export class CityMode extends GameMode {
   updateCamera(dt) {
     const g = this.game;
     const p = g.player;
+    const { yaw, pitch } = g.input.look;
 
     _v.copy(p.pos).addScaledVector(p.vel, 0.18);
-    _v.z -= 3.4;
+    if (yaw === 0 && pitch === 0) {
+      // Untouched orbit is the shipped camera, bit for bit — the branch every
+      // scripted run exercises.
+      _v.z -= 3.4;
+    } else {
+      // Look-target bias slides along the camera's ground forward so the hero
+      // sits below centre from every angle.
+      _v.x -= Math.sin(yaw) * 3.4;
+      _v.z -= Math.cos(yaw) * 3.4;
+    }
     // A teleport (arrival, or a rescue off the cliff) must not be followed by a
     // 200 m camera sweep across the map. Snap instead.
     const snap = !this._camReady;
     if (snap) { this._camLook.copy(_v); this._camReady = true; }
     this._camLook.lerp(_v, Math.min(1, dt * 6));
 
-    _want.copy(this._camLook).add(CAM_OFFSET);
+    if (yaw === 0 && pitch === 0) {
+      _want.copy(this._camLook).add(CAM_OFFSET);
+    } else {
+      // CAM_OFFSET swung around Y by the drag; the boom probe below then
+      // marches along this rotated boom, so buildings still push the camera
+      // in no matter which side of the street it orbits to.
+      const boom = Math.hypot(CAM_OFFSET.y, CAM_OFFSET.z);
+      const pa = Math.atan2(CAM_OFFSET.y, CAM_OFFSET.z) + pitch;
+      _want.set(
+        this._camLook.x + Math.sin(yaw) * boom * Math.cos(pa),
+        this._camLook.y + boom * Math.sin(pa),
+        this._camLook.z + Math.cos(yaw) * boom * Math.cos(pa),
+      );
+    }
     const dist = this._clearCameraDistance(p.pos, _want);
     if (dist <= 0) {
       this._cam.copy(_want);

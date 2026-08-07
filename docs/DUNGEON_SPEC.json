@@ -1,0 +1,290 @@
+{
+  "summary": "Wave 2 dungeon-crawl gate system. E/D/C gates stop spawning the player into a circular arena and instead walk them through the portal into a generated interior: a descending entry tunnel, torchlit corridors, room-by-room encounters, a sealed boss chamber, and a walk-out exit portal. The design slots into the existing GameMode seam (DungeonMode.enter -> Game._beginGate -> world.build) by making the gate world a duck-typed contract that world.js's World already satisfies: a new Dungeon class implements the same surface (build/clear/update/resolve/randomSpawn/updateShadowCamera/navGrid/obstacleField/radius) and DungeonMode picks which class to mount per rank. Canon: E/D are plain dungeon crawls, C is one huge open cavern, B/A/S keep the open-landscape arena (world.js, including the uncommitted horizon-apron work) plus the anomaly-roll hook that already exists in config.js (ANOMALY_CHANCE). Everything is procedural-first from the pieces that already ship (citykit.glb's ruin_* set + nature.glb rocks, all with procedural fallbacks via citykit.js pieceParts), deterministic from the gate seed via mulberry32 with forked streams, collision through the shared ObstacleField, navigation through the existing flow-field NavGrid, and disposal through a world-owned _disposables registry exactly like world.js.",
+
+  "ownerVision": {
+    "quote": "I don't want the person to just be spawned into the dungeon... you're going through the dungeon going through different tunnels and different aspects... I want that whole world to be really really built out.",
+    "interpretation": [
+      "Walking THROUGH the portal must land you in a place with an inside: a tunnel that leads somewhere, not a disc with a glowing fence.",
+      "Different E-rank gates should feel different run to run: seed-varied layout plus a seed-rolled enemy pack per room, not a fixed spawn table.",
+      "Rank-appropriate variation: E/D plain dungeon caves, C a huge open cavern, B+ open landscapes with anomaly-roll gates (this canon maps 1:1 onto the biome table already in docs/EXPANSION_SPEC.json).",
+      "'Really built out' means dressing density where the eye lands (doorways, corners, torchlight, props), not raw triangle count. The kit pieces exist already; the wave-1 arena just never used them."
+    ]
+  },
+
+  "canon": [
+    { "rank": "E", "gate": "THE WARREN", "form": "crawl", "world": "Dungeon (kind 'crawl')", "feel": "Tight cut-stone burrow. 4 m corridors, 5-6 small rooms, low rock overhead implied by fog and dark rock-fill. Deliberately plain; the baseline." },
+    { "rank": "D", "gate": "THE OSSUARY", "form": "crawl", "world": "Dungeon (kind 'crawl')", "feel": "Same crawl grammar, more of it: 7-8 rooms, 1-2 loop corridors, one double-wide vault hall, bone-alcove wall dressing (ruin_wall_archround + pots), more casters." },
+    { "rank": "C", "gate": "DEEPGLASS CAVERN", "form": "cavern", "world": "Dungeon (kind 'cavern')", "feel": "One huge organic chamber (~70x55 m) entered through a tunnel, with stalagmite fields as cover, 3 side grottos, encounter ZONES instead of rooms, bioluminescent deepglass accents." },
+    { "rank": "B", "gate": "EMBERFALL", "form": "open", "world": "World (existing arena)", "feel": "Open sky. Keeps the wave-1 arena including the uncommitted horizon-annulus/apron work. Replaced by real landscapes in EXPANSION_SPEC step 10 later; not this wave." },
+    { "rank": "A", "gate": "THE RIVEN WASTE", "form": "open", "world": "World (existing arena)", "feel": "Same as B this wave." },
+    { "rank": "S", "gate": "ARCHON'S REACH", "form": "open", "world": "World (existing arena)", "feel": "Same as B this wave. ANOMALY_CHANCE rolls (config.js:86) apply to B+ only and keep working through the same World path." }
+  ],
+
+  "studyFindings": {
+    "modeSeam": "DungeonMode.enter (src/game/modes/dungeonmode.js:27) does exactly three things: bind the body to FLAT_GROUND + g._arenaResolve, call g._beginGate(index), then body.setObstacles(g.world.obstacleField). _beginGate (game.js:365) calls this.world.build(gate, this.seed). Therefore swapping g.world BEFORE _beginGate runs is sufficient to mount a different world class with zero changes to the _beginGate body. The _arenaResolve closure (game.js:237) reads this.world dynamically, so it follows the swap for free.",
+    "worldContractConsumers": "Every game.js touch point on this.world, verified by grep against the current working tree: build (196, 373), resolve (1184 enemies, 1348 shadows, via _arenaResolve for the player), randomSpawn (403 shadow deploy min 4, 449 enemy spawn min 12), radius (496 boss spawn at (0,0,-radius*0.55); 1367 projectile disc cull), navGrid (1137, 1146 steer ctx), updateShadowCamera (1557, extent 14, inside _updateCamera at 1522), clear (1651), update (via DungeonMode.updateAlways). This is the whole duck-type surface Dungeon must satisfy.",
+    "spawnGatingSeam": "There are THREE arena spawn drivers, not one, and all three must yield to the director. (1) _updateSpawns (game.js:1508): the timer/wave loop plus a killed>=gate.enemies -> _spawnBoss transition at 1517-1519, called only from _updateDungeonFrame. (2) _spawnWave called DIRECTLY from _beginGate at 410 — unguarded, this dumps gate.waveSize enemies via randomSpawn the moment a crawl gate opens, into rooms that are supposed to be dormant. (3) The enemy-kill handler tail (game.js:662-666): `if (killed >= gate.enemies && !bossActive) _spawnBoss(); else ... spawnTimer = 0.9` — unguarded, the last trash kill spawns the boss instantly wherever the player is, bypassing the sealed boss door. Guarding _updateSpawns and _spawnWave at their first line plus wrapping the kill-tail block covers every driver; the arena path is untouched because encounterDriven is falsy on World.",
+    "playerStartsAtOrigin": "_beginGate hard-resets player.pos to (0,0,0) (game.js:375-377). The dungeon layout must therefore be TRANSLATED so its entry spawn point is the origin, rather than teaching game.js about spawn points.",
+    "navGridDegradation": "NavGrid.flowAt returns false off-grid/unreachable/near-goal and steerAgent falls back to straight-line steering (enemyai.js:307). buildNavGrid accepts an `inside` predicate (navgrid.js:170), which is exactly how a room-mask interior becomes the walkable region without registering thousands of wall blockers in the grid.",
+    "obstacleFieldGaps": "ObstacleField has no remove API and no segment query. Sealing doors by add/remove is impossible; toggling must mutate the packed `top` array (resolve() already skips solids whose top <= feet+stepOver, obstacles.js:370, and blocked() at 472 already takes a feetY arg). Caster line-of-sight and projectile wall collision need a new lineBlocked helper because nothing samples along a segment today; casters currently receive losBlocked=false always (game.js:1139,1148 — enemyai.js only documents the field, nothing sets it true) and projectiles fly through everything until the disc cull at radius+2 (game.js:1367).",
+    "kitAlreadyShipsADungeonSet": "public/models/citykit.glb (meshopt, lowercase keys, 2 m grid) contains a full ruin_* dungeon vocabulary: ruin_wall (2x2 m, 1296 tris), ruin_wall_broken (976), ruin_wall_half, ruin_wall_archround (4 m alcove arch, 2364), ruin_column_round (1010), ruin_doors_roundarch (2184), ruin_arch_round, ruin_torch (386), ruin_stairs, pots/crates/barrels/bookcases/statues/candles. citykit.js pieceParts(key) already returns kit geometry when loaded and a procedural twin otherwise (unmapped keys degrade to a visible unit block, citykit.js:496-508), and KitField gives one InstancedMesh per piece type. The dungeon can be dressed TODAY without a new binary asset; a dedicated CC0 dungeon kit later is a manifest swap behind one lookup table.",
+    "triBudgetReality": "ruin_wall at 1296 tris per 2 m segment forbids building bulk walls from kit pieces (a 250-segment E-layout x2 storeys would be ~650k tris). Bulk walls must be merged procedural slabs (~12 tris/run); kit pieces are dressing at features only (doorframes, columns, alcoves, torches, props), which lands the shell at 60-120k tris.",
+    "cameraGeometry": "The gate camera is fixed at camOffset (0,11,11) (game.js:96), 45 degrees, looking north (-Z). A wall h metres tall occludes the player only when it lies within ~1.1*h metres on the camera side (south). So: south-boundary walls at 2.0 m never occlude in a 4 m corridor; north/east/west walls can be 4.0 m for enclosure. This 'low front wall, tall back wall' trick is how fixed-camera dungeon games solve exactly this problem, and it costs nothing. A citymode-style boom probe is the safety net for corners: updateCamera + _clearCameraDistance (citymode.js:322-399), whose constants after the uncommitted closer-camera edit are CAM_OFFSET (0,8,8), CAM_MIN 3.6, CAM_PROBE_STEPS 7, EYE 1.55 — copy the pattern and start from those numbers.",
+    "interiorLightingBug": "buildBiomeEnvironment (env.js:148-155) unconditionally prefers the loaded HDRI (the `if (_hdriTexture)` branch at 150), so an enclosed dungeon would inherit open-sky image lighting. Interiors need the synthesized per-biome map (makeEnvSource) forced; EXPANSION_SPEC step 10 already flags this exact issue.",
+    "uncommittedEdits": "The working tree carries intentional uncommitted edits that this design builds on, not around: world.js horizon annulus + crag ring (arena B+ path keeps them), sky.js softer below-horizon band (arena/city only; crawl interiors ship no sky dome at all), citymode.js closer city camera (untouched by this design)."
+  },
+
+  "architecture": {
+    "worldContract": {
+      "description": "Duck-typed contract both World (arena) and Dungeon implement. game.js keeps talking to this.world and never learns which class is mounted.",
+      "required": [
+        "build(gate, seed) -> this  — full deterministic (re)build; also the context-loss repair path (game.js:196)",
+        "clear() — dispose everything into oblivion: traverse-dispose the group, drain _disposables, clear obstacleField, null navGrid, dispose shadow map (copy world.js:41-63 exactly; GPU leaks were a shipped bug)",
+        "update(dt) — atmosphere only (membrane pulse, torch flicker, dust motes); runs behind pause via DungeonMode.updateAlways",
+        "resolve(pos, radius, vel) — push out of solids + slide; player (via _arenaResolve), enemies (1184), shadows (1348)",
+        "randomSpawn(rnd, avoidPos, minDist) -> Vector3 — MUST return a walkable point; Dungeon samples the active room's precomputed spawn points, honouring minDist when possible and degrading to the nearest spawn point, never to the arena's blind polar fallback",
+        "updateShadowCamera(target, extent) — texel-snapped fitted shadow frustum (copy world.js:336-358)",
+        "navGrid — NavGrid or null; obstacleField — ObstacleField; radius — bounding radius from layout bbox + 4 so the projectile disc cull (1367) and any legacy distance math stay safe without edits"
+      ],
+      "dungeonExtensions": [
+        "kind: 'crawl' | 'cavern'  (World leaves it undefined — consumers treat undefined as open, so world.js stays untouched this wave)",
+        "encounterDriven: true  (World: falsy) — the one flag game.js checks to skip _updateSpawns and boss auto-spawn",
+        "layout — the generated DungeonLayout (see generation)",
+        "roomAt(x, z) -> roomId | -1",
+        "setDoorSealed(doorId, sealed) — flips membrane visuals + ObstacleField.setTop on the pre-registered membrane boxes",
+        "bossSpawn() -> Vector3 — boss chamber anchor; game.js:496 becomes world.bossSpawn?.() ?? old disc formula",
+        "spawnPointsFor(roomId) -> [{x,z}]",
+        "heightAt(x, z) -> 0 — v1 floors are flat (FLAT_GROUND binding in DungeonMode stays); the method exists so sloped floors are a later drop-in via body.setEnvironment, the same upgrade city.js already proved"
+      ]
+    },
+    "moduleInterfaces": [
+      {
+        "path": "src/world/dungeonlayout.js",
+        "status": "new",
+        "purpose": "Pure layout generation. NO `import * as THREE`, no DOM — importable in plain Node exactly like navgrid.js/obstacles.js, so generation is testable headlessly at hundreds of seeds per second.",
+        "exports": [
+          "export const LAYOUT_PARAMS = { E: {...}, D: {...}, C: {...} }  — every tunable per rank (see generation.parameters)",
+          "export function generateLayout({ rank, seed, params = LAYOUT_PARAMS[rank] }) -> DungeonLayout",
+          "export function layoutStats(layout) -> { rooms, depth, floorCells, doorMinWidth, ... }  — for tests and tuning",
+          "DungeonLayout shape: { kind, cell: 2, w, h, originX, originZ, mask: Uint8Array (0 rock, 1 floor), rooms: [{ id, kind: 'entry'|'combat'|'treasure'|'boss', x, z, w, d, centre: {x,z}, doors: [doorId], spawnPoints: [{x,z}], budget }], doors: [{ id, x, z, w, d, rot, roomA, roomB }], corridors: [{x,z,w,d}], wallRuns: [{ x, z, w, d, rot, face: 'n'|'s'|'e'|'w' }], decor: { torches: [{x,z,yaw}], columns: [...], props: [...], alcoves: [...] }, criticalPath: [roomId], bossRoom, entry: { x: 0, z: 0, yaw: 0 }, bounds: { minX, minZ, maxX, maxZ }, radius }",
+          "All coordinates world-space metres, ALREADY TRANSLATED so entry spawn is (0,0) and the critical path trends -Z (into the screen for the fixed camera; matches player.yaw=0 facing -Z after _beginGate)."
+        ],
+        "dependsOn": [],
+        "notes": "Uses its own copy-free mulberry32 (import from world.js would drag THREE in; re-export the 8-line function or lift mulberry32 into a tiny THREE-free src/core/rng.js — recommend the lift, world.js re-exports for compat). Forked streams per subsystem exactly like world.js's cragRnd pattern: layoutRnd = mulberry32((seed ^ 0x9e3779b9)>>>0), decorRnd = mulberry32((seed ^ 0x5f356495)>>>0), encounterRnd = mulberry32((seed ^ 0x1f123bb5)>>>0) — so decor tuning can never reshuffle rooms."
+      },
+      {
+        "path": "src/world/dungeon.js",
+        "status": "new",
+        "purpose": "The interior gate world: geometry, collision, nav, membranes, torch light pool, disposal. Implements the worldContract; consumes a DungeonLayout.",
+        "exports": [
+          "export class Dungeon { constructor(scene, renderer, camera); build(gate, seed); clear(); update(dt); resolve(pos, radius, vel); randomSpawn(rnd, avoid, minDist); updateShadowCamera(target, extent = 12); roomAt(x,z); setDoorSealed(doorId, on); bossSpawn(); spawnPointsFor(roomId); heightAt(); kind; encounterDriven = true; layout; navGrid; obstacleField; radius }",
+          "export const DUNGEON_MODULES = { wall: null, doorFrame: 'ruin_doors_roundarch', archway: 'ruin_arch_round', column: 'ruin_column_round', alcove: 'ruin_wall_archround', torch: 'ruin_torch', potA: 'ruin_pot1', potB: 'ruin_pot2', crate: 'ruin_crate', barrel: 'ruin_barrel', bookcase: 'ruin_bookcase_empty', statue: 'ruin_statue_fox', candles: 'ruin_candles_1', stalagmite: null }  — role -> kit piece key; null means procedural-only. THE single indirection a future dungeonkit.glb swaps."
+        ],
+        "dependsOn": ["src/world/dungeonlayout.js", "src/world/citykit.js (pieceParts, makeKitField, cityMaterials)", "src/world/obstacles.js", "src/world/navgrid.js", "src/render/env.js"],
+        "notes": "Bulk geometry is merged procedural (floors, wall slabs, rock fill) with vertex colours from the gate biome palette; kit pieces are instanced dressing only. Every geometry/material Dungeon creates goes into this._disposables; kit geometries/materials are SHARED with citykit's cache and must NOT be disposed here (dispose the InstancedMesh wrappers only — same rule city.js follows). No per-frame allocation in update(): torch flicker and membrane pulse mutate existing uniforms/material fields; the dust-mote InstancedMesh reuses scratch Matrix4/Vector3 exactly like world.js's shard loop."
+      },
+      {
+        "path": "src/game/encounters.js",
+        "status": "new",
+        "purpose": "The room-state director: triggers encounters on entry, seals/unseals doors, meters spawns through game._spawnEnemy, gates the boss, spawns and watches the exit portal. THREE-free where possible (positions as {x,z} ducks) so state-machine logic is Node-testable.",
+        "exports": [
+          "export const ROOM_STATE = { DORMANT: 0, TRIGGERED: 1, COMBAT: 2, CLEARED: 3 }",
+          "export class EncounterDirector { constructor({ game, dungeon, gate, seed }); update(dt); get state(); get activeRoom(); get allCleared(); onBossDeath(); rebindAfterContextLoss(); dispose() }",
+          "export function rollRoomPacks(gate, rnd) -> per-room enemy-mix tables (the 'different E-rank gates have different enemies' knob)"
+        ],
+        "dependsOn": ["src/world/dungeon.js (roomAt, setDoorSealed, spawnPointsFor, bossSpawn)", "src/game/game.js (calls g._spawnEnemy(pos, key), g._spawnBoss(), g._clearGate(), reads g.enemies/g.shadows/g.player)"],
+        "notes": "Owns NOTHING renderable except asking dungeon for membrane/portal toggles. Keeps game.js counters (spawned/killed) honest so the HUD and results rows keep working unchanged."
+      },
+      {
+        "path": "src/game/modes/dungeonmode.js",
+        "status": "modified",
+        "purpose": "World selection per rank, anomaly/biome roll, encounter director lifecycle, entry-intro camera, interior camera probe.",
+        "exports": ["class DungeonMode (unchanged name/registration)"],
+        "dependsOn": ["src/world/dungeon.js", "src/game/encounters.js"],
+        "notes": "enter(): (1) roll biome — rank>=B rolls ANOMALY_CHANCE via a seed-forked rnd and shallow-copies the gate {...gate, biome} (payload forceBiome wins when present; beginRun must pass it through — see game.js edits); (2) pick world: crawl/cavern ranks mount a Dungeon kept on the mode, open ranks mount g._arenaWorld (the World built in Game's ctor — Game gains that one alias); assign g.world BEFORE g._beginGate; (3) after _beginGate: body.setObstacles(g.world.obstacleField) as today, then create the EncounterDirector, then start the intro (2.4 s auto-walk down the entry tunnel, input suppressed, tap skips; camera lerps from a low close (0,3.2,5.2) shoulder shot to the standard (0,11,11)). update(): run intro if active (body auto-move + animateRig + world.update only), else g._updateDungeonFrame(dt) then director.update(dt). updateCamera(): g._updateCamera(dt) for open worlds; for interiors the same follow math with a citymode-style outward boom probe against layout wallRuns (start from citymode's proven constants — CAM_MIN 3.6, 7 steps, EYE 1.55 — and tune) — copy the proven pattern, do not invent a new one. exit(): director.dispose(), then the existing teardown (g.world.clear() already in place)."
+      },
+      {
+        "path": "src/game/game.js",
+        "status": "modified",
+        "purpose": "Five surgical seams; the arena path must remain byte-identical when world.encounterDriven is falsy.",
+        "exports": [],
+        "dependsOn": [],
+        "notes": "EDIT 1 spawn-driver guard, in THREE places (all no-ops when encounterDriven is falsy): (a) _updateSpawns (1508) first line `if (this.world.encounterDriven) return;`; (b) _spawnWave (428) same first-line guard — _beginGate calls it directly at 410, and unguarded it dumps the opening wave into dormant rooms; (c) wrap the kill-handler tail (662-666: the killed>=gate.enemies -> _spawnBoss branch and the spawnTimer=0.9 poke) in `if (!this.world.encounterDriven) { ... }` — unguarded, the last trash kill spawns the boss on the spot, bypassing the sealed boss door. EDIT 2 _spawnEnemy(pos = null, key = null) (436): use the passed pos/key when given, else exactly today's roll + randomSpawn — the director passes both; existing callers pass nothing. EDIT 3 _spawnBoss (494): `const pos = this.world.bossSpawn?.() ?? new THREE.Vector3(0, 0, -this.world.radius * 0.55);`. EDIT 4 projectiles (_updateProjectiles, 1359): kill a projectile when `this.world.obstacleField?.blocked(pr.pos.x, pr.pos.z, 0.25, 0, pr.pos.y)` (feetY = projectile height so kerb-height props with real tops do not eat bolts; walls are top Infinity and always block); keep the existing radius+2 disc cull (1367) as the outer bound. EDIT 5 caster LOS: before setting _steerCtx.losBlocked (1139/1148), for ranged/flank agents within range test `this.world.obstacleField?.lineBlocked(e.pos.x, e.pos.z, p.pos.x, p.pos.z, { feetY: 1.2 })`, throttled to the agent's probe cadence (stash on the agent, refresh every 0.4 s) — no per-frame line tests for the whole field. EDIT 6 boss-death _clearGate (637-641): `if (!this.world.encounterDriven) this._clearGate();` so the walk-out exit portal owns run end in crawls. EDIT 7 crawl entry presentation: in _beginGate, skip showHud(true) + the rank toast (408-409) when encounterDriven — DungeonMode fires both at intro end (arena path keeps them inline, byte-identical). Plus: Game ctor keeps `this._arenaWorld = this.world` so modes can restore it; beginRun (347) forwards extra payload fields (forceBiome, forceOpen) into mode enter payload instead of stripping to {gateIndex, rank}."
+      },
+      {
+        "path": "src/world/obstacles.js",
+        "status": "modified",
+        "purpose": "Two additive helpers the crawl needs; zero behaviour change for existing callers.",
+        "exports": [
+          "setTop(index, top) — O(1) mutate of _top[i] and, when packed, _packed.top[i]; how door membranes toggle solid<->open without the missing remove API (open = top 0, sealed = Infinity). NO signature change to addBox/addCircle: they keep returning `this` (tools/collision-test.mjs chains `.addCircle(...).build()` in ~10 places, so an index return would break it) — the caller reads `field.count - 1` immediately after the add, which IS the new record's index because count increments per add and there is no remove",
+          "lineBlocked(x0, z0, x1, z1, { step = 1.2, radius = 0.2, feetY = 1.2 } = {}) -> boolean — samples blocked() along the segment; used for caster LOS and any future AI peek. Cost: ~len/step broadphase lookups, throttled by callers"
+        ],
+        "dependsOn": [],
+        "notes": "Both stay THREE-free and Node-importable. Extend tools/collision-test.mjs with cases for both (seal/unseal roundtrip via count-1 indices, diagonal line through a wall gap)."
+      },
+      {
+        "path": "src/render/env.js",
+        "status": "modified",
+        "purpose": "Interiors must not inherit the open-sky HDRI.",
+        "exports": ["buildBiomeEnvironment(renderer, biome, { interior = false } = {}) — when interior, always PMREM the synthesized makeEnvSource(biome) and skip the HDRI branch"],
+        "dependsOn": [],
+        "notes": "One optional argument, default preserves every existing call site. Dungeon.build passes interior: true; World keeps the HDRI path."
+      },
+      {
+        "path": "src/game/config.js",
+        "status": "modified",
+        "purpose": "Optional per-gate crawl overrides so design tuning stays in the balance file.",
+        "exports": ["GATES entries gain optional `crawl: { rooms, budgetSkew }` — absent means LAYOUT_PARAMS defaults; nothing else changes"],
+        "dependsOn": [],
+        "notes": "Keep additive; the headless progression test imports this file."
+      },
+      {
+        "path": "tools/dungeon-gen-test.mjs",
+        "status": "new",
+        "purpose": "Plain-Node generation soak: no browser, no vite.",
+        "exports": [],
+        "dependsOn": ["src/world/dungeonlayout.js"],
+        "notes": "npm script test:dungeon-gen. See testStrategy."
+      },
+      {
+        "path": "tools/dungeon-test.mjs",
+        "status": "new",
+        "purpose": "Playwright walkthrough of a real E-gate crawl via tools/_harness.mjs (honours GB_PORT/GB_OUT, landscape newPhonePage default).",
+        "exports": [],
+        "dependsOn": ["tools/_harness.mjs"],
+        "notes": "npm script test:dungeon. See testStrategy."
+      }
+    ],
+    "whoCallsWhom": "AppState.go('run') -> main.js onEnter -> game.beginRun -> _setMode('dungeon') -> DungeonMode.enter: rolls biome, assigns g.world (Dungeon or _arenaWorld), calls g._beginGate(index) which calls world.build(gate, seed) and spawns the deployed shadows via world.randomSpawn, then mode binds obstacles, builds EncounterDirector, starts intro. Per frame: Game.update -> mode.updateAlways -> world.update(dt); mode.update -> [intro | g._updateDungeonFrame(dt) (spawns guarded by encounterDriven) -> director.update(dt)]; mode.updateCamera -> follow + interior boom probe. Enemy steering reads world.navGrid via _steerCtx as today. Director -> g._spawnEnemy(pos,key) / dungeon.setDoorSealed / g._spawnBoss / g._clearGate. Exit/teardown: mode.exit -> director.dispose -> g.clearEntities -> world.clear."
+  },
+
+  "generation": {
+    "recommendation": "Frontier room-walk on a 2 m module grid ('room-first, corridor-second'). Rooms are stamped rectangles connected by carved corridors, growing outward from the entry with a -Z bias; loops added after the tree. Rejected alternatives: BSP (produces evenly-packed office floorplans, wrong for a burrow, and wastes the mostly-empty grid), Delaunay+MST graph layouts (overkill for 5-9 rooms and harder to keep corridors axis-aligned for the 2 m kit grid and the merged wall runs), pure drunken-walk caves at E/D (no room identity, which the encounter director needs). The frontier walk is ~150 lines, trivially deterministic, and its output is exactly the room/door graph the director consumes.",
+    "algorithm": [
+      "1. Grid: w x h cells of 2 m (aligned with citykit KIT_CELL and the kit's 2 m wall modules), mask all rock.",
+      "2. Entry: stamp the entry room near the +Z edge; carve the entry tunnel south of it (2 cells wide, tunnelLen cells long); the tunnel's south end is the spawn, later translated to world origin (0,0), portal membrane on its south wall.",
+      "3. Frontier walk: until roomCount rooms placed — pick a random placed room (recency-weighted so growth branches), pick a wall direction (weights: N 0.45, E 0.2, W 0.2, S 0.15 — the -Z drift), corridor length 3-6 cells, room size from the rank's range; reject if the padded footprint (1-cell shell) overlaps floor or exits the grid; up to 40 placement attempts per room.",
+      "4. Loops: loopCount attempts to connect room pairs with graph distance >= 3 and euclidean distance <= 16 m by carving a straight or L corridor through rock only (never through rooms). Loops matter: they give the flow field alternatives and stop corridor camping from trivialising every fight.",
+      "5. Boss room: the room with max BFS depth from entry (ties -> euclidean farthest); re-stamp it at bossRoom size. If depth < minDepth, regenerate the whole layout with subSeed+1 (bounded 8 tries, then accept — determinism preserved because the retry counter is part of the derivation, seed -> same retries -> same result).",
+      "6. Doors: every room/corridor junction becomes a door record 2 cells (4 m) wide, with the membrane quad + two pre-registered membrane collision boxes (1.2 m thick, top 0 = open) centred on it.",
+      "7. Wall runs: march the floor-mask boundary; merge collinear boundary cells into runs, split at doors; each run becomes one ObstacleField box (0.6 m thick, top Infinity) and one merged render slab. Record the run's floor-facing side so the renderer can apply fixed-camera heighting (south-facing runs low).",
+      "8. Room classification: non-critical-path leaf rooms roll treasure (E: 20% chance one; D+: exactly one guaranteed); everything else combat. Entry and boss are fixed kinds.",
+      "9. Spawn points: per room, jittered grid points >= 1.5 m from walls, >= 2.4 m apart. Enemy budget: gate.enemies distributed over combat rooms proportional to area (min 2 each), remainder to the last pre-boss room.",
+      "10. Decor anchors (decorRnd stream): columns at room corners and every 3rd corridor junction cell; torch sconces on wall runs every ~6 m alternating sides (these are the light-pool anchors); alcoves (D+) on long room walls; prop clusters (pots/crates/barrels, 2-4 pieces) near corners at density per rank; statue+candles shrine in treasure rooms."
+    ],
+    "cavernVariant": [
+      "C-rank swaps steps 2-8 for an organic mask, same downstream consumers: union of 9-14 discs (r 8-18 m) random-walked from centre, plus 3 grotto discs (r 6-9 m) at the fringe, plus the entry tunnel from +Z; one smoothing pass removes single-cell spikes so wall runs stay mergeable.",
+      "Encounter ZONES replace rooms: 4-5 disc triggers (r 9 m) placed along the BFS-farthest chain through the cavern, each with spawn points and budget; zones do NOT seal doors (nothing to seal in one chamber) — instead the zone's pack aggroes as one group when triggered, and the boss grotto keeps a single sealed membrane arch until allCleared.",
+      "Stalagmite fields: Poisson-scattered cones (nature.glb rock_1..7 when loaded, procedural cones otherwise) registered as obstacle circles with real tops (some are step-over rubble, some are full cover) with a clearing radius around each zone centre and every spawn point — cover that seals a spawn point is how enemies get stuck inside scenery.",
+      "Ceiling: the cavern is the one interior with a visible roof read — a coarse inverted dome of dark vertex-coloured triangles high overhead (y 16-22) with hanging stalactite fringe instanced along it; fog (near 18, far 55) does the rest. The dome is above the camera's 11 m height so the standard camera stays."
+    ],
+    "parameters": {
+      "E": { "grid": "48x48 (96 m)", "rooms": "5-6 + entry + boss", "roomSize": "5x4..8x6 cells (10x8..16x12 m)", "corridorWidth": "2 cells (4 m)", "tunnelLen": "8-10 cells", "loops": 1, "minBossDepth": 3, "wallHeight": "4 m (south-facing runs 2 m)", "torchSpacing": "6 m", "propDensity": "low", "fog": "near 12, far 34" },
+      "D": { "grid": "56x56 (112 m)", "rooms": "7-8 + entry + boss", "roomSize": "5x4..9x7 cells; one vault hall 10x6..12x8", "corridorWidth": "2-3 cells", "tunnelLen": "9-11 cells", "loops": 2, "minBossDepth": 4, "wallHeight": "4 m (south 2 m)", "torchSpacing": "7 m", "propDensity": "medium + alcoves", "fog": "near 12, far 36" },
+      "C": { "grid": "64x64 (128 m)", "rooms": "cavern mask + 3 grottos + 4-5 zones", "roomSize": "cavern ~70x55 m", "corridorWidth": "entry tunnel 3 cells", "tunnelLen": "10-12 cells", "loops": 0, "minBossDepth": 3, "wallHeight": "cavern walls 6 m, dome 16-22 m", "torchSpacing": "n/a — bioluminescent crystal clusters as light anchors", "propDensity": "stalagmite field", "fog": "near 18, far 55" }
+    },
+    "determinism": "seed comes from _beginGate (game.js:369, per-run random) — same seed must rebuild the identical dungeon (context-loss repair depends on it, game.js:196). All generation reads only the forked mulberry32 streams; no Math.random anywhere in layout, dressing, or the director's pack rolls (enemyai's per-agent Math.random detour side is fine — it is not layout)."
+  },
+
+  "entryExperience": {
+    "beats": [
+      "1. City side (exists): walk to the plaza portal, prompt, confirm — unchanged.",
+      "2. Arrival: the player materialises at the south end of the entry tunnel, facing -Z, with the portal membrane glowing on the wall behind them (same membrane material family as the door seals; GLOW_LAYER is fine — portals are on the allowed glow list). The membrane visibly dims and seals over ~1.5 s: the way in shuts behind you. No walk-back-out interaction in v1 (leaving is the pause menu, as today) — the sealed door is lore, not UI.",
+      "3. Descent read: the tunnel is 16-24 m of 4 m-wide corridor whose vertex-colour lighting ramps darker toward the entry and warmer (torchlit) toward the first room, with the first torch pair ~8 m ahead. The floor stays flat (FLAT_GROUND physics binding unchanged); the descent is sold by the camera, the darkness gradient, and a lid of rock-fill closing overhead — not by real slopes. heightAt() exists for a later sloped-tunnel upgrade.",
+      "4. Camera intro (2.4 s, tap to skip): input suppressed; the body auto-walks forward at 0.7x speed; camera starts low and close over the shoulder (0,3.2,5.2) looking down the tunnel at the torchlight, then eases to the standard (0,11,11) follow as the player reaches the tunnel mouth. The existing gate toast (rank + name, game.js:409) is deferred to intro end so it lands as the reveal.",
+      "5. First room: the entry room is DORMANT and safe (the deployed shadow escort spawned here via randomSpawn min 4 — entry room is >= 12x10 m so the escort fits). First combat room is one door away."
+    ],
+    "hudTiming": "ui.showHud(true) moves from _beginGate to intro end for crawl worlds (mode-owned; arena path unchanged). Suppressing HUD during the walk-in is most of what makes it feel like an entrance rather than a menu transition."
+  },
+
+  "encounters": {
+    "recommendation": "Gated free-roam ('threshold gates'), not strict lock-step and not open aggro. Rooms trigger on entry; doors of the ACTIVE room seal during combat and reopen on clear; cleared and dormant rooms are freely walkable, so backtracking for pickups and Bind extractions works between fights. Rejected: strict clear-to-open (blocks backtracking, punishes the Bind corpse-window loop the game is built around) and full free-roam pre-placed enemies (unbounded live AI on phone, whole-dungeon pulls, and the flow field would happily funnel every pack to the player at once).",
+    "roomStateMachine": [
+      "DORMANT: no entities exist for this room. Zero cost.",
+      "TRIGGERED: player crosses a door threshold into the room (roomAt(player) changes to a DORMANT combat room). 0.5 s grace so trailing shadows cross too, then doors seal (setDoorSealed -> membrane quads on + ObstacleField.setTop(Infinity)); state -> COMBAT.",
+      "COMBAT: initial wave = min(gate.waveSize, room.budget) spawned on the room's spawn points via g._spawnEnemy(pos, key) with the room's rolled pack; the remainder trickles in (one per 1.1 s) as deaths open slots, concurrent always <= gate.waveSize. Rise-from-floor spawn animation already exists and reads perfectly indoors.",
+      "CLEARED: room budget exhausted and room's enemies dead -> membranes drop with a short accent flare, torches in the room brighten one step, treasure roll pays out (weapon chest via _spawnWeaponDrop at the room centre for treasure rooms; hp/mp orbs otherwise). Counters: director increments nothing itself — it calls the same _spawnEnemy so game.killed/spawned/HUD keep working.",
+      "Ally edge case: a shadow left outside when doors seal teleports to the nearest inside spawn point after 1.5 s (shadows path to the player constantly, so this is rare; the teleport is the same trick their gate-entry deploy already uses)."
+    ],
+    "variety": "rollRoomPacks(gate, encounterRnd) picks each combat room's mix from 2-3 rank-appropriate packs (E: burrow pack grunt+stalker, nest pack grunt+caster, hunt pack stalker-heavy; D adds brute vault and caster ossuary packs; C zones mix in lancer at the fringe). Seed is per-run (game.js:369), so two consecutive E-gates roll different layouts AND different packs — the owner's 'different E-rank gates have different enemies' with zero new content: it is a weighting table over ENEMY_TYPES that already exist.",
+    "bossGate": "Boss chamber door stays sealed (membrane at Infinity) until every combat room/zone is CLEARED. The director drives this; killed>=gate.enemies keeps accumulating identically so nothing else notices."
+  },
+
+  "bossChamberAndExit": {
+    "chamber": "Largest room (E: >= 14x12 m; D vault ~18x14; C: the far grotto ~24x20 with a raised visual dais — flat nav), one entrance, torch ring, columns clear of the centre so the boss brain's charges have room. bossSpawn() returns the chamber's far-centre anchor.",
+    "sequence": [
+      "1. Player crosses the boss threshold -> door seals behind (same machinery) -> g._spawnBoss() with the existing rise animation (-6 -> 0) and toast; a 1.2 s camera hold on the boss (mode-owned, reuses the intro lerp code) replaces a bespoke cutscene.",
+      "2. Fight uses entirely existing systems (_bossBrain, navGrid steering, telegraphs).",
+      "3. On boss death the director does NOT call _clearGate immediately (today it fires the instant the boss dies via the kill path): membranes all drop, the corpse Bind window (12 s) and drops play out, and an EXIT PORTAL (full portal treatment, GLOW_LAYER, biome accent) rises at the chamber's back wall over 2 s.",
+      "4. Walking into the exit portal disc (r 1.6 m) triggers g._clearGate() -> existing results screen -> city. No timeout fallback needed: the room is cleared and safe, and the results math is untouched — the walk-out just moves WHEN it fires. The boss-death branch (game.js:637-641) checks world.encounterDriven to skip its immediate _clearGate; that is game.js EDIT 6."
+    ]
+  },
+
+  "collisionNav": {
+    "obstacleField": "One field per dungeon, packed once at build: merged wall-run boxes (top Infinity, tag 'wall'), membrane boxes (top 0 open / Infinity sealed via new setTop, tag 'membrane', nav:false), columns/props as circles with honest tops (pots/crates are step-over at 0.4; columns/statues solid), stalagmites per cavern rules. Estimated counts: E ~90-150 boxes + 40-70 circles; C ~60 boxes + 120-180 circles — comfortably inside what the module's 8 m broadphase buckets were designed for (obstacles.js's own header sizes them against a several-hundred-solid city; note the shipped city.js actually runs its own spatial hash, so the dungeon will be this module's biggest real workload — the collision soak in STEP 3 is not optional).",
+    "navGrid": "buildNavGrid({ ...field.toNavBlockers(), originX: layout centre, originZ, size: layout size + 8, cell: 1.25, pad: 0.5, inside: (x,z) => layout mask floor test }). The inside predicate carries the walls (mask cells), so wall boxes double-block harmlessly; membranes stay out (nav:false) — enemies never path through a door the player cannot see open, because they only chase a player who is in their own sealed room. Door width 4 m guarantees >= 2 open cells across at cell 1.25 + pad 0.5, so no door can seal in the grid; the corner-cut rule in navgrid.js already prevents doorframe shaving. Grid sizes: E 83x83 = ~6.9k cells, C 109x109 = ~11.9k — setGoal's full sweep at the throttled 4 Hz is well inside the couple-of-ms the module documents.",
+    "containment": "No radial clamp: walls are the boundary. Dungeon.resolve = field.resolve + a belt-and-braces bbox clamp to layout.bounds (anything that tunnels a wall in a spike frame gets caught by the box, mirroring the arena's disc clamp philosophy).",
+    "losAndProjectiles": "See game.js EDITs 4-5: projectiles die on walls via field.blocked with feetY, casters hold fire (and the flow field walks them round the corner — losBlocked=true plus commit pressure already produces exactly this) when lineBlocked says the shot is into a wall."
+  },
+
+  "performance": {
+    "drawCallBudget": "Interior shell target: <= 24 draw calls E/D (floors 1, wall slabs 1, rock fill 1, membranes 1, torch flames 1, dust motes 1, kit dressing fields ~8-12, lights n/a) and <= 30 for the C cavern (adds dome, stalagmite + stalactite fields, crystal clusters). Asserted in tools/dungeon-test.mjs via renderer.info.render.calls delta between empty scene and built dungeon.",
+    "triangleBudget": "<= 130k scenery triangles with the kit loaded (dressing counts from citykit.json: doorframes ~2.2k x <=14, columns ~1k x <=40, torches 386 x <=40, props ~1k x <=60, alcoves 2.4k x <=12), <= 45k procedural-only. Bulk walls/floors/rock fill are merged low-poly slabs — this is the flat-shaded vertex-colour look, not a compromise.",
+    "culling": "Fixed camera + fog is the occlusion strategy: fog far 34-55 m with scene.background = biome.sky (no sky dome indoors — the biggest arena fill cost deleted outright). Merged bulk meshes are one draw each and cheap to submit whole; kit dressing KitFields are per-piece single draws (frustumCulled false, same reasoning as world.js crags). Per-room geometry splitting was considered and rejected: it multiplies draw calls to save vertex work the GPU is not short of — the same conclusion citykit.js already documents.",
+    "entities": "Room gating IS the entity budget: live enemies <= gate.waveSize + trickle slack, everything else DORMANT (no meshes, no agents). This is strictly cheaper than the arena, which runs the same cap in an open disc.",
+    "lights": "No per-torch lights. A pool of 2 PointLights (3 at high quality tier, 1 at low) reassigned at 4 Hz to the nearest torch anchors ahead of the player, intensity-lerped over 0.3 s to hide handoffs. Torch flames are small MeshBasicMaterial billboards, NOT on GLOW_LAYER (glow list is portals/skills/telegraphs/shadow-army only; membranes and portals get the layer, environment fire does not). Key light + shadow stays (updateShadowCamera extent 12 indoors), hemi at 0.35, interior env via env.js interior flag.",
+    "allocation": "update(dt) mutates preallocated scratch only (module-level Matrix4/Vector3/Euler, world.js shard pattern). Director.update allocates nothing in steady state (room arrays prebuilt at bind).",
+    "disposal": "Dungeon owns _disposables for every geometry/material it creates; clear() replicates world.js:41-63 including the shadow-map depth-texture dispose. Kit-shared resources are never disposed by Dungeon (city.js rule). tools/dungeon-test.mjs asserts renderer.info.memory.geometries/textures return to within +2 of the pre-gate baseline after exit — the leak class that actually shipped once."
+  },
+
+  "tilesets": {
+    "now": "Zero new binaries. Bulk architecture procedural (merged vertex-coloured slabs, biome palette from config.js BIOMES). Dressing through DUNGEON_MODULES -> citykit.glb ruin_* pieces via the existing pieceParts/KitField pipeline (meshopt decoded, keys already lowercase, procedural fallback automatic — offline runtime guaranteed). Cavern flavour from nature.glb rock_* pieces the same way. Any DUNGEON_MODULES role that maps to null or an unshipped key MUST get a bespoke procedural twin registered in citykit.js's PROC map (the anonymous unit-block fallback is a debugging aid, not shippable dressing).",
+    "afterKitLands": "Another agent is researching CC0 dungeon packs. The integration contract for whatever lands: public/models/dungeonkit.glb + dungeonkit.json manifest (same schema as citykit.json: pieces[], 2 m grid preferred, meshopt ONLY — never Draco, lowercase keys), loaded by a loadDungeonKit clone of loadCityKit. The ONLY consumer-side change is the DUNGEON_MODULES table (role -> piece key), optionally per-rank tables (WARREN_MODULES / OSSUARY_MODULES / CAVERN_MODULES) for themed swaps. Layout, collision, nav, encounters, tests: untouched. Static dressing only — if the pack ships skinned/animated pieces they load through SkeletonUtils.clone per the repo rule, but nothing in this design needs one.",
+    "constraintsReminder": "Flat-shaded low-poly, vertex colours over texture maps; no rim/glow/emissive on living characters anywhere in dressing or lighting; asset keys lowercase; every GLB load path degrades to procedural."
+  },
+
+  "worldJsArenasFate": {
+    "decision": "KEEP, as the B/A/S open-landscape worlds. world.js is not modified this wave beyond what the working tree already carries (horizon annulus apron + crag ring + softer sky below-horizon — review-and-keep, they are exactly the 'open landscape needs a horizon' direction B+ wants). The arena remains reachable for E/D/C only through a dev override (DungeonMode.enter payload { forceOpen: true }) so screenshot baselines and old tests can still exercise it.",
+    "later": "EXPANSION_SPEC step 10's biomebuild kits eventually replace the disc arena for B/A/S with real landscapes; this spec deliberately leaves that surface untouched so the two efforts do not collide — the worldContract is the shared boundary both sides already satisfy."
+  },
+
+  "testStrategy": {
+    "unit_generation": "tools/dungeon-gen-test.mjs (plain Node, no browser): 200 seeds x {E,D,C}. Asserts per layout: every room reachable from entry (BFS over doors), bossRoom depth >= minDepth, every door span >= 4 m, room counts/sizes within rank params, no floor-mask overlap violations, entry translated to (0,0) with -Z drift (mean room centre z < 0), spawn points >= 1.5 m from any wall run, budgets sum to gate.enemies, and byte-identical layout for a repeated seed (determinism). Also writes a stats JSON (writeReport shape) for tuning eyeballs. Runs in CI-speed (<5 s).",
+    "integration_walkthrough": "tools/dungeon-test.mjs via _harness (ALWAYS run with the assigned GB_PORT, e.g. GB_PORT=5211 npm run test:dungeon; landscape viewport is the harness default and must stay — portrait trips the rotate gate and swallows pointers): boot -> enterGate E -> assert mode 'dungeon', world.kind 'crawl', intro completes (or skip-tap works). Then walk the criticalPath by teleporting the body to each door threshold via evalGame + body.reset: assert roomAt transitions, doors seal (probe: drive velocity into a sealed membrane for 1 s, assert position stays inside room), enemies spawn on the room's points with concurrent <= waveSize, force-kill via hp=0 and assert CLEARED + membranes drop + counters advance. At boss: assert door sealed until allCleared, boss spawns via bossSpawn anchor, kill, assert exit portal appears and _clearGate fires only on walk-in, results screen shows. Screenshots per room to GB_OUT for the adversarial pass to eyeball.",
+    "perf_and_leaks": "Same tool, tail phase: renderer.info.render.calls <= budget in the busiest room; 300-frame average frame time sanity on SwiftShader (soft assert, log-only — SwiftShader is not a phone); after exit to city, renderer.info.memory.geometries/textures within +2 of pre-gate baseline; page error list empty throughout.",
+    "regression_arena": "One B-rank run through the same tool asserting world === game._arenaWorld, world.kind undefined/'open', _updateSpawns wave path still driving spawns (spawned grows without a director), and a screenshot for diffing — the arena path must be untouched by every seam edit.",
+    "unit_collision": "Extend tools/collision-test.mjs (Node): setTop seal/unseal roundtrip (resolve pushes out when Infinity, ignores at 0), lineBlocked positive/negative cases through a doorway gap, index return of addBox/addCircle."
+  },
+
+  "buildOrder": [
+    "STEP 1 — LAYOUT GENERATOR. src/core/rng.js (lift mulberry32; world.js re-exports) + src/world/dungeonlayout.js (crawl kind only) + tools/dungeon-gen-test.mjs + npm script test:dungeon-gen. VERIFY: gen test green over 200 seeds x E/D; stats report shows sane spreads. No rendering, no game code touched — pure Node.",
+    "STEP 2 — OBSTACLE HELPERS. obstacles.js setTop + lineBlocked (addCircle/addBox signatures UNCHANGED — record index = field.count - 1 after add); extend tools/collision-test.mjs. VERIFY: collision test green including the new seal/unseal and lineBlocked cases.",
+    "STEP 3 — DUNGEON WORLD, PROCEDURAL SHELL. src/world/dungeon.js: merged floors/walls/rock-fill with fixed-camera wall heighting, membranes (visual + pre-registered boxes), torch anchors + light pool, dust motes, interior env (env.js interior flag lands here), ObstacleField + NavGrid wiring, full disposal. Dev-only mount via evalGame world swap on a harness page. VERIFY: tools/dungeon-test.mjs phase 1 — build E/D layouts, screenshots, draw-call + tri budget asserts, resolve containment probes (walk into every wall run), clear() leak assert.",
+    "STEP 4 — MODE + GAME SEAMS. game.js EDITs 1-7 + _arenaWorld alias + payload passthrough; dungeonmode.js world selection, anomaly/biome roll relocation, interior camera boom probe. NO director yet — crawl worlds run dormant and empty past the entry room is acceptable this step (EDIT 1 keeps them empty; EDIT 6 cannot fire without kills; for EDIT 7, the mode fires showHud+toast at enter-end until STEP 6 moves them to intro end). VERIFY: E-gate boots into the crawl and B-gate arena run is behaviourally identical (regression_arena phase green); existing tools/smoke.mjs + test:city still green on the assigned GB_PORT.",
+    "STEP 5 — ENCOUNTER DIRECTOR. src/game/encounters.js + boss gate + exit portal + LOS/projectile integration checks live in-game; wire into dungeonmode. VERIFY: full integration_walkthrough green end-to-end on E; caster-through-wall probe (place caster behind wall via evalGame, assert no projectile crosses).",
+    "STEP 6 — ENTRY EXPERIENCE. Intro auto-walk + camera lerp + skip, HUD/toast timing, entry membrane seal, tunnel darkness gradient. VERIFY: walkthrough's intro assertions + before/after screenshots; input suppressed during intro but skip-tap works.",
+    "STEP 7 — DRESSING PASS. DUNGEON_MODULES kit dressing (doorframes/columns/torches/props/alcoves), D ossuary theme, treasure shrine, per-rank palette/fog tuning. VERIFY: budgets still green WITH kit loaded; screenshot set for E and D; procedural-fallback run (block citykit.glb via page route) still renders every role.",
+    "STEP 8 — CAVERN. dungeonlayout.js cavern kind + zones, dungeon.js dome/stalagmites/crystal light anchors, director zone mode. VERIFY: gen test extended to C; walkthrough on C including zone aggro (no door seals) and boss grotto membrane.",
+    "STEP 9 — (GATED ON ASSET AGENT) DUNGEONKIT SWAP. Only if a pack lands: build dungeonkit.glb via a tools/build-*-glb.mjs sibling (meshopt only), loadDungeonKit, per-rank module tables. VERIFY: budgets, fallback run, and a visual diff pass. Skippable without affecting steps 1-8."
+  ],
+
+  "risks": [
+    "Camera in X-running corridors: the fixed-camera wall-heighting rule handles the common case, but corner geometry can still clip the boom — the citymode probe is the net; if the probe fires constantly in playtests the fallback is dropping ALL south-facing runs to 2 m (already parameterised).",
+    "Membrane record indices come from reading `field.count - 1` after each add (verified safe: no remove API exists and tools/collision-test.mjs chains on the `this` return, so the signature must NOT change). If a remove API ever lands, indices shift and setDoorSealed's stored indices break — keep that constraint documented in obstacles.js when setTop lands.",
+    "Shadow escort in sealed rooms: teleport-recovery must not fire during the 0.5 s seal grace or shadows ping-pong; gate it on 1.5 s outside AND door sealed.",
+    "Context loss mid-crawl: world.build re-creates geometry deterministically (game.js:196 path) but director state is in-memory — rebindAfterContextLoss re-seals the active room and respawns its remaining budget; accept that in-room progress resets (matches the arena's behaviour of keeping the same rift, and losing a room's partial clear is strictly better than a soft-locked door).",
+    "Draw-call creep from dressing enthusiasm: each new DUNGEON_MODULES role is +1 draw call (KitField per piece type); the budget assert in the walkthrough is the enforcement, keep it tight.",
+    "Flow-field goal churn through membranes: enemies sealed WITH the player always have a reachable goal; enemies must never be spawned outside the active room (director invariant), or they will grind against a nav-open but collision-sealed door.",
+    "randomSpawn contract drift: game.js calls it for shadows (min 4) at gate start — Dungeon must guarantee entry-room capacity for the max deployed escort (field cap at high tier) or spawn compressed; never fall through to a polar formula.",
+    "Determinism erosion: any Math.random sneaking into layout/dressing/packs breaks context-loss rebuild identity; the gen test's repeated-seed byte-compare is the tripwire, keep it."
+  ],
+
+  "openQuestions": [
+    "Should walking back into the (sealed) entry membrane offer an abandon-run confirm instead of pause-menu-only exit? v1 says no (sealed = lore); cheap to add later via the cityui prompt pattern.",
+    "Treasure room contents beyond weapon chest + orbs — keys/lore/shards are Wave 3 material; the room kind exists so content can land without layout changes.",
+    "Should C-cavern stalagmite cover be destructible (attacks clear cover)? Costs an obstacle-field rebuild per break (packing is cheap, nav rebake is the 4 Hz sweep) — feasible, deferred.",
+    "Do D+ crawls want one hazard room type (collapsing floor telegraph, gas vents) reusing the telegraph decal system? Fits the ROOM kind enum cleanly; needs owner appetite check.",
+    "When EXPANSION_SPEC step 10 landscapes replace the B+ disc arena, does the anomaly roll move from biome-swap to landscape-swap? The worldContract already carries it either way.",
+    "Exact interior camOffset: spec assumes the arena's (0,11,11) works indoors with heighting + probe; if playtest wants closer (city moved to 8,8), the mode owns the constant — tune, don't fork."
+  ]
+}

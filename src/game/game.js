@@ -3,8 +3,11 @@ import { World, mulberry32 } from './world.js';
 import { Effects } from './effects.js';
 import {
   makeHumanoid, makeHealthBar, setHealthBar, animateRig, makeGroundRing, disposeObject3D,
-  setCharacterQuality,
+  setCharacterQuality, rebuildHumanoid,
 } from './entities.js';
+// The render-side cache of save.playerBody: the title screen's M/F flip must
+// update it AND rebuild the hero, or the choice only applies next boot.
+import { setPlayerBody as setPlayerBodyLook } from '../render/characters.js';
 import { makeAgent, steerAgent, separate, noteAttack } from './enemyai.js';
 import {
   GATES, ENEMY_TYPES, BOSSES, SKILLS, derive, scaleEnemy, rankOf,
@@ -21,6 +24,9 @@ import {
   rollDrop, equipWeapon, currentWeapon, setModelSource,
   serializeWeapon, deserializeWeapon, starterWeapon, buildWeaponMesh, rarityColor,
 } from './weapons.js';
+// Straight from the render module, not via entities.js: Bind summons a NAMED
+// creature off the roster, which is a call shape makeHumanoid cannot express.
+import { makeCreature, creaturesReady, creatureFor } from '../render/creatures.js';
 import { Glow, GLOW_LAYER } from '../render/glow.js';
 import { Quality } from '../core/quality.js';
 import { attachBody, applyKnockback, FLAT_GROUND } from './physics.js';
@@ -239,6 +245,25 @@ export class Game {
     this.player.body.setEnvironment(FLAT_GROUND, this._arenaResolve);
 
     this._restoreLoadout();
+  }
+
+  /**
+   * The title screen's M/F flip. The hero was built (and pack-upgraded) back in
+   * the constructor, and characters.js caches the body choice on first read, so
+   * writing save.playerBody alone would only apply on the NEXT boot. This
+   * updates the cache and swaps the body in place; the equipped weapon and hero
+   * light ride through the rebuild, and on the procedural box-man (pack absent)
+   * rebuildHumanoid declines and the identical silhouette simply stays.
+   */
+  setPlayerBody(body) {
+    setPlayerBodyLook(body);
+    const p = this.player;
+    if (p?.mesh && rebuildHumanoid(p.mesh)) {
+      // Settle the fresh rig into its idle immediately — the title screen never
+      // reaches _updatePlayer, so without this tick the new body holds a T-pose
+      // until PLAY is pressed.
+      animateRig(p.mesh, { moving: false, speed: 0, t: this.time, dt: 0.016 });
+    }
   }
 
   // ------------------------------------------------------------- loadout
@@ -541,14 +566,78 @@ export class Game {
     this.ui.setObjective('BOSS', '');
   }
 
+  /**
+   * A dark clone of a named creature — the Bind look. Wrapped the same way
+   * buildSkinnedInto wraps its instances (outer Group carries game scale,
+   * userData.character carries the mixer), so animateRig and disposeObject3D
+   * treat it exactly like every other skinned entity. Null when the pack is
+   * absent or the key is unknown; callers fall back to the humanoid ghost.
+   */
+  _makeBoundBody(creatureKey, scale) {
+    if (!creatureKey || !creaturesReady()) return null;
+    const inst = makeCreature({
+      creature: creatureKey, rank: this.gate?.rank ?? 'E',
+      shadow: true, glow: 0x35e6ff, eyes: false, scale: 1,
+      // Shadows are already capped by fieldCapacity — the tier's declared
+      // shadow budget — and must not evict monsters from the enemy budget.
+      ignoreBudget: true,
+    });
+    if (!inst) return null;
+    const root = new THREE.Group();
+    root.add(inst.root);
+    root.userData.character = inst;
+    // The cast rides along like buildSkinnedInto's does: tools and the roster
+    // UI read userData.appearance.key to tell one soldier's figure from
+    // another, and without it every bound creature reports the same nothing.
+    root.userData.appearance = inst.appearance;
+    root.scale.setScalar(scale);
+    return root;
+  }
+
+  // The corpse is the dead creature itself gone dark — a shadow that has not
+  // been bound yet. The humanoid ghost remains as the offline fallback.
+  _makeCorpseMesh(e, creatureKey) {
+    const root = this._makeBoundBody(creatureKey, (e.base.scale || 1) * 0.95);
+    if (root) {
+      const inst = root.userData.character;
+      // A dead flyer lies down with everything else.
+      inst.root.position.y = 0;
+      // Crumple from standing: _updateCorpses ticks the mixer, and the clamp
+      // holds the ground pose for the Bind window.
+      inst.play('die', { fade: 0, once: true, clamp: true });
+      inst.mixer.update(0.01);
+      return root;
+    }
+    const mesh = makeHumanoid({
+      color: 0x0f1424, glow: 0x35e6ff, accent: 0x0a0d18,
+      weapon: 'sword', scale: (e.base.scale || 1) * 0.95, ghost: true,
+    });
+    // The fallback paths handle the tip themselves: the skinned character
+    // corpse counter-rotates and plays its Death clip, the box-man just lies
+    // where it is tipped.
+    mesh.rotation.x = -Math.PI / 2.4;
+    return mesh;
+  }
+
   // `record` is the roster entry this field instance represents. Its grade and
   // the owner's INT decide the numbers, so a shadow you kept and promoted is
   // still worth fielding forty levels later.
   _spawnShadow(pos, silent = false, record = null) {
     if (this.shadows.length >= this.fieldCapacity()) return null;
     const rec = record || makeShadow(this.save, { type: 'grunt', level: this.save.level });
+    // Lazy save migration: rosters bound before creature identity existed (and
+    // kills made while creatures.glb was still loading) carry no key. Deal one
+    // deterministically from the record's own id the first time it takes the
+    // field; the assignment sticks to the roster entry and persists through
+    // the next onSave, so the same soldier keeps the same figure forever.
+    if (!rec.creature && creaturesReady()) {
+      const cast = creatureFor(`${rec.type}:${rec.id % 4}`, {
+        archetype: rec.type, rank: this.gate?.rank ?? 'E',
+      });
+      rec.creature = cast?.key || null;
+    }
     const c = shadowCombat(this.save, rec);
-    const mesh = makeHumanoid({
+    const mesh = this._makeBoundBody(rec.creature, 0.95 * c.scale) || makeHumanoid({
       color: 0x1a2740, glow: 0x35e6ff, accent: 0x0b1220,
       weapon: 'sword', scale: 0.95 * c.scale, ghost: true, cloak: true,
       archetype: 'shadow', rank: this.gate?.rank ?? 'E',
@@ -627,6 +716,10 @@ export class Game {
       else if (roll < 0.34) this._spawnPickup(e.pos.clone(), 'mp');
     }
 
+    // The Bound keep the figure of whatever died, so read WHICH creature this
+    // was off the live instance — disposeObject3D nulls userData.character.
+    const srcInst = e.mesh.userData?.character;
+    const boundCreature = (srcInst?.isCreature && srcInst.creature) || null;
     this.scene.remove(e.mesh);
     this.scene.remove(e.bar);
     disposeObject3D(e.mesh);
@@ -642,21 +735,19 @@ export class Game {
     }
 
     // Leave a corpse that Bind can raise for a limited window.
-    const corpseMesh = makeHumanoid({
-      color: 0x0f1424, glow: 0x35e6ff, accent: 0x0a0d18,
-      weapon: 'sword', scale: (e.base.scale || 1) * 0.95, ghost: true,
-    });
+    const corpseMesh = this._makeCorpseMesh(e, boundCreature);
     corpseMesh.position.copy(e.pos);
     corpseMesh.rotation.y = e.yaw;
-    corpseMesh.rotation.x = -Math.PI / 2.4;
     corpseMesh.position.y = 0.25;
     this.scene.add(corpseMesh);
     // enemyLevel/tierWeight/attempts are what extractionChance reads; the life
     // and the chance decay share CORPSE_WINDOW so a corpse that still looks
-    // raiseable still is one.
+    // raiseable still is one. `creature` rides along so a successful Bind can
+    // put the same figure on the roster.
     this.corpses.push({
       mesh: corpseMesh, pos: e.pos.clone(), life: CORPSE_WINDOW,
-      type: e.key, enemyLevel: e.level, tierWeight: tierWeightOf(e), attempts: 0,
+      type: e.key, creature: boundCreature,
+      enemyLevel: e.level, tierWeight: tierWeightOf(e), attempts: 0,
     });
 
     if (this.killed >= this.gate.enemies && !this.bossActive) {
@@ -687,6 +778,10 @@ export class Game {
     if (p.hp <= 0) {
       p.hp = 0;
       p.alive = false;
+      // The hunter falls before the fail screen reads him his rites: the Death
+      // clip starts here and _updatePlayer's dead branch keeps the mixer
+      // ticking, since the living animate path stops the moment alive flips.
+      p.mesh.userData.character?.play('die', { fade: 0.08, once: true, clamp: true });
       this._fail();
     }
   }
@@ -771,9 +866,11 @@ export class Game {
   _tryDash() {
     const p = this.player;
     if (p.cds.dash > 0) return;
-    const mv = this.input.sample();
-    const dir = (mv.x || mv.y)
-      ? tmpV.set(mv.x, 0, -mv.y).normalize()
+    // sampleWorld, not sample: a dash aimed with the stick must go where the
+    // stick points ON SCREEN, whatever the camera yaw happens to be.
+    const mv = this.input.sampleWorld();
+    const dir = (mv.x || mv.z)
+      ? tmpV.set(mv.x, 0, mv.z).normalize()
       : this._forward(p.yaw, tmpV);
     // Authored in world units; the body solves the impulse that travels it.
     const v0 = p.body.impulseForDistance(SKILLS.dash.distance);
@@ -887,7 +984,7 @@ export class Game {
         this.fx.burst(c.pos.clone().setY(0.9), 8, 0x35e6ff, { speed: 3, up: 2, life: 0.3 });
         continue;
       }
-      const rec = makeShadow(this.save, { type: c.type, level: c.enemyLevel });
+      const rec = makeShadow(this.save, { type: c.type, level: c.enemyLevel, creature: c.creature });
       const { added } = addShadow(this.save, rec);
       if (!added) { rosterFull = true; break; }
       this._spawnShadow(c.pos.clone(), false, rec);
@@ -1009,7 +1106,12 @@ export class Game {
 
   _updatePlayer(dt) {
     const p = this.player;
-    if (!p.alive) return;
+    if (!p.alive) {
+      // Dead: only the Death clip still runs (animateRig routes a dead skinned
+      // character straight to its mixer; the procedural rig ignores this).
+      animateRig(p.mesh, { moving: false, speed: 0, t: this.time, dt });
+      return;
+    }
     const d = this.derived;
 
     // cooldowns
@@ -1047,13 +1149,15 @@ export class Game {
     if (this.input.consume('jump')) body.jump();
     body.setJumpHeld(this.input.isHeld('jump'));
 
-    const mv = this.input.sample();
-    const moving = Math.abs(mv.x) > 0.01 || Math.abs(mv.y) > 0.01;
-    body.move(mv.x, -mv.y, p.swing > 0 ? 0.35 : 1);
+    // World-space stick: rotated through the camera yaw so orbiting can never
+    // invert the controls. With the camera untouched this is (x, -y) exactly.
+    const mv = this.input.sampleWorld();
+    const moving = Math.abs(mv.x) > 0.01 || Math.abs(mv.z) > 0.01;
+    body.move(mv.x, mv.z, p.swing > 0 ? 0.35 : 1);
 
     if (moving && p.swing <= 0) {
       // Turn toward the stick, shortest way around.
-      const targetYaw = Math.atan2(mv.x, -mv.y);
+      const targetYaw = Math.atan2(mv.x, mv.z);
       let diff = targetYaw - p.yaw;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
@@ -1082,6 +1186,17 @@ export class Game {
     animateRig(p.mesh, {
       moving, speed: sp, t: this.time,
       attackPhase: p.swing > 0 ? p.swing / 0.34 : 0,
+      // Damage lands when the swing timer crosses 0.17 of 0.34 — half way —
+      // and the skinned rig warps its slash clip so the blade connects on
+      // exactly that frame. Change the 0.17 in the swing-timing block above
+      // and this must follow.
+      attackContact: 0.5,
+      // The combo step picks the clip (slash restart-offsets, punches and
+      // kicks alternate) so mashing does not replay one pose from frame 0.
+      combo: p.comboIndex,
+      // Dash is dressed as the pack's Roll; the 0.26 matches p.dashTimer's
+      // start value in _tryDash. Purely visual — i-frames are p.invuln's.
+      dashPhase: p.dashTimer > 0 ? p.dashTimer / 0.26 : 0,
       hurt: Math.max(0, p.hurt),
       airborne: !p.body.grounded,
       riseRate: p.vel.y,
@@ -1148,6 +1263,10 @@ export class Game {
         e.vel.x += steer.impulseX; e.vel.z += steer.impulseZ;
         if (steer.wantAttack && e.attackCd <= 0) {
           e.telegraph = steer.telegraph;
+          // Remembered so the attack CLIP can start its windup at telegraph
+          // start and land its blow on the exact frame _enemyStrike fires —
+          // the fairness timing itself is untouched.
+          e.telegraphMax = steer.telegraph;
           e.attackCd = e.base.attackCd + Math.random() * (steer.attackKind === 'ranged' ? 0.6 : 0.4);
           noteAttack(e.agent);
         }
@@ -1192,9 +1311,20 @@ export class Game {
       }
 
       const moving = Math.hypot(e.vel.x, e.vel.z) > 0.4;
+      // The attack animation spans TELEGRAPH + STRIKE as one motion: windup
+      // plays while e.telegraph runs down (the enemy stands planted and its
+      // eyes flare — that fairness window is unchanged), and the blow lands on
+      // the exact frame _enemyStrike applies the damage, at telegraphMax into
+      // the span. Before this, the clip only started AFTER the damage, so
+      // every enemy hit you from a standing pose and swung at nothing.
+      const atkSpan = (e.telegraphMax || 0.42) + 0.3;
+      let atkPhase = 0;
+      if (e.telegraph > 0) atkPhase = Math.min(1, (e.telegraph + 0.3) / atkSpan);
+      else if (e.swing > 0) atkPhase = e.swing / atkSpan;
       animateRig(e.mesh, {
         moving, speed: Math.hypot(e.vel.x, e.vel.z), t: this.time + e.pos.x,
-        attackPhase: e.swing > 0 ? e.swing / 0.3 : 0,
+        attackPhase: atkPhase,
+        attackContact: (e.telegraphMax || 0.42) / atkSpan,
         hurt: Math.max(0, e.hurt),
         dt,
       });
@@ -1252,6 +1382,7 @@ export class Game {
       if (b.pattern === 0 && dist < 12) {
         // Slam: telegraphed radial shockwave.
         b.telegraph = 0.75;
+        b.telegraphMax = 0.75;
         b._slam = true;
         this.fx.ring(b.pos, 0xff4d6d, 9, 0.75);
       } else if (b.pattern === 1) {
@@ -1283,6 +1414,7 @@ export class Game {
 
     if (dist < 4.5 && b.attackCd <= 0) {
       b.telegraph = 0.5;
+      b.telegraphMax = 0.5;
       b.attackCd = b.enraged ? 1.5 : 2.2;
     }
   }
@@ -1487,6 +1619,11 @@ export class Game {
     for (let i = this.corpses.length - 1; i >= 0; i--) {
       const c = this.corpses[i];
       c.life -= dt;
+      // The Death clip: entities.js starts it from the standing frame so the
+      // fallen visibly crumple, and this tick is what plays it. It clamps on
+      // its last frame ~1 s in, so the cost after that is one no-op mixer
+      // update per corpse.
+      c.mesh.userData.character?.update(dt);
       const k = Math.max(0, Math.min(1, c.life / CORPSE_WINDOW));
       c.mesh.traverse((o) => {
         if (o.isMesh && o.material.transparent) o.material.opacity = 0.62 * k;
@@ -1517,13 +1654,34 @@ export class Game {
 
   _updateCamera(dt) {
     const p = this.player;
+    const { yaw, pitch } = this.input.look;
     // Lead the camera slightly toward movement so you can see what you're running into.
     tmpV.copy(p.pos).addScaledVector(p.vel, 0.22);
-    // Bias the look target away from the camera so the player sits below centre
-    // and the screen is spent on the ground ahead rather than empty foreground.
-    tmpV.z -= 3.4;
-    this.camLook.lerp(tmpV, Math.min(1, dt * 6));
-    this.camPos.copy(this.camLook).add(this.camOffset);
+    if (yaw === 0 && pitch === 0) {
+      // Untouched orbit reproduces the shipped camera bit for bit — scripted
+      // runs never drag, so this branch is the one every test exercises.
+      // Bias the look target away from the camera so the player sits below
+      // centre and the screen is spent on the ground ahead rather than empty
+      // foreground.
+      tmpV.z -= 3.4;
+      this.camLook.lerp(tmpV, Math.min(1, dt * 6));
+      this.camPos.copy(this.camLook).add(this.camOffset);
+    } else {
+      // Same rig, swung around Y by the player's drag. The look-target bias
+      // slides along the camera's ground forward so the player still sits
+      // below centre from every angle; the boom keeps camOffset's length and
+      // 45° base pitch, +/- the drag's clamped pitch offset.
+      tmpV.x -= Math.sin(yaw) * 3.4;
+      tmpV.z -= Math.cos(yaw) * 3.4;
+      this.camLook.lerp(tmpV, Math.min(1, dt * 6));
+      const boom = Math.hypot(this.camOffset.y, this.camOffset.z);
+      const pa = Math.atan2(this.camOffset.y, this.camOffset.z) + pitch;
+      this.camPos.set(
+        this.camLook.x + Math.sin(yaw) * boom * Math.cos(pa),
+        this.camLook.y + boom * Math.sin(pa),
+        this.camLook.z + Math.cos(yaw) * boom * Math.cos(pa),
+      );
+    }
     this.camera.position.lerp(this.camPos, Math.min(1, dt * 7));
     this.camera.lookAt(this.camLook.x, this.camLook.y + 1.2, this.camLook.z);
     this.fx.applyShake(this.camera);

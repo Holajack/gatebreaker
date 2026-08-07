@@ -1,0 +1,350 @@
+{
+  "summary": "Wave 2 world systems for GATEBOUND (repo slug stays 'gatebreaker'): day/night over the hub and its new frontier, explorable terrain beyond the walls, enterable + taller buildings, codified layout rules, and city life (NPC schedules, hunter NPCs, the Bind companion). Everything below was designed against the code as it exists after the Wave-1 working-tree edits (closer city camera in citymode.js, arena horizon apron + crags in game/world.js, softer below-horizon band in render/sky.js, AND the src/world/citizens.js ambient crowd that City.build already constructs) — those edits are treated as the baseline, not reverted. City-life work in this wave extends citizens.js; it does not add a second crowd module.\n\nFIVE DECISIONS STATED UP FRONT:\n\n(1) ONE CLOCK, ONE LIGHT RIG. The day/night cycle re-tints and re-aims the lights the city already has (one hemi + one directional, no PointLights ever — city.js decision 2 stands). Lights are NEVER added, removed, or castShadow-toggled at runtime: NUM_*_LIGHTS and the shadow-casting-light count are part of three's program cache key, and any change recompiles every material in the scene. The sun and the moon are the SAME DirectionalLight with different colour/intensity/direction. This single rule is what makes day/night affordable on a phone.\n\n(2) THE 15:00 KEYFRAME IS THE SHIPPED GAME. The current city look (SKY_BIOME/CITY_BIOME, key 0xfff0d6 @ 2.45 from (58,74,40), fog 0xb6c6dc 130..430) becomes the late-afternoon keyframe, byte-for-byte. Day one of day/night must render the frame the owner already likes; every other hour interpolates away from it and back.\n\n(3) THE FRONTIER IS STATIC, NOT STREAMED. The explorable land beyond the walls is a second, coarser HeightField (6.8 m cells = exactly 2x the city's 3.4 m) baked once at city build, covering a 560 m square with the west cliff preserved. No chunk streaming, no LOD swaps, no per-frame loading — bounded geometry built with the exact patterns city.js already uses (global instanced fields, one merged ground mesh, everything in owned-disposal arrays). Streaming is the v2 escape hatch if the owner wants a 2 km world later; it is deliberately NOT in this wave. src/world/overworld.js stays dead (it toggles PointLight.visible — the exact recompile bug city.js decision 2 exists to prevent) and should be deleted in this wave along with ow-test.mjs; its one good idea (rank-ordered gate distance) is re-implemented in frontier POIs.\n\n(4) ENTERABLE BUILDINGS ARE FIVE AUTHORED SHELLS, NOT NINETY-TWO PROCEDURAL ONES. The kit audit (below) shows interiors are geometrically free — walls are 0.2 m edge slabs, so every building is already hollow, and open doorway pieces (town_wall_doorway_*) plus floor planks (town_planks) plus one-cell storey stairs (town_stairs_wood) all exist. The real cost is systemic: per-wall collision, the camera boom, and hiding the roof of the one building you are inside — which is incompatible with the global-InstancedMesh strategy the other 87 buildings must keep for draw-call reasons. So the five service buildings (Assay, Ashworks, Exchange, Stash annex, plus a new tavern on Quarter Row) are built as their OWN small merged meshes (mesh.visible toggles are then trivial) and everything else stays a sealed instanced shell. Door-teleport-to-interior-scene is rejected: it breaks the owner's literal ask ('walk into them'), and a second scene lifecycle is more code than five authored shells.\n\n(5) LAYOUT RULES ARE DATA WITH A VALIDATOR, NOT PROSE. The owner asked for 'procedural understanding of video game layouts'. That understanding is codified as Kevin-Lynch-style city imageability mapped to enforceable parameters — paths (streets + frontage), edges (wall/cliff), districts (per-district height/style/prop profiles), nodes (plaza, gates), landmarks (a 5-storey Assay spire with protected sightline corridors from all three land gates). A validateLayout() dev function asserts every rule so the harness can fail a build that regresses them.",
+
+  "auditFindings": {
+    "workingTreeBaseline": [
+      "src/game/modes/citymode.js: CAM_OFFSET is now (0,8,8) with CAM_MIN 3.6 — the closer city camera. Day/night and interiors build on this camera, including its outward-marching boom probe (_clearCameraDistance) which interiors must extend, not replace.",
+      "src/game/world.js: arena now has a fog-tinted apron annulus (radius..2.8r) plus 16 instanced crags with a forked PRNG stream. This is arena-only dressing; the frontier uses the same 'horizon must have shapes on it' language but its own geometry.",
+      "src/render/sky.js: below-horizon band now holds uHorizon flat through the visible band and falls to uGround only well below (smoothstep 0.05..0.65). Day/night keyframes feed the EXISTING uniforms; the only shader additions are a sun/moon disc.",
+      "src/world/city.js + src/world/citizens.js: Wave 1 ALREADY shipped the ambient crowd. City.build constructs new Citizens(this) after _buildHash (they steer with the same resolve() the player uses), City.update ticks it, City.dispose tears it down, and city.stats.citizens reports it. 16 NPCs: 10 civilians (archetype grunt, seeds citizen:0..7 so the refcounted character cache merges duplicates) + 6 hunters (3 lancer + 3 stalker, allowed onto the Breach road where civilians never go). Wander/idle/wave state machine, pairwise chat beats, one-way sidestep around the player, procedural box-villager fallback when characters.glb is absent, castShadow=false on every NPC (skinned depth-program recompile guard, documented in the file). Wave 2 city life EXTENDS this module — it does not add a second crowd system."
+    ],
+    "skyPipeline": [
+      "sky.js colours pass through convertSRGBToLinear() inside makeSky, and three's ColorManagement has ALREADY linearised the hex at construction — so the dome renders one gamma step dark. city.js compensates with a pre-brightened SKY_BIOME palette. THIS CONVENTION IS LOAD-BEARING: every day/night keyframe therefore carries TWO palettes, a scene palette (fog/lights/env) and a sky palette (pre-brightened, fed to the dome uniforms), exactly like CITY_BIOME vs SKY_BIOME today. An agent who 'fixes' the double conversion instead re-tones six dungeons.",
+      "makeSky() already exposes uZenith/uHorizon/uGround/uAccent/uStars/uAurora as live uniforms — the gradient keyframe system needs NO shader change, just per-frame uniform writes. Only the sun disc / moon disc are new shader work.",
+      "env.js PMREM environment is built once per city entry (buildBiomeEnvironment). Re-running PMREM per frame is off the table; v1 modulates scene.environmentIntensity with time of day and keeps the single afternoon env. v2 (optional, separate step) pre-builds 4 keyframe envs at city build (the synthesised 64x32 source costs ~1 ms each) and swaps at phase boundaries.",
+      "glow.js postmortem in city.js (CITY_BIOME comment) is the governing constraint for night: when the base scene gets dark, the additive glow composite pow(1-exp(-g),1/2.2) lands visibly above black and washes the whole frame. Night must therefore keep a luminance floor (moonlit blue-hour, hemi >= 0.30, never true black), window/lamp quads stay OFF GLOW_LAYER (they are toneMapped:false MeshBasic), and the dusk 'portal pop' is done by raising the six portals' own material values, never the global glow strength."
+    ],
+    "shadowPath": [
+      "city.js updateShadowCamera texel-snaps against a MODULE-LEVEL constant _lightDir (58,74,40). A moving sun must make that per-instance state fed from the clock. three re-renders the shadow map every frame anyway, so a moving sun adds no per-frame cost; the real hazard is edge crawl from continuous re-snapping, fixed by QUANTISING the light direction (update the aim vector only when the sun has moved >= 0.75 degrees, i.e. every ~4.8 s of real time at the recommended cycle) while colour/intensity lerp continuously.",
+      "Low tier has shadows:false — the whole moving-shadow question costs nothing there. Never toggle key.castShadow with the sun below the horizon (recompile); at night the same light becomes the moon and keeps casting.",
+      "At sun elevation < 12 degrees, a fitted 22 m ortho shadow frustum produces kilometre shadows and acne. The SHADOW aim vector clamps effective elevation at 12 degrees while the sky dome shows the true lower sun — a standard trick, invisible in practice."
+    ],
+    "cityKitInteriors": [
+      "citykit.json: 245 pieces, 2 m grid, storey height 2.0 in both sub-kits. town_wall* pieces are 0.2 m slabs on the +X CELL EDGE — the current builder rings each floor with them, so EVERY building is already a hollow shell with an empty interior. Nothing about the geometry prevents walking in; collision (one solid footprint box in city.boxes) and the closed-door pieces do.",
+      "OPEN DOORWAYS EXIST: town_wall_doorway_base (64 tris), _round (172), _square (70), _square_wide (46), _square_wide_curved (166), plus wood twins. town_wall_door (376 tris) is the CLOSED door and is what the builder currently places 7% of the time — decorative only.",
+      "UPPER FLOORS EXIST: town_planks [2, 0.12, 2] is a full-cell floor tile; town_planks_half and town_planks_opening (stair hole) complete the set. town_stairs_wood [2.04, 2, 1] climbs one full storey inside one cell (handrail and wide variants exist).",
+      "INTERIOR DRESSING EXISTS in the ruin sub-kit: ruin_bookcase_empty/full, ruin_barrel, ruin_crate, ruin_pot1-3 (+broken), ruin_candles_1/2, town_stall_bench/stool. Dark-stone aesthetic, fine for a tavern/guild interior. Watch triangle cost: bookcase_full is 3,360 tris — use _empty (1,260) by default.",
+      "STACKABILITY VERIFIED: walls span y 0..2 exactly, the builder already stacks 1-3 floors cleanly. Roof family is rich: town_roof (single pitch 1.30 high, the current gable), roof_gable/gable_end/gable_top (real gable-end caps), roof_high* (2.35 steep family for landmarks), roof_flat + town_wall_half (parapet flat-tops for towers of ANY footprint — this is the escape from the 2-cell-gable-axis constraint), roof_corner/corner_inner (L-shaped plans), roof_point (tower caps), town_chimney_top.",
+      "COST OF TALLER: one extra floor on one 2x5-cell wing is ~18 wall pieces at 32-376 tris, roughly 1-2k tris. Raising heights by district profile (below) rather than globally keeps the delta to ~+30-45k tris city-wide against a ~92-building budget. Record the current `npm run test:city` triangle number as the baseline and keep the wave-2 delta <= +20%."
+    ],
+    "natureKit": [
+      "nature.json: 140 pieces, free placement (not gridded), metres, base pivots. Species families each come in green/autumn/dead/snow variants x5 models: birchtree (25), commontree (25), willow (25), pinetree (15), plus palmtree (4), bush/bushberries (6), grass (3), plant (5), flowers, corn (2), wheat, rock/rock_moss/rock_snow (21), treestump (3), woodlog (3), lilypad. Tree triangle range 800-3,000 — bounded counts matter.",
+      "The variant families ARE the frontier's biome dressing: green commons/willows east (meadow), birch+autumn south (amber wood), pine+rock on steep ground, dead+ash ring around the Breach approach north (corruption reads at a glance), snow reserved for a future mountain pass. Zero new assets needed.",
+      "naturekit.js NatureField already handles capacity-fixed instanced placement with castShadow opt-in and the quantisation-preserving offset pattern. The frontier reuses it unchanged."
+    ],
+    "deadCode": [
+      "src/world/overworld.js (353 lines) is imported by NOTHING in src/ (verified by grep; only comments reference it). It uses per-gate PointLights with distance-toggled .visible — the exact program-cache-key recompile bug city.js decision 2 documents. Its only external consumer, ow-test.mjs at the repo root, imports from /home/user/collins-seo-website/... (a different machine). DELETE BOTH in this wave (build-order step 4) rather than leaving a trap for future agents; EXPANSION_SPEC already flagged this file as 'harvest and delete'.",
+      "src/world/terrain.js is HALF-alive: city.js imports { mulberry32, fbm } from it. The Terrain class below those helpers is dead. Keep the file (the helpers are the shared noise library and frontier.js will import them too); the Terrain class may be deleted with overworld.js or left — it is 100 lines of pure maths with no GPU footprint."
+    ],
+    "cityLifeSubstrate": [
+      "src/world/citizens.js IS the substrate (see workingTreeBaseline): roster, spawn, street-biased wander (_pickPoint), social/wave beats, player sidestep, procedural fallback, disposal — all working today. Schedules bolt onto _pickPoint (per-phase anchor bias) and _setState; the companion and the hunter portal-walk beat are new behaviours inside the same file. Citizens deliberately steer WITHOUT navgrid (straight-line legs + resolve() + stuck-shrug) and that stays the default — it is allocation-free and has already survived a playtest.",
+      "navgrid.js is a FLOW-FIELD grid (setGoal + flowAt), not A*. Baked per-goal fields remain an OPTION if schedule anchors ever need door-accurate arrival (e.g. walking into an interior), but v1 schedules do not require them: an anchor-biased _pickPoint leg that ends within ~3 m of a stall reads as 'going to work' at zero pathfinding cost. Do not bake 7 fields speculatively.",
+      "characters.glb has 21 civilian models (11 men + 10 women, 6.5-10k tris each) on 2 shared rigs (male/female) with clips: Walk, Run, Idle, Idle_Neutral, Interact, Wave, Sword_Slash etc. (no Sit clip — use Idle at benches). SkeletonUtils.clone is mandatory for every skinned instance (repo constraint; .clone() breaks skinning); characters.js caps skinned count per quality tier and citizens.js already degrades overflow to the procedural villager.",
+      "shadows.js is THREE-free roster data with grades and generated names — the city companion reads save.shadows.roster directly; no new data model needed."
+    ]
+  },
+
+  "dayNight": {
+    "concept": "A 24-minute real-time cycle (1 real minute = 1 game hour) shared by the city and the frontier. Gates/dungeons stay frozen at their authored biome light — a rift has no sun, which is both lore-consistent and a large scope cut. Time keeps advancing while you are inside a gate, so you emerge to a different hour: clearing a dungeon and stepping out into a sunset is the intended signature moment and costs nothing.",
+    "cycleLengthRationale": "Owner sessions are gate runs of a few minutes with hub visits between. At 24 min/cycle: a 3-minute hub visit visibly moves the light; a typical 40-60 minute evening session sees ~2 full cycles including at least one sunrise AND one sunset ('sunrise sunset all those aspects'); dawn/dusk each hold the screen for ~90 s — long enough to notice, short enough never to feel stuck in the dark. Night (20:00-05:00) is 9 game-hours = 9 real minutes; acceptable because night is a look, not a gameplay penalty (no stat changes in v1). Clock persists in save (save.worldTime, hours float 0..24). On cold app start, if the saved hour is deep night (22:00-04:00), nudge to 05:10 so the session opens with a sunrise — a deliberate bias toward the owner's ask.",
+    "clockOwnership": "game.js owns a WorldClock instance (from daynight.js); citymode ticks it in updateAlways so it runs even when a menu is up; gate modes tick it too but apply nothing visually. save.worldTime written on the existing save cadence.",
+    "sunPath": "Azimuth sweeps a 190-degree arc ENE (sunrise 06:00) to WSW (sunset 19:12), elevation peaking at 62 degrees at 12:36. The 15:00 keyframe's direction is EXACTLY normalize(58,74,40) — the shipped light — and the path is fitted through it. The moon runs the counter-arc at max elevation 40 degrees with intensity 0.55. One DirectionalLight serves both; between 19:12 and 20:00 (and 05:00-06:00) the light crossfades colour/intensity through the horizon swap without ever hitting zero (floor 0.18) so shadowed surfaces never go black.",
+    "keyframes": {
+      "note": "Sampler lerps in linear colour space between adjacent keyframes by hour with smoothstep easing. scenePalette drives fog colour, hemi sky/ground, key colour/intensity, environmentIntensity, window/lamp/portal ramps. skyPalette is the PRE-BRIGHTENED dome palette (the SKY_BIOME convention — see auditFindings.skyPipeline). Values below are the design targets; the implementing agent tunes against rendered frames exactly as city.js's grass comment prescribes, EXCEPT the 15:00 row which is a byte-for-byte contract.",
+      "rows": [
+        { "hour": 0.0,  "name": "deep night",  "scenePalette": { "fog": "0x1c2138", "keyColor": "0x9fb4e8", "keyIntensity": 0.55, "hemiSky": "0x2c3560", "hemiGround": "0x1e2233", "hemiIntensity": 0.34, "envIntensity": 0.30 }, "skyPalette": { "zenith": "0x0e1430", "horizon": "0x232a4a", "ground": "0x11131f", "accent": "0x7c5cff" }, "stars": 1.0, "aurora": 0.45, "windowGlow": 1.0, "lampGlow": 1.0, "portalBoost": 1.6, "sunDisc": 0.0, "moonDisc": 0.8 },
+        { "hour": 5.0,  "name": "pre-dawn",    "scenePalette": { "fog": "0x3d3f58", "keyColor": "0xb8c2e0", "keyIntensity": 0.45, "hemiSky": "0x46507a", "hemiGround": "0x2a2c3d", "hemiIntensity": 0.40, "envIntensity": 0.35 }, "skyPalette": { "zenith": "0x1c2440", "horizon": "0x4a4668", "ground": "0x1a1c2a", "accent": "0x8a6cd0" }, "stars": 0.6, "aurora": 0.25, "windowGlow": 0.7, "lampGlow": 0.8, "portalBoost": 1.3, "sunDisc": 0.0, "moonDisc": 0.4 },
+        { "hour": 6.5,  "name": "sunrise",     "scenePalette": { "fog": "0xd9a37c", "keyColor": "0xffb36b", "keyIntensity": 1.45, "hemiSky": "0x7a86b8", "hemiGround": "0x4a4438", "hemiIntensity": 0.70, "envIntensity": 0.70 }, "skyPalette": { "zenith": "0x4a6a9e", "horizon": "0xf5b57a", "ground": "0x6a5c50", "accent": "0xffc98a" }, "stars": 0.12, "aurora": 0.0, "windowGlow": 0.35, "lampGlow": 0.3, "portalBoost": 1.0, "sunDisc": 0.9, "moonDisc": 0.0 },
+        { "hour": 9.0,  "name": "morning",     "scenePalette": { "fog": "0xc4d2e4", "keyColor": "0xfff4dd", "keyIntensity": 2.2, "hemiSky": "0x86aede", "hemiGround": "0x5d6a4c", "hemiIntensity": 1.0, "envIntensity": 0.95 }, "skyPalette": { "zenith": "0x9cc0ee", "horizon": "0xe6edf6", "ground": "0x9aa885", "accent": "0xfff0d8" }, "stars": 0.0, "aurora": 0.06, "windowGlow": 0.15, "lampGlow": 0.0, "portalBoost": 1.0, "sunDisc": 0.6, "moonDisc": 0.0 },
+        { "hour": 12.5, "name": "noon",        "scenePalette": { "fog": "0xc9d6e6", "keyColor": "0xfff8ec", "keyIntensity": 2.6, "hemiSky": "0x7fb0e6", "hemiGround": "0x66744f", "hemiIntensity": 1.1, "envIntensity": 1.0 }, "skyPalette": { "zenith": "0x6fa8e8", "horizon": "0xe8eef6", "ground": "0xa2b08c", "accent": "0xffffff" }, "stars": 0.0, "aurora": 0.0, "windowGlow": 0.1, "lampGlow": 0.0, "portalBoost": 1.0, "sunDisc": 0.55, "moonDisc": 0.0 },
+        { "hour": 15.0, "name": "afternoon (SHIPPED LOOK — CONTRACT)", "scenePalette": { "fog": "0xb6c6dc", "keyColor": "0xfff0d6", "keyIntensity": 2.45, "hemiSky": "0x74a2da", "hemiGround": "0x5d6a4c", "hemiIntensity": 1.05, "envIntensity": 1.0 }, "skyPalette": { "zenith": "0xb6d3f5", "horizon": "0xdfe8f4", "ground": "0x9aa885", "accent": "0xffeccd" }, "stars": 0.0, "aurora": 0.12, "windowGlow": 0.2, "lampGlow": 0.0, "portalBoost": 1.0, "sunDisc": 0.5, "moonDisc": 0.0 },
+        { "hour": 18.5, "name": "sunset",      "scenePalette": { "fog": "0xe0a988", "keyColor": "0xff9a4d", "keyIntensity": 1.6, "hemiSky": "0x9080a8", "hemiGround": "0x54463c", "hemiIntensity": 0.75, "envIntensity": 0.70 }, "skyPalette": { "zenith": "0x5a5a96", "horizon": "0xffb376", "ground": "0x6a5648", "accent": "0xff9e66" }, "stars": 0.05, "aurora": 0.0, "windowGlow": 0.5, "lampGlow": 0.4, "portalBoost": 1.2, "sunDisc": 1.0, "moonDisc": 0.0 },
+        { "hour": 19.8, "name": "dusk (portal hour)", "scenePalette": { "fog": "0x5a5478", "keyColor": "0xc0a8d8", "keyIntensity": 0.7, "hemiSky": "0x585c8e", "hemiGround": "0x322e42", "hemiIntensity": 0.50, "envIntensity": 0.45 }, "skyPalette": { "zenith": "0x2a3060", "horizon": "0x8a6a9e", "ground": "0x2a2438", "accent": "0xb08ae0" }, "stars": 0.35, "aurora": 0.2, "windowGlow": 0.9, "lampGlow": 1.0, "portalBoost": 1.6, "sunDisc": 0.15, "moonDisc": 0.2 },
+        { "hour": 22.0, "name": "night",       "scenePalette": { "fog": "0x1c2138", "keyColor": "0x9fb4e8", "keyIntensity": 0.55, "hemiSky": "0x2c3560", "hemiGround": "0x1e2233", "hemiIntensity": 0.32, "envIntensity": 0.30 }, "skyPalette": { "zenith": "0x0e1430", "horizon": "0x232a4a", "ground": "0x11131f", "accent": "0x7c5cff" }, "stars": 1.0, "aurora": 0.4, "windowGlow": 1.0, "lampGlow": 1.0, "portalBoost": 1.6, "sunDisc": 0.0, "moonDisc": 0.7 }
+      ]
+    },
+    "duskPortalGlow": "The owner-visible payoff. portalBoost multiplies ONLY the six portals' own material values: oval colour multiplier 0.55 -> up to 0.80, ring emissiveIntensity 0.85 -> up to 1.35, ground-marker opacity 0.26 -> up to 0.38. GLOW_LAYER membership does not change and global glow strength is untouched — the city.js glow-wash postmortem stays satisfied because the night scene keeps a blue-hour floor (hemi >= 0.30, key >= 0.18) instead of going black.",
+    "windowsAndLamps": "The lit-window InstancedMesh and lamp-bulb InstancedMesh each have ONE shared toneMapped:false MeshBasicMaterial — the ramp is one material.color.setHex-and-multiplyScalar per frame per material (two writes total). Day: windows fall to 0.15 (dim glass, reads as reflection), lamp bulbs to 0.0-dark warm (0x4a4038, unlit lamp glass). Night: both to full. This also fixes the current honesty bug of lamps glowing at 3 pm.",
+    "fog": "scene.fog.color lerped per frame (free). Fog near/far tighten ~12% at night (130..430 -> 114..378) for mystery and to hide the frontier's far edge sooner; lerped, never stepped.",
+    "skyShaderAdditions": "Two new uniforms on the existing dome material: uSunDir (vec3) + uSunColor (vec3, doubles as moon colour) and uDiscs (vec2: sun disc intensity, moon disc intensity). Fragment adds a smoothstep disc + soft forward-scatter lobe around uSunDir (~8 ALU) and mirrors it for the moon at -uSunDir. Defaults (0,0) render the dome EXACTLY as today so arenas and every existing test are untouched. The existing horizon rift band's azimuth lobe (hardcoded az 0.75) gains uAccentAz so it can track the sun at dawn/dusk; default 0.75 preserves current output.",
+    "perfNotes": [
+      "Per-frame cost of the whole system: ~30 lerps + ~12 uniform/colour writes + one quantised light re-aim every ~5 s. No allocations (sampler writes into caller-owned scratch objects), no material swaps, no light count changes, no PMREM work.",
+      "Shadow map: already re-rendered every frame by three; sun motion adds zero draws. Direction quantisation (>= 0.75 deg steps) keeps updateShadowCamera's texel snap stable between steps so edges do not crawl.",
+      "Quality tiers: low (shadows off) skips the shadow elevation clamp entirely; all tiers run the sampler (it is arithmetic). The v2 four-keyframe PMREM env swap is gated to medium+ if built at all.",
+      "Program-count invariance is THE regression to test: renderer.info.programs.length must be identical before and after a full 24 h fast-forward. Any drift means something toggled a light or a material feature."
+    ]
+  },
+
+  "frontier": {
+    "concept": "The land outside the walls, named THE VERGE in UI toasts. North/east/south open into walkable wilds out to ~260 m from the plaza; the west cliff stays the end of the world (the owner liked the edge — the cliff is the one place the world still visibly stops). Rank-flavoured POIs give walking a purpose: ruins to loot-look at, hunter camps that sell the fiction, and two wild gates that reuse the portal system.",
+    "terrainApproach": "REJECTED: growing the city HeightField to 900 m (140k ground tris at 3.4 m cells — triple the ground budget, most of it 200 m away) and chunk streaming (a whole system for a 560 m map). CHOSEN: a second HeightField instance (existing class, no new maths) at cell 6.8 — exactly 2x the city cell so seam vertices coincide — size 560, same seed, whose raw() is the CITY's raw() minus the three-sided edge-lip term. city.js's lip (the r 140..156 dropoff) becomes west-only + a new frontier lip at r 264..278, so the world still ends in sky, just further out. The Breach uphill bump and ash ring carry over unchanged since both fields sample the same fbm.",
+    "seam": "The city ground mesh still covers |x|,|z| <= 170; the frontier annulus mesh spans 158..280 with its inner 2 rings sunk 0.08 m under the city mesh across the dry belt (gentle terrain, fog-lit — the T-junction crack is buried, standard LOD skirt). heightAt authority: city.field inside r 166, frontier.field outside r 174, linear blend in between; both fields bake the same analytic surface so the blend band disagreement is centimetres. citymode's bound _height/_resolve/_normal closures DO NOT change — City delegates internally (city.frontier is built and disposed by City.build/dispose, so the disposal registry and the spatial hash stay single-owner).",
+    "walkLimits": "WALK_LIMIT (134) becomes VERGE_LIMIT 258 on north/east/south. West stays CLIFF_X+1 for |z| < WALL_HALF and — the citymode.js VOID_Y comment documents the gap — the cliff line continues as a frontier fence north and south of the wall so the Breach road can no longer stroll off the 34 m drop. The _recoverFromVoid rescue stays as the belt-and-braces layer.",
+    "groundMesh": "Same non-indexed face-coloured language as the city ground (city.js pass-2 pattern): annulus 158..280 at 6.8 m cells is ~5.5k quads = 11k tris. Palette continues the city's dry-belt-to-wild gradient: dry 0xa08f60 near the wall, meadow greens east, amber south, ash 0x5c5763 widening around the Breach, rock on slopes. Face-constant luminance jitter +-10%.",
+    "biomeBands": {
+      "east_meadow":  { "arc": "azimuth -60..60 deg", "dressing": "commontree_1-5, willow_1-5, bush/bushberries, grass, flowers, wheat+corn patch near the hunter farmstead camp" },
+      "south_amberwood": { "arc": "azimuth 60..170 deg", "dressing": "birchtree_1-5 + birchtree_autumn_1-5, plant_*, treestump, woodlog" },
+      "north_ashreach": { "arc": "azimuth 190..300 deg (Breach side)", "dressing": "commontree_dead_*, willow_dead_*, rock (no moss), ruin_* rubble scatter thickening toward the S portal" },
+      "slopes_everywhere": { "arc": "slope > 0.28", "dressing": "pinetree_1-5, rock_moss_*" }
+    },
+    "scatterBudget": "Global NatureFields (NOT per-chunk — static build, city.js decision 3 applies): trees 220, bushes 120, rocks 160, ground tufts 140 near paths only, all x quality instanceScale, all capacity-fixed, solids into city.obstacles BEFORE _buildHash. Estimated 350-500k scatter tris at density 1 — comparable to one character mesh per ~20 trees; verify against the recorded city-test baseline and thin species counts, never add a culling system.",
+    "pois": [
+      { "id": "verge_ruin_arch",  "stamp": "ruin arch cluster: 2x ruin_arch_gothic + ruin_column_round x5 + ruin_wall_broken ring + ruin_floor_squarelarge pad", "note": "the postcard POI — visible from the east gate sightline" },
+      { "id": "verge_ruin_hall",  "stamp": "roofless hall: ruin_wall_archround perimeter + ruin_window_bars + ruin_bookcase_empty x2 + ruin_pot scatter", "note": "interior-without-a-roof, teaches 'ruins can be entered' for free" },
+      { "id": "verge_watchtower", "stamp": "3-storey town-kit tower on 2x2 cells: stone walls + town_wall_half parapet + roof_flat + exterior switchback of town_stairs_stone (no spiral piece exists in the kit — do not invent one)", "note": "the stackability demo and a skyline landmark for the frontier" },
+      { "id": "camp_hunters_east", "stamp": "town_stall + town_cart + bench x2 + fence arc + campfire (procedural flame quad, toneMapped:false, NO light) + 2 hunter NPCs at high tier", "note": "fiction: other hunters stage here before gates" },
+      { "id": "camp_farmstead",   "stamp": "fence field + wheat/corn rows + cart + 1 NPC", "note": "east meadow anchor" },
+      { "id": "wildgate_e", "stamp": "portal build (shared with city portals) rank E, wild:true", "note": "" },
+      { "id": "wildgate_c", "stamp": "portal build rank C, wild:true, locked until save.level >= 11", "note": "" }
+    ],
+    "poiRules": "Seeded findSpot placement with: >= 55 m between POIs, >= 30 m outside the wall, >= 40 m from the Breach ash ring (except ash-side rubble), slope < 0.3, never west of CLIFF_X. Each POI carves a field.addFlat pad exactly like districts do. First entry within a POI's radius fires a one-time named toast (existing district-banner pattern) — that IS the discovery system, no map pins in v1.",
+    "wildGates": "Wild gates reuse the city portal construction (extract the dais/oval/ring/marker builder from city._buildPortals into a shared helper in the same file, exported as buildPortalVisual — city.js is the owner, frontier calls it). They append to city.portals with wild:true so portalAt/nearestPortal/compass/prompt code paths work unmodified. Entering routes through the existing g.enterGate(rank) with a seed offset — same dungeon system, different doorstep. v2 hook: wild gates reroll rank on a daily seed.",
+    "birdsEyeNote": "From the Breach road rise the frontier reads as three coloured wedges (green east / amber south / grey north) around the walled town — the bird's-eye identity the owner asked about, delivered by palette bands rather than new systems."
+  },
+
+  "buildings": {
+    "enterableApproach": "TRUE INTERIORS for the five service buildings; door-teleport rejected (see summary decision 4). The five are rebuilt as authored merged meshes (per-building groups of 2-4 draw calls: shell, roof, interior dressing) EXCLUDED from the global wall/roof InstancedMesh fields. Everything else keeps the sealed instanced shell — with better doors: sealed buildings now place town_wall_doorway_base with a recessed dark panel OR keep town_wall_door; either way a doorway that does not open never gets a prompt, so no false affordance.",
+    "interiorSpec": {
+      "floorplan": "Ground floor only in v1. Interior clear space is the building footprint minus the 0.2 m wall slabs; min viable footprint 3x2 cells (6x4 m). Door cell uses town_wall_doorway_square_wide (46 tris, open); the collision box for that wall run splits into two segments leaving a 1.6 m gap.",
+      "collision": "Replace the single footprint box with 4 wall-run boxes (0.2 thick, matching slab positions) + interior furniture circles. city.boxes already supports arbitrary rects; navgrid re-bakes with the same data so NPCs can path inside. The camera boom's _boomBlocked box test must ALSO switch to the wall-run boxes for these five buildings, else the boom refuses to follow the player inside.",
+      "camera": "Interior camera state in citymode: when the player is inside an enterable footprint (point-in-rect, hysteresis 0.5 m), that building's roof mesh and upper-wall mesh set .visible=false and the boom clamps to 5.0 m with pitch preserved. On exit both restore. Because the five buildings own their meshes, this is two visibility flips — the reason decision 4 chose authored shells.",
+      "lighting": "No new lights (decision 1 of this spec, decision 2 of city.js). Interiors read by: hidden roof letting key+hemi in (the flat-shaded style makes this look intentional), warm window quads inside at night, a 15% darker vertex paint on interior wall faces so inside reads as inside. Honest limitation: interiors are flat-lit; acceptable in this art style, revisit only if the owner objects on-device.",
+      "dressing": { "assay": "counter (stall_bench), ruin_bookcase_empty x2, candles, the Sealed Stair door at the back (existing interactable relocates inside)", "ashworks": "barrels, crates, weapon stall, banner", "exchange": "stall + crates + pots (the stash chest interactable moves inside)", "tavern_row": "benches x3, stools, barrels, fireplace alcove (flame quad)", "stash_annex": "crates + trapdoor prop" }
+    },
+    "tallerBuildings": "District height profiles (see layoutPrinciples.districtProfiles) raise the skyline where it reads: plaza-facing civic rows to 3-4 storeys with the roof_high family, one 5-storey Assay spire with roof_point as the city's landmark, Quarter Row stays 1-2 so the town has a shape instead of a uniform extrusion. The 2-cell gable-axis rule still governs pitched roofs; flat-roof + parapet (roof_flat + town_wall_half) unlocks taller square towers on any footprint and is what the spire uses. Gable ends get town_roof_gable_end caps instead of today's bare wedge ends — the single cheapest silhouette upgrade in the kit (50 tris each).",
+    "budgets": "BUILDING_BUDGET stays 92. Expected deltas: +30-45k tris from taller profiles, +8-12k from five interiors, +11k frontier ground, +350-500k frontier scatter at density 1 (dominated by trees; scaled by instanceScale per tier). Draw calls: +~15 (five authored buildings) + ~10 (frontier nature fields reuse species fields where keys match). Acceptance: record `GB_PORT=<port> npm run test:city` triangle/drawGroups baseline BEFORE step 8 lands and assert the final city stays within +20% triangles and +30 draw groups."
+  },
+
+  "layoutPrinciples": {
+    "theory": "Kevin Lynch's five imageability elements mapped onto this town, so the rules below are principled rather than taste: PATHS = streets with building frontage (already enforced by anchor-near-street placement); EDGES = the wall and the west cliff (already strong); DISTRICTS = per-district identity profiles (new); NODES = plaza and the three land gates (already built, now protected); LANDMARKS = the Assay spire + portal ring + frontier watchtower (new). The owner's 'not just duplicating things for no reason' is the anti-repetition rule: variation must be legible from both eye level AND bird's eye.",
+    "rulesAsData": "Exported as LAYOUT_RULES from src/world/layoutrules.js and consumed by city._layout/_buildProps AND by validateLayout(city) so the harness asserts what the builder enforces — one source of truth.",
+    "parameters": {
+      "frontageMax": { "value": 22, "meaning": "max metres from a street for any building anchor (codifies the existing behaviour)" },
+      "sightlineCorridors": { "value": [ { "from": "north gate (0,-88)", "to": "plaza", "halfWidth": 8, "maxFloors": 2 }, { "from": "east gate (88,0)", "to": "plaza", "halfWidth": 8, "maxFloors": 2 }, { "from": "south gate (0,88)", "to": "plaza", "halfWidth": 8, "maxFloors": 2 } ], "meaning": "walking in any land gate must show the plaza pillar ring / spire: buildings whose footprint intersects the corridor strip are capped at 2 floors, and the spire must be the tallest object in each corridor's background" },
+      "minSpacing": { "value": { "fountains": 45, "benches": 6, "stalls_outside_market": 9999, "poi_frontier": 55, "identicalSilhouettePair": 12 }, "meaning": "same-type minimum distances; stalls only exist in the Exchange market zone; two buildings within 12 m may not share all three of {style, floors, ridge orientation}" },
+      "antiRepetition": { "value": "maxIdenticalRun 2", "meaning": "along any street, at most 2 consecutive buildings with identical (style+floors+ridge) tuple; _layout mutates floors +-1 or flips style on violation" },
+      "desireLines": { "value": "everyDistrictPadToPlazaTurns <= 1", "meaning": "already true of the street plan; validator asserts it survives future street edits by walking the street graph" },
+      "landmarkHeights": { "value": { "spire": 5, "civicRow": [3,4], "watchtowerVerge": 3 }, "meaning": "exactly one 5-storey building exists (the spire); the frontier watchtower is the only >2-storey structure outside the walls" }
+    },
+    "districtProfiles": {
+      "plaza_ring": { "styles": ["stone","civic"], "floors": [3,4], "roof": "roof_high family + gable_end caps", "props": "pillars+banners (existing)" },
+      "assay":      { "styles": ["stone"], "floors": [3,5], "roof": "spire: flat+parapet+roof_point", "props": "braziers (unlit meshes)" },
+      "ashworks":   { "styles": ["stone","brick"], "floors": [2,3], "roof": "roof + chimney_top on 60%", "props": "barrels, carts" },
+      "exchange":   { "styles": ["brick","timber"], "floors": [2,3], "roof": "roof + awnings (town_overhang)", "props": "stalls+carts (existing)" },
+      "row":        { "styles": ["timber","timber","stone"], "floors": [1,2], "roof": "roof + gable_end", "props": "hedges, fences, benches (existing), tavern" },
+      "outskirts":  { "styles": ["timber"], "floors": [1,1], "roof": "roof", "props": "rocks (existing)" }
+    },
+    "validator": "validateLayout(city) runs in dev/harness only (never on-device): asserts every parameter above plus zero building overlap on the occupancy grid, every doorway cell adjacent to walkable navgrid, and the corridor rule via footprint-vs-strip intersection using the retained layout metadata (city keeps the buildings array from _layout as city.layoutMeta — a few KB, dev-invaluable)."
+  },
+
+  "cityLife": {
+    "baseline": "src/world/citizens.js already ships the crowd (see auditFindings): 16 NPCs = 10 civilians + 6 hunters, wander/idle/wave/chat, one-way player sidestep, procedural fallback, no shadows, no glow, disposed with the city. Everything below is an EXTENSION of that file — any agent who starts a parallel 'citylife' system has misread the tree.",
+    "population": "Keep COUNT=16 with the existing degrade path: characters.js caps skinned instances per tier and overflow becomes the procedural box-villager, which the playtest already accepted. ONE tier change: at low, cut COUNT itself to 8 (8 box-people animating off-screen is CPU spent on a tier that is struggling by definition). NO rim/emissive/glow of any kind on NPCs (hard constraint: no glow on living characters); citizens.js already enforces glow:0xffffff/eyes:false — keep it that way.",
+    "schedules": "A phase table, not a per-NPC planner: SCHEDULE = { dawn:[5,7], day:[7,17], dusk:[17,20], night:[20,5] } with per-phase _pickPoint anchor weights. DAWN: civilian targets bias 60% toward the Exchange market strip and fountain; DAY: current behaviour unchanged (it is already good); DUSK: bias 60% toward Quarter Row + the tavern door pad; NIGHT: 4 of 10 civilians remain (the rest fade out via root.visible=false when >25 m from the player AND off-camera — never de-pop in view), remaining walkers hold near lanterns, hunters unaffected (the Breach road at night is exactly where hunters belong). Per-NPC phase offset +-40 game-minutes (a float on the npc record at spawn) so shift changes never look choreographed. Implementation surface: City.applyDayState passes the sampled hour into citizens.update — _pickPoint reads this.phaseHour, ~40 lines total.",
+    "movement": "UNCHANGED: straight-line legs + city.resolve() + the stuck-shrug (_newTarget after 1.2 s of no progress) — allocation-free and proven. The schedule only changes WHERE _pickPoint aims, never HOW walking works. Flow fields stay out of v1 (see cityLifeSubstrate). One new cheap win: throttle inst.animate to every other frame for NPCs beyond 30 m from the camera (mixer cost is CPU-side and does not shrink with pixel ratio — characters.js documents this).",
+    "hunterNPCs": "The 6 hunters exist; give them the portal beat: every 3-6 game-hours a hunter rolls a walk to a random UNLOCKED portal dais, faces it for 4-8 s, then despawns in a brief scale-down + the portal's existing pulse (no new effect), respawning 30-90 s later walking IN from a wall gate. Two rules: never the portal the player is currently prompted at (a body vanishing under your prompt reads as a bug), and at most one hunter mid-beat at a time. Sells 'other hunters use these gates' for ~60 lines inside citizens.js.",
+    "companion": "One Bind-ed shadow from save.shadows.roster (first slot) walks the city with the player: heel at 2.5 m using the same sidestep steering the citizens use, idles when the player idles > 10 s, teleports behind the player past 25 m separation. Visual: the existing shadow-army unit treatment (dark desaturated clone via the creatures/characters shadow path, restrained dark wisp particles — the ONE permitted glow category, kept subtle), never a rim light. Lives in citizens.js as a special roster slot (hunter:false, companion:true) so it inherits spawn/dispose/sidestep for free; reads game.save at City.build via the save param city.build already receives. In v1 it is cosmetic (no combat in city/frontier); it does NOT enter interiors (parked at the door — cheaper than door-width pathing and reads as 'waiting').",
+    "budget": "Worst case stays what Wave 1 already spends: 16 skinned NPCs + 1 companion ~ 160k tris + 17 mixers at the 30 fps city target, minus the half-rate mixer saving. All new behaviour is arithmetic on existing records; zero per-frame allocation (phase table and anchor weights are module constants; the companion reuses the _wp scratch pattern)."
+  },
+
+  "modules": [
+    {
+      "path": "src/render/daynight.js",
+      "status": "new",
+      "purpose": "The world clock and the keyframe sampler. Pure data + arithmetic, THREE used only for Color/Vector3 scratch — designed to be unit-testable in node without a browser. Owns the keyframe table (dayNight.keyframes above), the sun/moon path maths, and the persistence contract with save.js.",
+      "exports": [
+        "export const CYCLE_MINUTES = 24;",
+        "export const KEYFRAMES = [...];   // the table from this spec, scenePalette+skyPalette per row",
+        "export class WorldClock { constructor({ hours = 15.0 } = {}) }",
+        "WorldClock.tick(dtSeconds) -> void            // advances hours by dt * 24 / (CYCLE_MINUTES * 60)",
+        "WorldClock.hours -> number                    // 0..24 float, the save field",
+        "WorldClock.setHours(h) -> void",
+        "WorldClock.sample(out) -> out                 // fills a caller-owned DayState, zero allocation",
+        "export function makeDayState() -> DayState    // { sunDir:Vector3, shadowDir:Vector3, keyColor:Color, keyIntensity, hemiSky:Color, hemiGround:Color, hemiIntensity, fogColor:Color, fogScale, envIntensity, sky:{zenith:Color,horizon:Color,ground:Color,accent:Color,accentAz}, stars, aurora, windowGlow, lampGlow, portalBoost, sunDisc, moonDisc }",
+        "export function bootBias(hours) -> number     // 22:00-04:00 -> 5.17, else identity"
+      ],
+      "dependsOn": [],
+      "notes": "shadowDir is sunDir with elevation clamped >= 12 deg and quantised to 0.75 deg steps (auditFindings.shadowPath); sample() computes both so consumers never re-derive. The 15:00 sample MUST reproduce the shipped constants exactly — encode that as the module's own self-test export (export function _verifyAnchor()) so the harness and node can both call it."
+    },
+    {
+      "path": "src/render/sky.js",
+      "status": "modified",
+      "purpose": "Sun/moon disc + steerable accent-band azimuth, added behind defaults that render today's output bit-for-bit when unset.",
+      "exports": [
+        "export function makeSky(biome, { stars = 1.0, aurora = 0.55, sun = false } = {})   // sun:true adds uSunDir/uSunColor/uDiscs/uAccentAz uniforms",
+        "export function updateSkyState(skyMesh, dayState) -> void   // writes sampler colours + sun uniforms; no-op fields skipped when sun:false"
+      ],
+      "dependsOn": ["src/render/daynight.js (DayState shape only)"],
+      "notes": "KEEP the double-linear convention: updateSkyState feeds dayState.sky.* (the PRE-BRIGHTENED palette) through the same convertSRGBToLinear path the constructor uses — the sampler stores sky palettes already-brightened, mirroring SKY_BIOME. Arena/dungeon callers pass no sun option and are untouched; existing uZenith etc. stay live uniforms so updateSkyState only writes values."
+    },
+    {
+      "path": "src/world/city.js",
+      "status": "modified",
+      "purpose": "Four bounded changes: (a) applyDayState(state) — per-frame light/fog/env/window/lamp/portal ramps + dynamic shadow snap dir; (b) raw() edge lip becomes west-only when frontier is enabled + VERGE_LIMIT resolve bound + frontier delegation in heightAt/resolve/groundNormal; (c) _layout consumes LAYOUT_RULES + districtProfiles (taller buildings, anti-repetition, corridors) and retains city.layoutMeta; (d) _buildPortals extracts buildPortalVisual(group, rank, color, scale) as an export and skips the five enterable buildings when filling global fields.",
+      "exports": [
+        "City.applyDayState(dayState) -> void",
+        "export function buildPortalVisual(parent, { rank, color, scale, locked }) -> { dais, oval, ring, marker }   // shared with frontier wild gates",
+        "City.frontier -> Frontier | null",
+        "City.layoutMeta -> Array<building>   // retained _layout output for validateLayout",
+        "City.build(seed, save, { frontier = true } = {})"
+      ],
+      "dependsOn": ["src/render/daynight.js", "src/world/frontier.js", "src/world/layoutrules.js", "src/world/interiors.js"],
+      "notes": "updateShadowCamera's module-level _lightDir constant becomes per-City state fed by applyDayState (quantised — see daynight.js). The hemi/key handles already exist (this.hemi/this.key). Window+lamp shared materials get stored refs at build for the two per-frame colour writes. ALL new geometry/materials continue into _ownedGeometries/_ownedMaterials — the GPU-leak rule is absolute."
+    },
+    {
+      "path": "src/world/frontier.js",
+      "status": "new",
+      "purpose": "The Verge: coarse HeightField annulus, biome-banded ground mesh, nature scatter, POI stamps, wild gates. Built by City.build when opts.frontier, added to the city group, disposed with the city.",
+      "exports": [
+        "export const VERGE_LIMIT = 258;",
+        "export class Frontier { constructor(city, rnd) }",
+        "Frontier.build() -> this            // ground, scatter, POIs, wild gates; appends obstacles/boxes to city arrays BEFORE city._buildHash",
+        "Frontier.heightAt(x, z) -> number   // coarse field",
+        "Frontier.update(dt, playerPos) -> void   // POI discovery toasts, campfire flicker, wild-gate pulse phases",
+        "Frontier.pois -> Array<{ id, pos, radius, discovered }>",
+        "Frontier.dispose() -> void"
+      ],
+      "dependsOn": ["src/world/terrain.js (mulberry32, fbm)", "src/world/naturekit.js", "src/world/citykit.js", "src/world/city.js (buildPortalVisual, HeightField pattern)"],
+      "notes": "Frontier's raw() must be the city's raw() minus the 3-sided lip — implement by exporting the shared base function from city.js rather than copying it, so the two can never drift. Wild gates append to city.portals with wild:true (compass/prompt/portalAt come free). The seam skirt and blend band per frontier.seam. NO PointLights, no per-chunk fields, everything capacity-fixed."
+    },
+    {
+      "path": "src/world/layoutrules.js",
+      "status": "new",
+      "purpose": "LAYOUT_RULES + DISTRICT_PROFILES as data, plus validateLayout(). Zero runtime cost on device: city._layout imports the data; the validator is only invoked by tools/.",
+      "exports": [
+        "export const LAYOUT_RULES = {...};       // parameters table from this spec",
+        "export const DISTRICT_PROFILES = {...};  // districtProfiles table from this spec",
+        "export function validateLayout(city) -> { ok: boolean, violations: Array<{ rule, detail }> }"
+      ],
+      "dependsOn": [],
+      "notes": "Validator walks city.layoutMeta + city.streets + city.boxes. Corridor test: strip-vs-footprint intersection with floors cap. Anti-repetition test: street-ordered building tuples. Keep it dependency-light (no THREE) so node can import it directly in tests."
+    },
+    {
+      "path": "src/world/interiors.js",
+      "status": "new",
+      "purpose": "The five enterable service buildings as authored merged shells with open doorways, interior dressing, wall-run collision, and roof/upper visibility handles.",
+      "exports": [
+        "export const ENTERABLES = [ { id: 'assay', ... }, 'ashworks', 'exchange', 'tavern_row', 'stash_annex' ];",
+        "export class Interiors { constructor(city) }",
+        "Interiors.build(rnd) -> this        // replaces the five footprint boxes with wall-run boxes + door gaps; registers furniture obstacles; returns before navgrid attach",
+        "Interiors.buildingAt(pos) -> { id, roofMeshes, upperMeshes, bounds } | null   // point-in-rect with 0.5 m hysteresis handled by caller",
+        "Interiors.setInside(id | null) -> void   // visibility flips; idempotent",
+        "Interiors.dispose() -> void"
+      ],
+      "dependsOn": ["src/world/citykit.js (pieceGeometry — the metre-space baked path exists exactly for this merge)", "src/world/city.js"],
+      "notes": "Uses pieceGeometry()/bakePiece — the documented non-instanced contract in citykit.js — merged per building into 2-4 draws with the shared cityMaterials(). The five buildings claim their plots through the normal _layout occupancy grid (city passes their plots in) so procedural buildings never overlap them. Interactable prompts move to the interior counters; the door itself needs no prompt — you walk in."
+    },
+    {
+      "path": "src/world/citizens.js",
+      "status": "modified",
+      "purpose": "Extend the EXISTING Wave-1 crowd (do not replace it): clock-phase schedule bias in _pickPoint, night de-pop via visibility, hunter portal-walk beat, the Bind companion as a special roster slot, distant-mixer throttling, COUNT=8 at low tier.",
+      "exports": [
+        "Citizens.build(rnd, { save } = {}) -> void   // save added for the companion roster read; City.build already holds it",
+        "Citizens.update(dt, playerPos) -> void       // unchanged signature",
+        "Citizens.setPhaseHour(hours) -> void         // fed by City.applyDayState; stores a float, no allocation",
+        "Citizens.stats -> { count, skinned, procedural, companion: boolean }"
+      ],
+      "dependsOn": ["src/render/daynight.js (phase hours only — a number, not the module)", "src/game/shadows.js (companion roster read)", "src/render/characters.js (existing makeCharacter path)"],
+      "notes": "SkeletonUtils.clone per NPC (NEVER .clone()) — already the case via makeCharacter; materials shared per source character; all lowercase asset keys. NO flow fields in v1 (see cityLifeSubstrate — straight-line legs + resolve() stay). NPCs remain non-solid to the player and castShadow=false (the skinned-depth-program recompile guard comment in the file is load-bearing — keep it). Night population: visibility toggles only when off-camera and >25 m, never destroy/rebuild NPCs mid-session. No glow, no rim, no emissive on any living NPC; the companion's dark-wisp treatment is the one permitted glow category and lives on particles, not the body material."
+    },
+    {
+      "path": "src/game/modes/citymode.js",
+      "status": "modified",
+      "purpose": "Wire the clock (tick in updateAlways, sample once per frame, city.applyDayState) and the interior camera state (buildingAt + setInside + boom clamp). Citizens need no citymode wiring — City.build/update/dispose already own them; applyDayState forwards the hour via citizens.setPhaseHour.",
+      "exports": ["no public surface change; targetFps stays 30"],
+      "dependsOn": ["src/render/daynight.js", "src/world/interiors.js"],
+      "notes": "Clock lives on game (game.worldClock) so gate modes can tick it silently; citymode only samples and applies. Interior hysteresis lives here (mode state, not world state). _boomBlocked consults interiors' wall-run boxes for the five enterables (interiors.buildingAt provides bounds)."
+    },
+    {
+      "path": "src/game/game.js",
+      "status": "modified",
+      "purpose": "Own game.worldClock = new WorldClock({ hours: bootBias(save.worldTime ?? 15) }); tick it in the main update for all modes; persist clock.hours into save on the existing save cadence.",
+      "exports": ["game.worldClock"],
+      "dependsOn": ["src/render/daynight.js", "src/core/save.js"],
+      "notes": "Gate modes tick time but apply nothing — dungeons are frozen-light rifts by design. Keep the change surface to ~15 lines; game.js is the most contended file in the repo."
+    },
+    {
+      "path": "src/core/save.js",
+      "status": "modified",
+      "purpose": "Add worldTime (hours float, default 15.0) to the save schema + migration default.",
+      "exports": ["save.worldTime"],
+      "dependsOn": [],
+      "notes": "One field, one default. No version drama — missing field reads as 15.0 (the shipped look)."
+    },
+    {
+      "path": "src/world/overworld.js + ow-test.mjs",
+      "status": "deleted",
+      "purpose": "Dead code removal per auditFindings.deadCode — overworld.js is imported by nothing, uses the banned PointLight-toggle pattern, and its harness file imports from another machine's filesystem. Deleting it prevents a future agent 'resurrecting the overworld' from the wrong base.",
+      "exports": [],
+      "dependsOn": [],
+      "notes": "Keep terrain.js (city.js and frontier.js import its noise helpers). Grep for stray references in comments is fine to leave; imports must be zero (they already are)."
+    },
+    {
+      "path": "tools/daynight-test.mjs",
+      "status": "new",
+      "purpose": "Harness test: 24 h fast-forward correctness + the glow-wash and recompile regressions.",
+      "exports": ["npm script test:daynight"],
+      "dependsOn": ["tools/_harness.mjs"],
+      "notes": "LANDSCAPE viewport (portrait triggers the rotate gate that swallows pointer events — repo rule). Honors GB_PORT/GB_OUT. Via evalGame: set clock to each keyframe hour, screenshot, assert (a) 15:00 frame diffs ~zero vs a pre-change golden of the current city (the shipped-look contract), (b) mean frame luminance ordered night < dusk < noon and night mean >= floor (no black frame, no glow wash), (c) renderer.info.programs.length identical at 15:00 before and after a full simulated cycle, (d) portal ring emissiveIntensity at 19.8 h > at 12 h."
+    },
+    {
+      "path": "tools/frontier-test.mjs",
+      "status": "new",
+      "purpose": "Harness test: seam continuity, walk limits, POI/wild-gate function, budget deltas.",
+      "exports": ["npm script test:frontier"],
+      "dependsOn": ["tools/_harness.mjs"],
+      "notes": "Asserts: |cityHeight - frontierHeight| < 0.25 m on a 64-point ring across the blend band; player teleported to (0,-200) stands on ground (heightAt finite, resolve keeps position); west cliff clamp intact at (CLIFF_X-5, z) for z inside AND outside the wall; wild gate portalAt returns wild:true and prompt fires; POI toast fires once; stats.triangles within the +20% budget vs recorded baseline; zero PointLights in the scene graph (traverse assert — the overworld.js regression guard)."
+    },
+    {
+      "path": "tools/interior-test.mjs",
+      "status": "new",
+      "purpose": "Harness test: the five enterables admit the player, camera follows, roof hides, navgrid stays sane.",
+      "exports": ["npm script test:interiors"],
+      "dependsOn": ["tools/_harness.mjs"],
+      "notes": "Drive the player through the tavern door via injected input (landscape viewport): assert position ends inside footprint (door gap works), camera distance <= 5.5 while inside, roof mesh .visible false inside / true after exit, validateLayout(city).ok true, and navgrid reachable(interior counter) true."
+    },
+    {
+      "path": "tools/citylife-test.mjs",
+      "status": "new",
+      "purpose": "Harness test for the citizens.js extensions: population per tier, schedule phase behaviour, hunter beat, companion, no leaks, no glow on NPCs.",
+      "exports": ["npm script test:citylife"],
+      "dependsOn": ["tools/_harness.mjs"],
+      "notes": "Asserts: city.stats.citizens.count is 8 at forced low / 16 otherwise; at hour 12 >= 60% civilian roots visible vs hour 23 <= 50% (night keeps 4 civilians + 6 hunters); every visible NPC stays inside resolve() bounds across 30 s simulation (positions finite, west of nothing); no material on any NPC body has emissive != black (the no-glow constraint, mechanically enforced — companion wisp particles exempt by node name); renderer.info.memory.geometries returns to baseline after city exit/re-enter x3 (the GPU-leak regression that shipped once already); companion exists iff save.shadows.roster is non-empty."
+    }
+  ],
+
+  "buildOrder": [
+    "STEP 1 — DAYNIGHT CORE (src/render/daynight.js + src/core/save.js). Pure module: WorldClock, KEYFRAMES, sample(), shadowDir clamp+quantise, bootBias, _verifyAnchor. VERIFY (no browser needed): `node -e` imports the module, asserts the 15:00 sample equals the shipped constants (key 0xfff0d6/2.45, dir normalize(58,74,40), fog 0xb6c6dc, hemi 0x74a2da/0x5d6a4c/1.05, envIntensity 1.0), asserts sample() allocates nothing (same out object identity), asserts hour wrap and keyframe monotonicity. One agent, no contention.",
+    "STEP 2 — SKY SUN/MOON (src/render/sky.js). Add uSunDir/uSunColor/uDiscs/uAccentAz behind `sun:false` default + updateSkyState. VERIFY: existing city/arena screenshots unchanged with defaults (pixel-diff vs pre-change capture); with sun:true and a hand-set dusk state, the disc renders at the expected azimuth. GB_PORT=<assigned> node tools/landscape-shot.mjs for the capture.",
+    "STEP 3 — CITY WIRING (src/world/city.js applyDayState + src/game/modes/citymode.js tick + src/game/game.js worldClock). Dynamic shadow dir, fog/hemi/key/env ramps, window+lamp material ramps, portal dusk boost, sky uniform writes. VERIFY: new tools/daynight-test.mjs passes (shipped-look golden, luminance ordering, program-count invariance, portal boost). This step owns all three files; no other step may touch them concurrently.",
+    "STEP 4 — DELETE DEAD OVERWORLD (rm src/world/overworld.js ow-test.mjs). VERIFY: `npx vite build` succeeds; grep shows zero imports; `GB_PORT=<assigned> npm run test:city` still green. Trivial but scheduled explicitly so it cannot be forgotten — it guards step 5's agent from building on the wrong base.",
+    "STEP 5 — FRONTIER TERRAIN (src/world/frontier.js ground + city.js raw()/limits/delegation changes). Coarse field, seam skirt, west-cliff fence extension, VERGE_LIMIT, heightAt/resolve routing. NO dressing yet. VERIFY: tools/frontier-test.mjs seam/limit/cliff assertions pass; walk out of the north gate to the Breach and 100 m past it in the harness without falling through or hitting the old 134 m wall.",
+    "STEP 6 — FRONTIER DRESSING (frontier.js scatter + biome bands + ground palette). NatureFields with the species table, capacity-fixed, obstacles registered pre-hash. VERIFY: frontier-test budget assertions (triangles/draw groups/zero PointLights); four screenshots (E/S/N/edge) written to GB_OUT for the human pass.",
+    "STEP 7 — POIS + WILD GATES (frontier.js stamps + city.js buildPortalVisual extraction). Ruins, camps, watchtower, 2 wild gates appended to city.portals, discovery toasts. VERIFY: frontier-test POI/wild-gate assertions; entering the E wild gate reaches the existing gate flow (enterGate called with a seed offset) and returning re-spawns at the wild gate's doorstep.",
+    "STEP 8 — LAYOUT RULES + TALLER BUILDINGS (src/world/layoutrules.js + city.js _layout/_buildBuildings changes). Profiles, corridors, anti-repetition, spire, gable-end caps, roof_high rows. RECORD the pre-change test:city triangle/drawGroups baseline in the step's report BEFORE landing. VERIFY: validateLayout ok; test:city green within +20% tris; bird's-eye screenshot (existing city-test overhead shot) attached for the human pass.",
+    "STEP 9 — INTERIORS (src/world/interiors.js + citymode.js interior camera). Five shells, wall-run collision, doorway gaps, dressing, roof-hide, boom clamp, navgrid rebake. VERIFY: tools/interior-test.mjs passes; test:city collision/nav suites still green (the wall-run boxes changed the hash).",
+    "STEP 10 — SCHEDULES (src/world/citizens.js extension + city.js applyDayState forwarding setPhaseHour). Phase-biased _pickPoint anchors, night visibility de-pop, low-tier COUNT=8, distant-mixer throttle. EXTENDS the existing Wave-1 crowd — read citizens.js before writing a line. VERIFY: tools/citylife-test.mjs passes at forced low and high tiers, including the emissive==black scan and the geometry-count leak check.",
+    "STEP 11 — HUNTERS + COMPANION (citizens.js). Portal-walking hunter beat, Bind companion roster slot with follow/idle/teleport and restrained dark treatment. VERIFY: citylife-test extensions — companion exists iff roster non-empty, companion body material passes the no-glow scan, hunter despawn/respawn cycle observed over a fast-forwarded hour, never on the player's prompted portal.",
+    "STEP 12 — ACCEPTANCE SWEEP (tools/acceptance.mjs extension, no src changes). Full pass on the assigned GB_PORT: 24 h cycle in the city with frontier+NPCs at medium tier, enter/exit a gate and both wild gates, walk all five interiors, 3x city re-entry leak check, desktop-Chrome keyboard path smoke (owner asked for desktop play). VERIFY: all five new npm test scripts + smoke + test:city green in one run; report frame-time p95 at the 30 fps city target from the harness trace (report, not assert — software rasteriser numbers)."
+  ],
+
+  "risks": [
+    "SHIPPED-LOOK REGRESSION IS THE TOP RISK. Day/night touches every visual constant the owner just approved. Mitigation is structural: the 15:00 keyframe is a byte-for-byte contract with its own golden-image assert (step 3 cannot land without it), and bootBias defaults returning players to the approved hour.",
+    "PROGRAM RECOMPILE LANDMINES. Three separate historical bugs in this repo trace to three's program cache key (PointLight toggling, castShadow, light counts). Day/night multiplies the temptation surface. The daynight-test program-count invariance assert plus the zero-PointLight traverse assert are the tripwires; the spec's decision 1 (one light rig, colour/intensity/direction only) is the rule.",
+    "GLOW WASH AT NIGHT. The city already shipped a dusk look once and reverted it because the additive glow pass washed the frame (city.js CITY_BIOME postmortem). The night keyframes keep a blue-hour floor and the boost is portal-material-local; the luminance-floor assert in daynight-test makes the regression mechanical, but on-device AMOLED (owner's S25 Ultra) needs one human confirmation pass — schedule it into the step-12 report.",
+    "SEAM AND HASH ORDERING. Frontier obstacles MUST be appended before city._buildHash runs and the seam blend band must sit on gentle terrain; both are ordering constraints inside City.build that a hurried agent can violate silently. frontier-test's ring-continuity and resolve asserts catch the symptom; the build() call order is documented in the module notes to catch the cause.",
+    "INTERIOR CAMERA EDGE CASES. Doorway-threshold flicker (hysteresis), boom clipping through the facade at the door cell, and roof-restore-on-exit races with dispose. Contained: five authored buildings, mode-owned state, idempotent setInside. interior-test drives the actual door walk; anything it cannot catch is a step-12 human pass item.",
+    "SCOPE MAGNETISM. Frontier streaming, interior upper floors, NPC dialogue, wild-gate daily rerolls and frontier combat are all explicitly v2. Each has a named hook in this spec so cutting them now costs nothing later; an agent who builds any of them in this wave is out of scope.",
+    "PHONE BUDGET DRIFT BY A THOUSAND CUTS. Taller buildings + frontier scatter + 16 NPCs are individually fine and collectively ~2x today's city triangles at ultra. The +20% tris assert (city core), the tier-scaled scatter/NPC counts, and the recorded step-8 baseline are the fence; if p95 frame time at medium regresses > 15% in step 12's trace, thin scatter species counts first (largest single cost, least owner-visible)."
+  ],
+
+  "openQuestions": [
+    "Cycle length: 24 min is recommended and cheap to retune (one constant). If the owner wants 'mostly day' sessions, stretch day hours (05-20) to 70% of the cycle rather than lengthening the cycle — schedule readability survives, sunsets stay frequent.",
+    "Should gates advance the clock FASTER (e.g. 3x) so every dungeon run guarantees an emergence-light change? Cheap knob (tick multiplier per mode); defaulting to 1x until the owner reacts to the feature.",
+    "Wild-gate rewards: same loot tables as city gates for now. A 'wild gates roll a daily modifier' system belongs with the Wave-2 dungeon spec (CONTENT_PACKS/EXPANSION owners), not here — flagged for the orchestrator to route.",
+    "Frontier ambient creatures (non-combat deer-like wildlife from creatures.glb) would sell the wilds for one NatureField-sized system, but adds mixer budget on top of the NPC allowance — deferred until step 10's device numbers exist.",
+    "v2 environment keyframes: four pre-built PMREM envs (dawn/noon/dusk/night) swapped at phase boundaries vs v1's envIntensity modulation. Decide after seeing v1 on the S25 Ultra — the synthesised-source path makes it a half-day if wanted.",
+    "NPC voices/barks: name toasts only in v1. Any dialogue system is a separate spec; do not let citizens.js grow one.",
+    "The tavern is a new INTERACTABLES entry and a new building on Quarter Row — does the owner want it named/themed (it is the only new 'service' this wave, currently cosmetic)? Naming ('THE LAST CANDLE'?) needs his sign-off; no Solo Leveling proper nouns."
+  ]
+}

@@ -1,4 +1,14 @@
-// Unified input: virtual thumbstick + on-screen skill buttons + keyboard fallback.
+// Unified input: virtual thumbstick + on-screen skill buttons + drag-to-orbit
+// camera + keyboard/mouse for desktop.
+
+// Orbit feel, tuned by dragging on a 1280x720 window: a 300 px sweep is a
+// quarter turn, which crosses a phone screen in one thumb stroke without ever
+// spinning past what the eye can track. Pitch is a garnish, not a free-look —
+// a narrow band around the rig's authored 45° so the player can peek over a
+// wall or flatten toward the horizon, never stare at the sky or the floor.
+const YAW_PER_PX = Math.PI / 600;
+const PITCH_PER_PX = 0.0015;
+const PITCH_MAX = (12 * Math.PI) / 180;
 
 export class Input {
   constructor() {
@@ -7,11 +17,21 @@ export class Input {
     this.held = new Set();
     this.keys = new Set();
 
+    // Camera state lives on the input because both consumption sites (arena
+    // and city) must rotate the stick through the SAME yaw the follow rig
+    // uses — one owner, no drift. pitch is an offset around the rig default.
+    this.look = { yaw: 0, pitch: 0 };
+    this._world = { x: 0, z: 0 };    // sampleWorld scratch, never reallocated
+    this._kbd = { x: 0, y: 0 };      // sample() keyboard scratch, same rule
+
     this._stickId = null;
     this._stickOrigin = { x: 0, y: 0 };
     this._radius = 52;
+    this._orbitId = null;
+    this._orbitLast = { x: 0, y: 0 };
 
     this._bindStick();
+    this._bindOrbit();
     this._bindButtons();
     this._bindKeys();
   }
@@ -109,6 +129,66 @@ export class Input {
     park();
   }
 
+  // Drag anywhere on the bare canvas to orbit. Hit-testing is free: the stick
+  // zone, the skill buttons and every panel sit ABOVE the canvas in the
+  // stacking order, so a pointer whose start target is the canvas itself is by
+  // construction in open screen — the buttons keep winning without any
+  // geometry checks here. 1:1 and inertia-free on purpose; a camera that
+  // coasts after the thumb stops is a camera the player fights.
+  _bindOrbit() {
+    const canvas = document.getElementById('scene');
+    if (!canvas) return;
+
+    const start = (e) => {
+      if (this._orbitId !== null) return;
+      const t = e.changedTouches ? e.changedTouches[0] : e;
+      this._orbitId = e.changedTouches ? t.identifier : 'mouse';
+      this._orbitLast.x = t.clientX;
+      this._orbitLast.y = t.clientY;
+      e.preventDefault();
+    };
+
+    const move = (e) => {
+      if (this._orbitId === null) return;
+      let t = e;
+      if (e.changedTouches) {
+        t = [...e.changedTouches].find((c) => c.identifier === this._orbitId);
+        if (!t) return;
+      } else if (this._orbitId !== 'mouse') return;
+      const dx = t.clientX - this._orbitLast.x;
+      const dy = t.clientY - this._orbitLast.y;
+      this._orbitLast.x = t.clientX;
+      this._orbitLast.y = t.clientY;
+      // Drag right = look right; drag up = camera climbs. Yaw is unclamped and
+      // unwrapped — sampleWorld only ever feeds it to sin/cos.
+      this.look.yaw -= dx * YAW_PER_PX;
+      this.look.pitch = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, this.look.pitch - dy * PITCH_PER_PX));
+      e.preventDefault();
+    };
+
+    const end = (e) => {
+      if (this._orbitId === null) return;
+      if (e.changedTouches && ![...e.changedTouches].some((c) => c.identifier === this._orbitId)) return;
+      this._orbitId = null;
+    };
+
+    canvas.addEventListener('touchstart', start, { passive: false });
+    window.addEventListener('touchmove', move, { passive: false });
+    window.addEventListener('touchend', end);
+    window.addEventListener('touchcancel', end);
+    canvas.addEventListener('mousedown', start);
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', end);
+  }
+
+  /** Snap the camera state back to the rig default. Modes call this on entry
+   *  so a yaw carried out of the city cannot whip the gate camera (and vice
+   *  versa) across the transition. */
+  resetLook() {
+    this.look.yaw = 0;
+    this.look.pitch = 0;
+  }
+
   _place(el, x, y) {
     el.style.left = `${x}px`;
     el.style.top = `${y}px`;
@@ -134,23 +214,30 @@ export class Input {
   }
 
   _bindKeys() {
+    // Two homes per skill: JKLU mirrors the on-screen button cluster for
+    // right-hand-on-keys play, QERF keeps everything under the left hand so
+    // WASD + mouse-orbit needs no hand travel. Lowercased lookup so Shift
+    // combinations and caps lock cannot orphan a held key.
     const map = {
-      j: 'attack', J: 'attack',
-      k: 'slash', K: 'slash',
-      l: 'nova', L: 'nova',
-      u: 'summon', U: 'summon',
-      Shift: 'dash',
+      j: 'attack', f: 'attack',
+      k: 'slash', q: 'slash',
+      l: 'nova', e: 'nova',
+      u: 'summon', r: 'summon',
+      shift: 'dash',
       ' ': 'jump',
     };
     window.addEventListener('keydown', (e) => {
+      // e.repeat guard: a held key must land ONE press, not one per OS repeat.
       if (e.repeat) return;
-      this.keys.add(e.key.toLowerCase());
-      const s = map[e.key];
+      const key = e.key.toLowerCase();
+      this.keys.add(key);
+      const s = map[key];
       if (s) { this.pressed.add(s); this.held.add(s); }
     });
     window.addEventListener('keyup', (e) => {
-      this.keys.delete(e.key.toLowerCase());
-      const s = map[e.key];
+      const key = e.key.toLowerCase();
+      this.keys.delete(key);
+      const s = map[key];
       if (s) this.held.delete(s);
     });
     window.addEventListener('blur', () => { this.keys.clear(); this.held.clear(); });
@@ -164,10 +251,36 @@ export class Input {
     if (this.keys.has('w') || this.keys.has('arrowup')) ky += 1;
     if (this.keys.has('s') || this.keys.has('arrowdown')) ky -= 1;
     if (kx || ky) {
+      // Scratch, not a literal: this runs every frame while a key is held and
+      // update loops are a no-allocation zone.
       const l = Math.hypot(kx, ky);
-      return { x: kx / l, y: ky / l };
+      const k = this._kbd;
+      k.x = kx / l;
+      k.y = ky / l;
+      return k;
     }
     return this.move;
+  }
+
+  // The stick is camera-space; the body wants world-space. Rotating through
+  // the camera yaw here is what makes orbiting safe: "up" is always "away from
+  // the camera", so no orientation can invert the controls. The yaw === 0 fast
+  // path is not an optimization — it reproduces the pre-orbit mapping
+  // (x, -y) bit for bit, so an untouched camera behaves exactly as shipped.
+  sampleWorld() {
+    const mv = this.sample();
+    const w = this._world;
+    const yaw = this.look.yaw;
+    if (yaw === 0) {
+      w.x = mv.x;
+      w.z = -mv.y;
+    } else {
+      const c = Math.cos(yaw);
+      const s = Math.sin(yaw);
+      w.x = mv.x * c - mv.y * s;
+      w.z = -mv.x * s - mv.y * c;
+    }
+    return w;
   }
 
   consume(skill) {

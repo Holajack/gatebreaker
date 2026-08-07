@@ -39,9 +39,16 @@ const FRAG = /* glsl */`
     vec3 d = normalize(vDir);
     float t = d.y;
 
+    // Below the horizon the old curve, pow(-t, 0.6), was a quarter of the way
+    // to the near-black uGround within a few degrees — and from a grounded
+    // camera the only visible below-horizon sky IS those few degrees past the
+    // ground apron, so the world ended in a void cliff. Hold uHorizon (the fog
+    // colour) flat through that band and fall off toward uGround only well
+    // below anything a grounded camera can see, so the region behind the fog
+    // line reads as misty ground instead.
     vec3 col = t >= 0.0
       ? mix(uHorizon, uZenith, pow(t, 0.45))
-      : mix(uHorizon, uGround, pow(-t, 0.6));
+      : mix(uHorizon, uGround, smoothstep(0.05, 0.65, -t));
 
     // Rift glow banded along the horizon, aligned with the env-map key light.
     float az   = atan(d.z, d.x);

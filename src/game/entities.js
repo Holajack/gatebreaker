@@ -109,8 +109,13 @@ export function disposeObject3D(root) {
     root.userData.character.dispose();
     root.userData.character = null;
   }
+  if (root.userData?.heroLight) root.userData.heroLight = null;
   root.traverse((o) => {
     if (o.isDecal) { o.release(); return; }
+    // The hero light (and any future entity light). dispose() frees a shadow
+    // map if one ever exists; today it is a no-op kept for symmetry with the
+    // rule that everything an entity owns is released here.
+    if (o.isLight) { o.dispose(); return; }
     if (!o.geometry && !o.material) return;
     if (o.geometry && !o.geometry.userData.shared) o.geometry.dispose();
     const mats = Array.isArray(o.material) ? o.material : [o.material];
@@ -431,6 +436,57 @@ function attachCreatureWeapon(inst) {
 
 const _dummy = () => new THREE.Object3D();
 
+// ------------------------------------------------------------ hero presence
+//
+// In combat the eye must find the PLAYER first, but every legal brightening
+// tool is banned on him: no rim, no glow, no emissive on a living body
+// (tools/visual-test.mjs and acceptance both audit for it). What is not
+// banned is LIGHT — so the hero carries a small warm point light that lifts
+// his own shading a touch and leaves everyone else exactly as lit as before.
+// Enemies never get one, which is the whole point: same materials, different
+// illumination, and the player reads brightest without a single shader trick.
+//
+// This does not violate city.js's "NO POINT LIGHTS, EVER" rule, which is
+// about TOGGLING: NUM_POINT_LIGHTS is part of three's program cache key, so
+// flipping a light's visibility recompiles every material in the scene. This
+// light exists from _buildPlayer on and is never toggled — the count only
+// moves when the player is created or destroyed, alongside the projectile and
+// pickup lights game.js already adds and removes.
+const HERO_LIGHT = {
+  color: 0xffc24b,     // the player's own glow colour — one warm identity
+  intensity: 0.6,      // restrained: the arena key light is 1.9
+  distance: 6,
+  decay: 2,            // physical falloff, same as world.js's fill light
+};
+
+/**
+ * Attach (or keep) the player's presence light. Idempotent: the upgrade path
+ * rebuilds the player's body in place, and the light must survive that
+ * without ever being doubled.
+ */
+function attachHeroLight(root) {
+  const prev = root.userData.heroLight;
+  if (prev && prev.parent === root) return prev;
+  const light = new THREE.PointLight(
+    HERO_LIGHT.color, HERO_LIGHT.intensity, HERO_LIGHT.distance, HERO_LIGHT.decay,
+  );
+  light.name = 'heroLight';
+  // Above and slightly BEHIND the shoulders. The gameplay camera rides behind
+  // the player, so this is the side of him the eye actually reads. ~0.55 m
+  // off the upper back puts the inverse-square peak on the torso the camera
+  // frames (0.6 / 0.3 m^2 is comparable to the 1.9 key light on that one
+  // band) and it falls to a faint warm floor pool within two metres —
+  // measured per-character on the pinned visual-test scene, where the dark
+  // adventurer torso read 0.25 mean luma against 0.68 for a bone skeleton.
+  light.position.set(0, 1.55, 0.55);
+  // Never a shadow caster: a point-light shadow is six cubemap passes, which
+  // is a desktop luxury this phone budget does not have.
+  light.castShadow = false;
+  root.add(light);
+  root.userData.heroLight = light;
+  return light;
+}
+
 /**
  * Fill `root` with a skinned character. Returns false when the pack is absent,
  * the tier's character budget is already spent, or the merge failed — in every
@@ -521,6 +577,9 @@ function buildSkinnedInto(root, opts) {
   if (equipped?.offhand) equipped.offhand.removeFromParent();
   for (const child of [...root.children]) {
     if (child.isDecal) continue;
+    // The hero light outlives the body swap: destroying and re-creating it
+    // here would flick NUM_POINT_LIGHTS and recompile every material mid-boot.
+    if (child === root.userData.heroLight) continue;
     root.remove(child);
     disposeObject3D(child);
   }
@@ -529,6 +588,7 @@ function buildSkinnedInto(root, opts) {
   root.add(inst.root);
   root.userData.character = inst;
   root.userData.appearance = inst.appearance;
+  if (archetype === 'player') attachHeroLight(root);
 
   const legL = _dummy(); const legR = _dummy();
   inst.root.add(legL, legR);
@@ -549,14 +609,16 @@ function buildSkinnedInto(root, opts) {
     handL: inst.sockets.handL || null,
   };
 
-  // A corpse is the one humanoid game.js never calls animateRig on: it builds
-  // it ghosted-but-uncloaked, tips it by -PI/2.4 and lets it sink. A rigid
-  // A-posed person tipped over reads as a mannequin, so corpses get posed by
-  // the Death clip once and the tip is cancelled on the inner group — the
-  // outer root's rotation is game.js's and stays untouched.
+  // A corpse is the one humanoid game.js never calls animateRig on: it is
+  // built ghosted-but-uncloaked, tipped by -PI/2.4 and left to sink. The tip
+  // is cancelled on the inner group (same axis, so the two X rotations
+  // commute) and the Death clip PLAYS from standing instead of being scrubbed
+  // to its last frame — game.js ticks the mixer from _updateCorpses, so the
+  // fallen visibly crumple where the old code teleported them into the final
+  // pose. clampWhenFinished then holds the ground pose for the Bind window.
   if (opts.ghost && !opts.cloak && archetype === 'shadow') {
     inst.play('die', { fade: 0, once: true, clamp: true });
-    inst.mixer.update(Math.max(0.01, inst.clipDuration('die')));
+    inst.mixer.update(0.01);      // pose the first frame, not the last
     inst.root.rotation.x = Math.PI / 2.4;
   }
 
@@ -564,6 +626,9 @@ function buildSkinnedInto(root, opts) {
     inst.sockets.hand.add(equipped.main);
     root.userData.rig.blade = equipped.main;
     if (equipped.offhand && inst.sockets.handL) inst.sockets.handL.add(equipped.offhand);
+    // The upgrade path re-parents the weapon without going through
+    // equipWeapon, so the armed idle/attack posture is restated here.
+    inst.setArmed?.(true);
   } else if (inst.isCreature) {
     // game.js hands every enemy a 'sword'/'claw'/'staff' string. A monster
     // ignores it: what it carries was decided when it was modelled.
@@ -573,7 +638,34 @@ function buildSkinnedInto(root, opts) {
       inst.sockets.hand, opts.weapon, opts.glow, opts.ghost, archetype,
     );
   }
+  // Remembered so rebuildHumanoid can re-run this swap later — the identity
+  // screen's body flip needs the same in-place rebuild the upgrade path does,
+  // but for a root the pending map already drained.
+  root.userData.buildOpts = opts;
   return true;
+}
+
+/**
+ * Rebuild an already-skinned humanoid in place with the opts it was first
+ * built from. The identity screen's M/F flip goes through here: appearanceFor
+ * re-resolves the player pool off the NEW body, and the equipped weapon + hero
+ * light survive the swap exactly as they do on a pack upgrade. Returns false
+ * (leaving the body untouched) when the pack is absent — the box-man has no
+ * gendered body to swap anyway.
+ */
+export function rebuildHumanoid(root) {
+  const opts = root?.userData?.buildOpts;
+  if (!opts || (!charactersReady() && !creaturesReady())) return false;
+  // The outgoing instance's mixer and merged-geometry refcount hang off
+  // userData, out of reach of buildSkinnedInto's child-dispose traversal, so
+  // they are released here — but only after the new body exists, so a failed
+  // build cannot leave a stripped player behind.
+  const old = root.userData.character || null;
+  root.userData.character = null;
+  const ok = buildSkinnedInto(root, opts);
+  if (ok) old?.dispose();
+  else root.userData.character = old;
+  return ok;
 }
 
 /**
@@ -684,6 +776,9 @@ export function makeHumanoid(opts = {}) {
   }
 
   root.scale.setScalar(scale);
+  // The box-man player carries the same presence light the skinned one does —
+  // the silhouette problem does not care which body the hero happens to wear.
+  if ((opts.archetype || inferArchetype(built)) === 'player') attachHeroLight(root);
   // `head` and `torso` are the same object now that they share a geometry; the
   // rig keys are kept because animateRig and game.js both address them by name.
   // eyeL/eyeR likewise both point at the single merged eye mesh, so the
