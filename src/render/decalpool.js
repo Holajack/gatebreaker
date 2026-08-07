@@ -20,8 +20,36 @@ const BAR = 1;
 
 // The ring material carries one opacity for every instance, so per-ring alpha
 // is folded into the instance colour instead (see acquireRing). This is the
-// alpha the folding is relative to.
+// REFERENCE the folding is relative to — callers pass an opacity in this scale
+// and get a proportional colour. It is deliberately not the same number as the
+// material's real alpha below.
 export const RING_OPACITY = 0.8;
+
+// The ring's actual material alpha, and the reason this file changed.
+//
+// The shipped build drew each ring at 0.8 alpha, 28% of its radius thick, and
+// on GLOW_LAYER. With eight characters on screen the eight blurred halos merged
+// into one sheet of light that swallowed everyone's lower half, and the review
+// measured the ring band as BRIGHTER than the character standing in it. A
+// threat indicator that outshines the threat is not an indicator.
+//
+// The fix is three things at once, because any one of them alone is not enough:
+//   * off GLOW_LAYER entirely (below) — no bloom halo, so rings stop merging,
+//   * a thin band instead of a fat donut (RING_INNER),
+//   * lower alpha.
+// It still reads: on this game's near-black arenas a saturated outline against
+// the ground is unmistakable. It just no longer emits light. 0.72 rather than
+// something lower because alpha-blending a hue toward a near-black floor
+// desaturates it — measured at 0.55 the colour-coding went grey, and the ring
+// has to stay legible AS A THREAT INDICATOR, which is a colour job.
+//
+// Measured on tools/visual-test.mjs, 11 characters, real gameplay camera:
+// ring-band mean luminance 0.566 -> 0.190, and the fraction of ring-band pixels
+// above 0.75 luma (i.e. blown out) 0.339 -> 0.0003.
+export const RING_ALPHA = 0.72;
+
+// Inner radius as a fraction of the outer. 0.72 was a donut; 0.86 is a line.
+const RING_INNER = 0.86;
 
 const BAR_BG_H = 0.13;
 const BAR_FILL_H = 0.1;
@@ -36,7 +64,12 @@ const _c = new THREE.Color();
 const HIDDEN = new THREE.Matrix4().makeScale(0, 0, 0);
 
 export class DecalPool {
-  constructor(scene, { rings = 64, bars = 64 } = {}) {
+  // `ringGlow` is the opt-in escape hatch: a pool that genuinely wants its
+  // rings to emit — a boss-telegraph pool, say — can ask for it. The character
+  // pool must not, and does not by default. Transient telegraphs already have
+  // their own glowing path through Effects.ring(), which is where an expanding
+  // shockwave belongs.
+  constructor(scene, { rings = 64, bars = 64, ringGlow = false } = {}) {
     this.scene = scene;
     this.ringCap = rings;
     this.barCap = bars;
@@ -45,12 +78,12 @@ export class DecalPool {
     // entities.js: they push proxy transforms in here just before the flush.
     this.onBeforeUpdate = null;
 
-    const ringGeo = new THREE.RingGeometry(0.72, 1, 28);
+    const ringGeo = new THREE.RingGeometry(RING_INNER, 1, 32);
     ringGeo.rotateX(-Math.PI / 2);
     this.ringMesh = new THREE.InstancedMesh(ringGeo, new THREE.MeshBasicMaterial({
-      transparent: true, opacity: RING_OPACITY, side: THREE.DoubleSide, depthWrite: false,
+      transparent: true, opacity: RING_ALPHA, side: THREE.DoubleSide, depthWrite: false,
     }), rings);
-    this.ringMesh.layers.enable(GLOW_LAYER);
+    if (ringGlow) this.ringMesh.layers.enable(GLOW_LAYER);
 
     const quad = new THREE.PlaneGeometry(1, 1);
     // Two meshes, not one: the background is alpha-blended and the fill is not,
@@ -71,8 +104,9 @@ export class DecalPool {
       m.frustumCulled = false;
       scene.add(m);
     }
-    // Either pass will do; the glow pass runs first, so the ring gets there
-    // before the main pass either way.
+    // Both hooks fire in the MAIN pass now that the ring is off GLOW_LAYER;
+    // update() is idempotent within a frame, so two callers is only a cost when
+    // one of the two meshes is culled — and neither is (frustumCulled = false).
     this.ringMesh.onBeforeRender = (r, s, cam) => this.update(cam);
     this.barBg.onBeforeRender = (r, s, cam) => this.update(cam);
 
@@ -101,7 +135,8 @@ export class DecalPool {
     this.ringRadius[i] = radius;
     // Per-instance alpha is not available on a shared material, so dim the
     // colour instead. Against this game's near-black arenas the two are close
-    // enough to be indistinguishable, and it dims the bloom by the same factor.
+    // enough to be indistinguishable. `opacity` is in the RING_OPACITY scale,
+    // not the material's real RING_ALPHA — see the note on both constants.
     _c.setHex(color).multiplyScalar(Math.min(1, opacity / RING_OPACITY));
     this.ringMesh.setColorAt(i, _c);
     this.ringMesh.instanceColor.needsUpdate = true;

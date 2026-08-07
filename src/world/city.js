@@ -1393,7 +1393,13 @@ export class City {
     // away, so the edge of the world is a view rather than a pit.
     const lim = WALK_LIMIT - radius;
     if (pos.x > lim) { pos.x = lim; slide(-1, 0); }
-    if (pos.x < -lim) { pos.x = -lim; slide(1, 0); }
+    // WEST IS DIFFERENT. The ground falls 34 m away west of CLIFF_X, and the
+    // parapet at line ~630 only spans the walled stretch (|z| < WALL_HALF).
+    // North and south of that, -WALK_LIMIT let a player stroll straight off a
+    // cliff onto a void floor with no way back up. The lip itself is the world
+    // bound now, which is what the comment above always claimed it was.
+    const westLim = CLIFF_X + 1 + radius;
+    if (pos.x < westLim) { pos.x = westLim; slide(1, 0); }
     if (pos.z > lim) { pos.z = lim; slide(0, -1); }
     if (pos.z < -lim) { pos.z = -lim; slide(0, 1); }
   }
@@ -1443,10 +1449,44 @@ export class City {
     this._applyPortalState(p);
   }
 
-  /** The player arrives at the south lip of the plaza, facing the portals. */
-  spawnPoint() {
-    const x = 0, z = PLAZA_R - 8;
-    return new THREE.Vector3(x, this.heightAt(x, z), z);
+  /**
+   * The player arrives on the plaza, facing the portals.
+   *
+   * The nominal point (0, PLAZA_R - 8) sits 0.5 m from the centre of the plaza
+   * fountain, which is a 2.4 m solid: the player spawned INSIDE it and could
+   * walk south, east and west but exactly 0 m north toward the portals. So
+   * the nominal point is a hint, not a promise — probe outward from it with
+   * the real collision resolver and return the first spot that is actually
+   * standable. That also keeps this honest if anyone adds another prop here.
+   */
+  spawnPoint(radius = 0.6) {
+    // Offset in x on purpose: dead on the z axis the fountain sits directly
+    // between the player and every portal, so the first thing a new player
+    // does — push the stick forward — walks him into a wall a metre away.
+    // From here the plaza opens ahead and the fountain is a landmark to his
+    // left rather than a roadblock.
+    const nominal = { x: 7, z: PLAZA_R - 5 };
+    const clear = (x, z) => {
+      if (!this._hash) return true;
+      const p = new THREE.Vector3(x, 0, z);
+      this.resolve(p, radius);
+      return Math.hypot(p.x - x, p.z - z) < 1e-3;
+    };
+    if (clear(nominal.x, nominal.z)) {
+      return new THREE.Vector3(nominal.x, this.heightAt(nominal.x, nominal.z), nominal.z);
+    }
+    // Rings outward, south first — the player should end up looking INTO the
+    // plaza, not out of it, so bias toward the near lip.
+    for (let r = 2; r <= 14; r += 1.5) {
+      for (let k = 0; k < 12; k++) {
+        // k=0 is due south of the nominal point, then alternate east/west.
+        const a = Math.PI / 2 + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * (Math.PI / 7);
+        const x = nominal.x + Math.cos(a) * r;
+        const z = nominal.z + Math.sin(a) * r;
+        if (clear(x, z)) return new THREE.Vector3(x, this.heightAt(x, z), z);
+      }
+    }
+    return new THREE.Vector3(nominal.x, this.heightAt(nominal.x, nominal.z), nominal.z);
   }
 
   // ---------------------------------------------------------------- nav

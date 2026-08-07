@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLOW_LAYER } from '../render/glow.js';
 
 // Swappable weapons: data tables, procedural meshes, drop rolls and the swing
@@ -108,12 +109,14 @@ function edgeMat(tint) {
 export function disposeWeaponAssets() {
   _geoCache.forEach((g) => g.dispose());
   _matCache.forEach((m) => m.dispose());
+  _heldGeo.forEach((g) => g?.dispose());
   _geoCache.clear();
   _matCache.clear();
+  _heldGeo.clear();
 }
 
 export function weaponCacheStats() {
-  return { geometries: _geoCache.size, materials: _matCache.size };
+  return { geometries: _geoCache.size, materials: _matCache.size, heldModels: _heldGeo.size };
 }
 
 // ----------------------------------------------------------------- archetypes
@@ -739,6 +742,204 @@ function buildPackMesh(weapon, archKey, ghost) {
     }
   }
   return g;
+}
+
+// ------------------------------------------------- weapons for everyone else
+//
+// The player's weapon is a rolled instance out of the tables above. Enemies,
+// bosses and shadow soldiers do not roll: they just need something in the fist
+// that reads as a weapon at play distance.
+//
+// Until now they all got `swordMesh` out of entities.js — a 1.5-unit untapered
+// box painted 0xdfe6ff with emissiveIntensity 0.7 on the glow layer. The
+// independent review of the shipped build called it exactly what it is: "a long
+// untapered pure-white bar, brighter and often longer than the body carrying
+// it... they look like fluorescent tubes." Every one of these now comes out of
+// items.glb instead, and the plank survives only as the offline fallback for a
+// build shipped without public/models/.
+
+/**
+ * Held-weapon kinds, mapped onto items.glb node names.
+ *
+ * Scales are in the same space MODEL_SCALE above uses: the pack is
+ * metre-mismatched against this game (its Sword is 2.30 units tall on a
+ * ~2.14-unit humanoid), and these land each model's tip within ~0.1 of the
+ * procedural weapon it replaces, which is the silhouette the combat was tuned
+ * around. `tilt` rotates the model away from the body so the blade clears the
+ * arm instead of rendering inside it — see the MODEL_TILT note above.
+ */
+const HELD_MODELS = {
+  sword: { item: 'Sword', scale: 0.60, tilt: -0.30 },
+  bigsword: { item: 'Sword_big', scale: 0.52, tilt: -0.30 },
+  axe: { item: 'Axe_small', scale: 0.62, tilt: -0.26 },
+  greataxe: { item: 'Axe_Double', scale: 0.62, tilt: -0.26 },
+  hammer: { item: 'Hammer_Double', scale: 0.60, tilt: -0.24 },
+  dagger: { item: 'Dagger', scale: 0.55, tilt: -0.20 },
+  bow: { item: 'Bow_Wooden', scale: 0.62, tilt: -0.10 },
+};
+
+/**
+ * What each archetype carries when it is NOT a creature with its own kit.
+ *
+ * null means empty hands, and that is a real answer rather than a gap: a
+ * hexcaster casts, a howler screams, and a monster with claws is better served
+ * by claws than by a weapon it was never modelled to hold.
+ */
+export const ENEMY_WEAPON_KIND = {
+  grunt: 'axe',
+  stalker: 'dagger',
+  brute: 'hammer',
+  caster: null,
+  lancer: 'bigsword',
+  howler: null,
+  boss: 'bigsword',
+  // Shadow soldiers are raised hunters and carry a hunter's sword.
+  shadow: 'sword',
+  player: 'sword',
+};
+
+export function enemyWeaponKind(archetype) {
+  return Object.prototype.hasOwnProperty.call(ENEMY_WEAPON_KIND, archetype)
+    ? ENEMY_WEAPON_KIND[archetype]
+    : null;
+}
+
+// ONE DRAW CALL PER HELD WEAPON.
+//
+// Every weapon in items.glb is 4-5 primitives split by flat colour (Steel,
+// LightSteel, DarkSteel, LightWood, DarkWood) with nothing but POSITION and
+// NORMAL on them. Handing one of those to a shadow soldier straight out of the
+// pack costs 4-5 draw calls where the procedural plank cost 1, and
+// tools/character-test.mjs caught exactly that: a 21-strong crowd went from 5
+// to 8.05 calls per character the moment enemies stopped carrying planks.
+//
+// So the colours are baked into a Uint8 vertex-colour attribute once per item
+// and the primitives merge into a single geometry against a single material —
+// the same trick characters.js uses on the 12-primitive bodies. Cached by item
+// name and shared by every instance, so it costs one merge per weapon KIND for
+// the life of the process.
+//
+// The player's weapon deliberately does NOT go through here: packPart above
+// keeps the pack's own per-part materials, and there is exactly one player.
+
+const _heldGeo = new Map();
+const _col = new THREE.Color();
+
+function bakeColour(mesh) {
+  const g = mesh.geometry.clone();
+  const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+  _col.copy(mat?.color || new THREE.Color(0xffffff));
+  const n = g.attributes.position.count;
+  const a = new Uint8Array(n * 3);
+  const r = Math.round(Math.min(1, Math.max(0, _col.r)) * 255);
+  const gg = Math.round(Math.min(1, Math.max(0, _col.g)) * 255);
+  const b = Math.round(Math.min(1, Math.max(0, _col.b)) * 255);
+  for (let i = 0; i < n; i++) { a[i * 3] = r; a[i * 3 + 1] = gg; a[i * 3 + 2] = b; }
+  g.setAttribute('color', new THREE.BufferAttribute(a, 3, true));
+  return g;
+}
+
+/** Merged, vertex-coloured geometry for one item-pack model. Null if absent. */
+function mergedItemGeometry(name) {
+  if (_heldGeo.has(name)) return _heldGeo.get(name);
+  let merged = null;
+  const src = _getModel ? _getModel(name, { scale: 1 }) : null;
+  if (src) {
+    // The holder is a fresh Group at the origin, so matrixWorld here is exactly
+    // the part's offset inside the model — which has to be baked in, because
+    // after the merge there are no part nodes left to carry it.
+    src.updateMatrixWorld(true);
+    const parts = [];
+    src.traverse((o) => {
+      if (!o.isMesh || !o.geometry?.attributes?.position) return;
+      const g = bakeColour(o);
+      g.applyMatrix4(o.matrixWorld);
+      parts.push(g);
+    });
+    if (parts.length) {
+      try {
+        merged = parts.length === 1 ? parts[0] : mergeGeometries(parts, false);
+      } catch {
+        merged = null;
+      }
+      if (merged && parts.length > 1) for (const p of parts) p.dispose();
+      else if (!merged) for (const p of parts) p.dispose();
+    }
+  }
+  if (merged) merged.userData.shared = true;
+  // Cache the null too: a missing model must not re-walk the pack every spawn.
+  _heldGeo.set(name, merged);
+  return merged;
+}
+
+function heldMaterial() {
+  return cachedMat('held', () => new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    vertexColors: true,
+    // Between the pack's Steel and its Wood, because one material now serves
+    // both. At the size a held weapon occupies on a phone screen the split was
+    // never legible; the draw call was.
+    metalness: 0.55,
+    roughness: 0.42,
+    envMapIntensity: 1.4,
+  }));
+}
+
+/**
+ * Translucent copy of a pack weapon for a shadow or a corpse.
+ *
+ * NOT cached and NOT flagged shared, deliberately, both times for the same
+ * reason: game.js fades a decaying corpse by writing material.opacity on every
+ * transparent mesh it can reach, so one shared ghost material would fade every
+ * shadow on the field along with it.
+ */
+function ghostHeldMaterial() {
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x9fd8ff,
+    vertexColors: true,
+    emissive: new THREE.Color(0x35e6ff),
+    emissiveIntensity: 0.30,
+    metalness: 0.55,
+    roughness: 0.35,
+    transparent: true,
+    opacity: 0.7,
+    side: THREE.FrontSide,
+  });
+  mat.userData = {};   // NOT shared: disposeObject3D must be allowed to free it
+  return mat;
+}
+
+/**
+ * A ready-to-parent held weapon for a non-player character.
+ *
+ * The returned group is already positioned at the hand socket, so a caller with
+ * a bone socket (or the procedural rig's arm mesh) only has to `.add()` it.
+ * Returns NULL when the item pack has not loaded or has no model for the kind
+ * — that is a normal state in an offline build, and the caller decides whether
+ * empty hands or a procedural fallback is the better answer.
+ */
+export function buildHeldWeapon(kind, { ghost = false } = {}) {
+  const spec = HELD_MODELS[kind];
+  if (!spec || !_getModel) return null;
+  const geometry = mergedItemGeometry(spec.item);
+  if (!geometry) return null;
+
+  const mesh = new THREE.Mesh(geometry, ghost ? ghostHeldMaterial() : heldMaterial());
+  mesh.castShadow = true;
+  const holder = new THREE.Group();
+  holder.name = spec.item;
+  holder.add(mesh);
+  holder.scale.setScalar(spec.scale);
+  holder.rotation.z = spec.tilt;
+
+  const outer = new THREE.Group();
+  outer.add(holder);
+  // Same grip the procedural sword used, so nothing downstream has to move.
+  outer.position.set(HAND_SOCKET.x, HAND_SOCKET.y, HAND_SOCKET.z + 0.06);
+  outer.rotation.x = -0.25;
+  outer.userData.packModel = spec.item;
+  outer.userData.heldKind = kind;
+  return outer;
 }
 
 // ------------------------------------------------------------ equip and swap

@@ -135,8 +135,25 @@ export async function gotoGame(page, { path: route = '/', waitMs = 2400 } = {}) 
 
 // Convenience on top of gotoGame: walk the real UI path into a gate. Additive
 // to the spec's export list — eight tools were each open-coding these clicks.
+//
+// The title's PLAY button now enters the CITY, not the gate list — that is the
+// whole point of build steps 8/9, and the owner's single biggest complaint. The
+// gate list survives as fast travel from the Assay Hall, and AppState is how a
+// tool gets there without walking a thumbstick across a plaza. Tools that want
+// to test the WALKED route should drive city.portals themselves; see
+// tools/flow-test.mjs.
 export async function enterGate(page, { rank = null, waitMs = 2200 } = {}) {
   await page.click('#btnPlay');
+  // Give the city a moment to mount, then jump to the fast-travel list.
+  await page.waitForFunction(
+    () => Boolean(window.__app) || document.querySelector('#gateList .gate'),
+    null, { timeout: 15000 },
+  ).catch(() => {});
+  if (!(await page.locator('#gateList .gate').count())) {
+    await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 20000 })
+      .catch(() => {});
+    await page.evaluate(() => window.__app?.go('gates'));
+  }
   await page.waitForSelector('#gateList .gate', { timeout: 10000 });
   const sel = rank
     ? `#gateList .gate:not(.locked):has(.rank-${rank})`

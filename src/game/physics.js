@@ -21,6 +21,22 @@ import * as THREE from 'three';
  * them inline per frame allocates a closure per entity per frame.
  *
  * ---------------------------------------------------------------------------
+ * SOLID SCENERY
+ * ---------------------------------------------------------------------------
+ * A fourth argument (or setObstacles) binds an ObstacleField from
+ * src/world/obstacles.js — the shared registry the rocks, monoliths, trees and
+ * buildings live in:
+ *
+ *   body.setEnvironment(city.heightAt, city.resolve, city.groundNormal,
+ *                       city.obstacleField);
+ *
+ * With a field bound, step() SUBSTEPS the horizontal integration so a fast body
+ * cannot tunnel through a thin prop, and slides along whatever it touches
+ * instead of stopping dead. With no field — or an empty one — the whole path is
+ * skipped and integration is the single `pos += vel * dt` it has always been,
+ * so a level that registers nothing behaves exactly as it does today.
+ *
+ * ---------------------------------------------------------------------------
  * PER-FRAME ORDER IN game.js — what to call, in this sequence
  * ---------------------------------------------------------------------------
  * Player (_updatePlayer, replacing the movement block):
@@ -104,6 +120,24 @@ export const BODY_DEFAULTS = {
   maxStep: 0.05,            // never integrate a longer frame than this
   normalSampleDist: 0.35,   // resample the ground normal only after moving this far
   normalEps: 0.9,           // finite-difference span, matches Terrain.normal
+
+  // Anti-tunnelling. The horizontal move is split so no single advance is
+  // longer than min(radius, field.minExtent) * collisionSubstep before the
+  // obstacle field gets a look. At the capped walk speed that is one substep;
+  // at dash/knockback speeds it becomes two or three, which is the difference
+  // between sliding round a bollard and teleporting through it.
+  collisionSubstep: 0.75,
+  maxCollisionSubsteps: 12,
+
+  // How long a contact normal keeps steering held input along the surface. Long
+  // enough to bridge the frames where the body is a hair off the wall and
+  // resolve() reports nothing, short enough that it is gone before you have
+  // turned around. Set to 0 to disable wall-following entirely.
+  wallStick: 0.14,
+  // Throttle used when the input is EXACTLY into a wall, so there is no tangent
+  // left to project onto and we fall back to the deflection direction. Below 1
+  // so shouldering along a building is visibly slower than walking a street.
+  wallSlideThrottle: 0.6,
 };
 
 export class CharacterBody {
@@ -125,6 +159,7 @@ export class CharacterBody {
     this.groundHeight = opts.groundHeight || FLAT_GROUND;
     this.groundNormal = opts.groundNormal || null;
     this.resolve = opts.resolve || null;
+    this.obstacles = opts.obstacles || null;   // ObstacleField, or null
     this._flat = this.groundHeight === FLAT_GROUND;
 
     this.grounded = true;
@@ -151,6 +186,12 @@ export class CharacterBody {
     this._impulseCache = new Map();
     this._sampleX = Infinity;     // forces a normal sample on the first step
     this._sampleZ = Infinity;
+    // Remembered surface, so held input follows a wall instead of grinding it.
+    this._wallT = 0;
+    this._wallNX = 0;
+    this._wallNZ = 0;
+    /** True on any frame the body is pressed against solid scenery. */
+    this.touchingWall = false;
   }
 
   /**
@@ -158,13 +199,29 @@ export class CharacterBody {
    * `resolve(pos, radius, vel)` matches World.resolve / Overworld.resolve;
    * `groundNormal(x, z, out)` is optional and, when absent, the normal is
    * derived from groundHeight by central differences.
+   *
+   * `obstacles` is an ObstacleField (src/world/obstacles.js) or null. It is
+   * ALWAYS assigned, including to null when omitted — a level change must not
+   * silently leave the previous level's rocks solid, so bind the field here or
+   * with setObstacles() *after* this call, never before it.
    */
-  setEnvironment(groundHeight, resolve = null, groundNormal = null) {
+  setEnvironment(groundHeight, resolve = null, groundNormal = null, obstacles = null) {
     this.groundHeight = groundHeight || FLAT_GROUND;
     this.resolve = resolve;
     this.groundNormal = groundNormal;
+    this.obstacles = obstacles || null;
     this._flat = this.groundHeight === FLAT_GROUND;
     this._sampleX = Infinity;
+    return this;
+  }
+
+  /**
+   * Bind (or clear with null) the solid-scenery registry on its own, for
+   * callers that set the environment once and rebuild the world's solids
+   * separately. An empty or null field restores today's exact movement.
+   */
+  setObstacles(field) {
+    this.obstacles = field || null;
     return this;
   }
 
@@ -249,6 +306,8 @@ export class CharacterBody {
     this._throttle = 0;
     this._drag = 0;
     this._sampleX = Infinity;
+    this._wallT = 0;
+    this.touchingWall = false;
     return this;
   }
 
@@ -336,6 +395,7 @@ export class CharacterBody {
     this.justJumped = false;
     if (this._coyote > 0) this._coyote -= dt;
     if (this._buffer > 0) this._buffer -= dt;
+    if (this._wallT > 0) this._wallT -= dt;
 
     // --- what we are standing on ---
     const h0 = this.groundHeight(pos.x, pos.z);
@@ -393,18 +453,46 @@ export class CharacterBody {
 
     // --- acceleration ---
     if (this._throttle > 0) {
-      const want = this.maxSpeed * this._throttle;
+      let mx = this._moveX;
+      let mz = this._moveZ;
+      let wallScale = 1;
+      // Steer ALONG a surface we are pressed against. Push-out alone only
+      // removes the velocity going into the wall; the input keeps re-adding it
+      // every frame, so the sideways component the contact gave us bleeds off
+      // to friction and the character stalls flat against the building. This is
+      // the difference between "slides round the corner" and "stops dead",
+      // which is the thing the owner would notice first.
+      if (this._wallT > 0) {
+        const dot = mx * this._wallNX + mz * this._wallNZ;
+        if (dot < 0) {
+          mx -= this._wallNX * dot;
+          mz -= this._wallNZ * dot;
+          const l = Math.sqrt(mx * mx + mz * mz);
+          if (l > 0.2) {
+            mx /= l;
+            mz /= l;
+          } else {
+            // Dead-on into the surface: no tangent survives the projection.
+            // Follow the wall the same way round the push-out deflects, at a
+            // reduced throttle so it reads as shouldering along it.
+            mx = -this._wallNZ;
+            mz = this._wallNX;
+            wallScale = this.wallSlideThrottle;
+          }
+        }
+      }
+      const want = this.maxSpeed * this._throttle * wallScale;
       // Measure speed already going the way we want, and only ever top it up to
       // `want`. Velocity above that came from an impulse and is left alone, so
       // steering during a dash redirects it without cancelling it.
-      const into = vel.x * this._moveX + vel.z * this._moveZ;
+      const into = vel.x * mx + vel.z * mz;
       const gap = want - into;
       if (gap > 0) {
         let accel = this.grounded ? this.groundAccel : this.groundAccel * this.airControl;
         if (this.sliding) accel *= this.slideControl;
         const add = Math.min(accel * this._throttle * dt, gap);
-        vel.x += this._moveX * add;
-        vel.z += this._moveZ * add;
+        vel.x += mx * add;
+        vel.z += mz * add;
       }
     }
 
@@ -423,9 +511,46 @@ export class CharacterBody {
     // --- integrate ---
     const px = pos.x;
     const pz = pos.z;
-    pos.x += vel.x * dt;
+    const field = (this.obstacles && this.obstacles.count > 0) ? this.obstacles : null;
+    this.touchingWall = false;
     pos.y += vel.y * dt;
-    pos.z += vel.z * dt;
+    if (!field) {
+      // No solids registered: the original single-shot integration, untouched.
+      pos.x += vel.x * dt;
+      pos.z += vel.z * dt;
+    } else {
+      // Substep against the field. Splitting the move and resolving each slice
+      // is what stops a dash or a knockback stepping clean over a bollard, and
+      // it re-reads `vel` every slice so a body deflected by the first contact
+      // continues along the NEW heading — that is what makes a corner feel like
+      // a slide rather than a stop.
+      let n = 1;
+      const dist = Math.sqrt(vel.x * vel.x + vel.z * vel.z) * dt;
+      const grain = Math.max(0.08, Math.min(this.radius, field.minExtent) * this.collisionSubstep);
+      if (dist > grain) n = Math.min(this.maxCollisionSubsteps, Math.ceil(dist / grain));
+      const sub = dt / n;
+      let cx = 0;
+      let cz = 0;
+      let hits = 0;
+      for (let i = 0; i < n; i++) {
+        pos.x += vel.x * sub;
+        pos.z += vel.z * sub;
+        if (field.resolve(pos, this.radius, vel, this.stepHeight) && field.contacts > 0) {
+          cx += field.contactNX;
+          cz += field.contactNZ;
+          hits += field.contacts;
+        }
+      }
+      if (hits > 0) {
+        const l = Math.sqrt(cx * cx + cz * cz);
+        if (l > 1e-6) {
+          this._wallNX = cx / l;
+          this._wallNZ = cz / l;
+          this._wallT = this.wallStick;
+        }
+      }
+      this.touchingWall = hits > 0;
+    }
 
     if (this.resolve) this.resolve(pos, this.radius, vel);
 

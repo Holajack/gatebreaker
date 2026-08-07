@@ -3,8 +3,26 @@ import { GLOW_LAYER } from '../render/glow.js';
 
 // Pooled particle bursts, floating damage numbers, camera shake and hit-stop.
 // Everything here is allocation-light so long fights don't stutter on mobile.
+//
+// THIS MODULE IS WHERE GLOW BELONGS. The rest of the render stack has just had
+// its glow taken off characters — a person should be lit, not luminous. What
+// stays on GLOW_LAYER is the stuff that is supposed to be light in the fiction:
+// impact sparks, shockwaves, novas, projectiles, portals. That is the whole
+// point of keeping the machinery.
+//
+// The numbers below were still tuned for the box-man era, when a burst had to
+// out-shout untextured geometry. They are pulled back so an effect READS as an
+// effect over a character rather than replacing the character with a flare.
 
 const MAX_PARTICLES = 420;
+
+// Particle alpha. Was 0.95 — effectively opaque, so a 60-particle nova put a
+// wall of fully-bright tetrahedra over whoever it hit.
+const PARTICLE_OPACITY = 0.82;
+
+// Peak shockwave-ring alpha. Was 0.85. These fire on every kill, crit and nova,
+// so with a busy field several are alive at once and they add.
+const SHOCK_OPACITY = 0.68;
 
 export class Effects {
   constructor(scene, camera, renderer) {
@@ -17,7 +35,7 @@ export class Effects {
 
     // --- particle pool: one InstancedMesh, transforms written per frame ---
     const geo = new THREE.TetrahedronGeometry(0.16, 0);
-    const mat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.95, vertexColors: true });
+    const mat = new THREE.MeshBasicMaterial({ transparent: true, opacity: PARTICLE_OPACITY, vertexColors: true });
     this.mesh = new THREE.InstancedMesh(geo, mat, MAX_PARTICLES);
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.mesh.frustumCulled = false;
@@ -82,7 +100,7 @@ export class Effects {
     let m = this._ringMats.get(color);
     if (!m) {
       m = new THREE.MeshBasicMaterial({
-        color, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false,
+        color, transparent: true, opacity: SHOCK_OPACITY, side: THREE.DoubleSide, depthWrite: false,
       });
       this._ringMats.set(color, m);
     }
@@ -168,7 +186,7 @@ export class Effects {
       }
       const eased = 1 - Math.pow(1 - k, 2.4);
       r.mesh.scale.setScalar(0.4 + eased * r.maxRadius);
-      const o = 0.85 * (1 - k);
+      const o = SHOCK_OPACITY * (1 - k);
       const prev = this._ringOpacity.get(r.mesh.material);
       if (prev === undefined || o > prev) this._ringOpacity.set(r.mesh.material, o);
     }

@@ -25,8 +25,11 @@
     "test:progression": "node tools/progression-test.mjs",
     "test:frameclock": "node tools/frameclock-test.mjs",
     "test:entities": "node tools/entity-test.mjs",
-    "test:biomes": "node tools/biome-test.mjs",
-    "test:shadows": "node tools/shadow-test.mjs"
+    "test:flow": "node tools/flow-test.mjs",
+    "test:acceptance": "node tools/acceptance.mjs",
+    "test:collision": "node tools/collision-test.mjs",
+    "test:visual": "node tools/visual-test.mjs",
+    "test:creatures-live": "node tools/creature-test.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^6.2.0",

@@ -82,6 +82,44 @@ function pmrem(renderer) {
  * Load the shipped HDRI once. Resolves to the equirect texture, or null if it
  * could not be fetched — callers must handle null and fall back.
  */
+// Indirect-light exposure, and why it is not 1.0.
+//
+// Characters used to carry a Fresnel rim that added light to every silhouette
+// edge. That rim was doing two jobs at once: making a box read as a body, and
+// quietly acting as a fill light. rim.js has now turned it off for living
+// characters — the owner asked for people, not neon outlines — and the second
+// job went with it. Measured on the 8-character gameplay frame, dropping the
+// rim cost the character region about a fifth of its brightness on its own.
+//
+// This buys that fill back from the correct place: the image-based light. It is
+// a real fill from the sky the scene is actually standing under, so it lands on
+// upward-facing surfaces and follows the biome, rather than tracing an outline
+// around everybody. Applied to the HDRI radiance before PMREM prefilters it, so
+// it costs one pass over a 512x256 buffer at boot and nothing per frame.
+export const IBL_EXPOSURE = 1.35;
+
+function scaleRadiance(tex, k) {
+  const d = tex.image?.data;
+  if (!d || k === 1) return tex;
+  // RGBELoader gives HalfFloatType by default in three r150+; handle both it
+  // and the Float32 path rather than assuming, because a wrong assumption here
+  // is a silently black sky.
+  if (d instanceof Uint16Array) {
+    const { fromHalfFloat, toHalfFloat } = THREE.DataUtils;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i] = toHalfFloat(fromHalfFloat(d[i]) * k);
+      d[i + 1] = toHalfFloat(fromHalfFloat(d[i + 1]) * k);
+      d[i + 2] = toHalfFloat(fromHalfFloat(d[i + 2]) * k);
+    }
+  } else if (d instanceof Float32Array) {
+    for (let i = 0; i < d.length; i += 4) { d[i] *= k; d[i + 1] *= k; d[i + 2] *= k; }
+  } else {
+    return tex;   // unknown encoding: leave it alone rather than corrupt it
+  }
+  tex.needsUpdate = true;
+  return tex;
+}
+
 export function loadHdri(url = 'hdri/rift_sky.hdr') {
   if (_hdriPromise) return _hdriPromise;
   _hdriPromise = new Promise((resolve) => {
@@ -89,6 +127,7 @@ export function loadHdri(url = 'hdri/rift_sky.hdr') {
       url,
       (tex) => {
         tex.mapping = THREE.EquirectangularReflectionMapping;
+        scaleRadiance(tex, IBL_EXPOSURE);
         _hdriTexture = tex;
         resolve(tex);
       },

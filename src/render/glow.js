@@ -16,10 +16,45 @@ import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 
 export const GLOW_LAYER = 1;
 
+// The bloom ceiling, and the reason it exists.
+//
+// The shipped build ran this pass at strength 1.35. The main scene is rendered
+// through ACES tone mapping at exposure 1.25, so a character's brightest lit
+// pixels get rolled off, while this pass is composited ON TOP in gamma space
+// with no rolloff at all. The arithmetic guarantees the outcome the review
+// described: "bloom on the rings is far stronger than on the characters". The
+// characters could not win, whatever the art did.
+//
+// 0.85 is where an 8-character field stops being a sheet of light. Anything
+// that truly needs to blow out — a portal, a nova, a boss telegraph — is still
+// plenty bright, because those are saturated MeshBasicMaterial at full value
+// and the composite's exp() rolloff keeps their cores white either way.
+//
+// Callers that pass more than this get clamped rather than obeyed. That is a
+// deliberate one-way door: game.js is not this module's to edit, and a silent
+// clamp with a loud comment beats leaving the shipped look in place. Use
+// setStrength(v, { force: true }) to go above it on purpose.
+export const MAX_STRENGTH = 0.85;
+
+// Same story for the blur kernel. game.js asks for 1.1; at quarter resolution
+// that is a very wide halo, and width is what made eight ground rings pool into
+// a single sheet rather than eight separate marks.
+export const MAX_SPREAD = 0.9;
+
 /** Mark an object (and its subtree) as emissive for the glow pass. */
 export function markGlow(obj) {
   obj.traverse((o) => {
     if (o.isMesh || o.isPoints || o.isInstancedMesh) o.layers.enable(GLOW_LAYER);
+  });
+}
+
+/**
+ * Opt back OUT of the glow pass. The counterpart to markGlow, for objects that
+ * inherited GLOW_LAYER from a treatment written for the box-man era.
+ */
+export function unmarkGlow(obj) {
+  obj.traverse((o) => {
+    if (o.isMesh || o.isPoints || o.isInstancedMesh) o.layers.disable(GLOW_LAYER);
   });
 }
 
@@ -56,11 +91,15 @@ const COMPOSITE = /* glsl */`
 `;
 
 export class Glow {
-  constructor(renderer, { scale = 0.25, strength = 1.35, spread = 1.1 } = {}) {
+  // `spread` defaults tighter than it used to (1.1 -> 0.9). Halo WIDTH is what
+  // made eight rings merge into one mass; a narrower kernel keeps a glow
+  // attached to the object that emitted it instead of pooling between objects.
+  constructor(renderer, { scale = 0.25, strength = 0.85, spread = 0.9 } = {}) {
     this.renderer = renderer;
     this.scale = scale;
-    this.spread = spread;
+    this.spread = Math.min(spread, MAX_SPREAD);
     this.enabled = true;
+    this.strength = Math.min(strength, MAX_STRENGTH);
     this._black = new THREE.Color(0, 0, 0);
     this._prevClear = new THREE.Color();
 
@@ -82,7 +121,7 @@ export class Glow {
       depthTest: false, depthWrite: false,
     });
     this.compMat = new THREE.ShaderMaterial({
-      uniforms: { tGlow: { value: this.rtA.texture }, uStrength: { value: strength } },
+      uniforms: { tGlow: { value: this.rtA.texture }, uStrength: { value: this.strength } },
       vertexShader: VERT, fragmentShader: COMPOSITE,
       blending: THREE.AdditiveBlending,
       transparent: true, depthTest: false, depthWrite: false,
@@ -90,6 +129,18 @@ export class Glow {
     this.blurQuad = new FullScreenQuad(this.blurMat);
     this.compQuad = new FullScreenQuad(this.compMat);
     this._w = 2; this._h = 2;
+  }
+
+  /**
+   * Change the composite strength at runtime. Clamped to MAX_STRENGTH unless
+   * `force`, which exists so a deliberate set-piece (a rift collapsing, say)
+   * can blow the screen out without the ceiling being a lie the rest of the
+   * time.
+   */
+  setStrength(v, { force = false } = {}) {
+    this.strength = force ? v : Math.min(v, MAX_STRENGTH);
+    this.compMat.uniforms.uStrength.value = this.strength;
+    return this.strength;
   }
 
   setSize(w, h, pixelRatio) {

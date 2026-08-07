@@ -411,7 +411,11 @@ try {
   // =============================================== PASS 2: GLB unavailable
   // The offline requirement: a missing asset must degrade, not crash.
   const { page: p2, errors: e2 } = await newPhonePage(browser, { width: 900, height: 520, dpr: 2 });
+  // Both packs, not just characters.glb. Enemies now come from creatures.glb
+  // and fall back to characters.glb before falling back to the procedural
+  // box-man, so blocking one pack alone proves nothing about the last resort.
   await p2.route('**/models/characters.*', (route) => route.fulfill({ status: 404, body: '' }));
+  await p2.route('**/models/creatures.*', (route) => route.fulfill({ status: 404, body: '' }));
   await gotoGame(p2);
   await p2.evaluate(async () => { window.__chars = await import('/src/render/characters.js'); });
   await enterGate(p2, { rank: 'E', waitMs: 2500 });

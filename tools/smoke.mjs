@@ -13,7 +13,7 @@
 //            disposes, and a regression here is an Android crash, not a slowdown.
 
 import {
-  OUT, launchBrowser, newPhonePage, ensureServer, gotoGame, enterGate,
+  OUT, launchBrowser, newPhonePage, ensureServer, gotoGame,
   evalGame, writeReport, shotPath,
 } from './_harness.mjs';
 
@@ -50,20 +50,29 @@ try {
   check('canvas has non-zero size', canvas && canvas.w > 0 && canvas.h > 0,
     canvas ? `${canvas.w}x${canvas.h}` : 'no canvas');
 
-  // ------------------------------------------------------ city (optional)
-  // The hub does not exist yet; probe for it so this assertion turns on by
-  // itself the moment city mode ships, rather than being forgotten.
+  // ------------------------------------------------------------- city hub
+  // PLAY now lands in the city, not the gate list. Probe AFTER the click —
+  // CityUI (#cityPrompt) only mounts when CityMode does, so probing from the
+  // title always read false.
+  await page.click('#btnPlay');
+  await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 25000 })
+    .catch(() => {});
+  await page.waitForTimeout(600);
   const city = await evalGame(page, (g) => ({
-    hasMode: typeof g.enterCity === 'function' || g.mode === 'city' || Boolean(g.city),
+    mode: g.mode?.name || null,
+    hasMode: typeof g.enterCity === 'function' || g.mode?.name === 'city' || Boolean(g.city),
     prompt: Boolean(document.getElementById('cityPrompt')),
+    portals: g.mode?.city?.portals?.length || 0,
   }));
+  await page.screenshot({ path: shotPath('02-city.png') });
   if (REQUIRE_CITY) check('title -> city transition available', city.hasMode && city.prompt, JSON.stringify(city));
-  else console.log(`SKIP  city hub not built yet — ${JSON.stringify(city)}`);
+  else check('PLAY lands in the city hub', city.mode === 'city' && city.prompt, JSON.stringify(city));
 
   // ------------------------------------------------------------ gate entry
-  await page.click('#btnPlay');
+  // Fast travel through AppState — the WALKED portal route is flow-test's job.
+  await page.evaluate(() => window.__app?.go('gates'));
   await page.waitForSelector('#gateList .gate', { timeout: 10000 });
-  await page.screenshot({ path: shotPath('02-gates.png') });
+  await page.screenshot({ path: shotPath('02b-gates.png') });
   const gateCount = await page.locator('#gateList .gate:not(.locked)').count();
   check('at least one unlocked gate is listed', gateCount > 0, `${gateCount} unlocked`);
 

@@ -3,6 +3,8 @@ import { BIOMES } from './config.js';
 import { buildBiomeEnvironment } from '../render/env.js';
 import { makeSky } from '../render/sky.js';
 import { GLOW_LAYER } from '../render/glow.js';
+import { ObstacleField } from '../world/obstacles.js';
+import { buildNavGrid } from '../world/navgrid.js';
 
 // Deterministic PRNG so a given seed always rebuilds the same gate layout.
 export function mulberry32(seed) {
@@ -27,6 +29,11 @@ export class World {
     this.group = new THREE.Group();
     this.scene.add(this.group);
     this.obstacles = [];   // { pos: Vector3, radius: number }
+    // Shared collision registry. stepOver at field level so enemies going
+    // through World.resolve step over the same kerb-height rubble the player
+    // does, instead of jamming on a pebble.
+    this.obstacleField = new ObstacleField({ stepOver: 0.4 });
+    this.navGrid = null;
     this.radius = 40;
     this._disposables = [];
   }
@@ -41,6 +48,8 @@ export class World {
     });
     this.group.clear();
     this.obstacles.length = 0;
+    this.obstacleField.clear();
+    this.navGrid = null;
     this._disposables.forEach((d) => d.dispose?.());
     this._disposables.length = 0;
     if (this.envRT) { this.envRT.dispose(); this.envRT = null; }
@@ -133,9 +142,14 @@ export class World {
       m.castShadow = true;
       this.group.add(m);
       this.obstacles.push({ pos: new THREE.Vector3(x, 0, z), radius: r + 0.35 });
+      this.obstacleField.addCircle(x, z, r + 0.35, { tag: 'pillar' });
     }
 
-    // --- low scatter rocks (pure decoration, no collision) ---
+    // --- low scatter rocks: SOLID above ankle height, decoration below ---
+    // The dodecahedron is scaled (s, s*0.6, s) and sits at y = s*0.3, so its
+    // top is 0.9s and its footprint radius is s. Anything whose top clears the
+    // field's 0.4 step-over height becomes a real obstacle; genuine pebbles
+    // (s <= 0.444) stay walk-over decoration instead of ankle-traps.
     const rockGeo = new THREE.DodecahedronGeometry(1, 0);
     const rockMat = new THREE.MeshStandardMaterial({ color: biome.pillar, roughness: 1, flatShading: true });
     const rocks = new THREE.InstancedMesh(rockGeo, rockMat, 60);
@@ -149,6 +163,7 @@ export class World {
       const d = rnd() * this.radius * 0.95;
       const s = 0.2 + rnd() * 0.7;
       v.set(Math.cos(a) * d, s * 0.3, Math.sin(a) * d);
+      if (s * 0.9 > 0.4) this.obstacleField.addCircle(v.x, v.z, s * 0.92, { top: s * 0.9, tag: 'rock' });
       e.set(rnd() * 3, rnd() * 3, rnd() * 3);
       q.setFromEuler(e);
       sc.set(s, s * 0.6, s);
@@ -167,7 +182,11 @@ export class World {
       const a = rnd() * Math.PI * 2;
       const d = rnd() * this.radius;
       this.shardData.push({
-        base: new THREE.Vector3(Math.cos(a) * d, 3 + rnd() * 16, Math.sin(a) * d),
+        // Floor raised from 3 m to 8 m. A shard at 3 m sits at head height in
+        // the combat plane, and because it is a bloomed MeshBasic on
+        // GLOW_LAYER it renders as a big soft square that parks itself in
+        // front of whatever you are fighting. Overhead is where it belongs.
+        base: new THREE.Vector3(Math.cos(a) * d, 8 + rnd() * 14, Math.sin(a) * d),
         phase: rnd() * Math.PI * 2,
         speed: 0.25 + rnd() * 0.6,
         scale: 0.3 + rnd() * 1.1,
@@ -204,6 +223,25 @@ export class World {
     fill.position.set(0, 14, 0);
     this.group.add(fill);
     this.fillLight = fill;
+
+    // Pack the registry once, on level entry. Everything that collides in the
+    // arena — player, enemies, shadows — goes through World.resolve, so this
+    // single call is what makes the arena solid for all of them.
+    this.obstacleField.build();
+
+    // The arena had NO nav grid at all: game.js reads this.world.navGrid and
+    // it was never defined, so arena enemies had only straight-line steering
+    // and jammed on pillars. Rocks below the step height are not registered,
+    // so they cannot seal the arena off.
+    this.navGrid = buildNavGrid({
+      ...this.obstacleField.toNavBlockers(),
+      originX: 0,
+      originZ: 0,
+      size: this.radius * 2 + 8,
+      cell: 1.5,
+      pad: 0.5,
+      inside: (x, z) => Math.hypot(x, z) < this.radius - 0.6,
+    });
 
     this._t = 0;
     return this;
@@ -290,25 +328,9 @@ export class World {
       }
     };
 
-    for (const o of this.obstacles) {
-      const dx = pos.x - o.pos.x;
-      const dz = pos.z - o.pos.z;
-      const min = o.radius + radius;
-      const d2 = dx * dx + dz * dz;
-      if (d2 >= min * min) continue;
-      let nx, nz;
-      if (d2 > 1e-6) {
-        const d = Math.sqrt(d2);
-        nx = dx / d; nz = dz / d;
-      } else {
-        // Dead centre: no meaningful push direction, so pick a fixed one.
-        // Otherwise anything spawned on a pillar's origin is stuck forever.
-        nx = 1; nz = 0;
-      }
-      pos.x = o.pos.x + nx * min;
-      pos.z = o.pos.z + nz * min;
-      slide(nx, nz);
-    }
+    // One call covers pillars AND the scatter rocks, with the step-over rule
+    // and the grid broadphase. It does its own push-out and slide.
+    this.obstacleField.resolve(pos, radius, vel);
 
     const lim = this.radius - radius - 0.6;
     const dist = Math.hypot(pos.x, pos.z);

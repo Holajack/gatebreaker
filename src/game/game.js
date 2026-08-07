@@ -24,6 +24,11 @@ import {
 import { Glow, GLOW_LAYER } from '../render/glow.js';
 import { Quality } from '../core/quality.js';
 import { attachBody, applyKnockback, FLAT_GROUND } from './physics.js';
+import { createMode } from './modes/mode.js';
+// Imported for their registerMode() side effect. createMode looks the factory
+// up by name, so nothing else in this file needs to know either class exists.
+import './modes/dungeonmode.js';
+import './modes/citymode.js';
 
 // How hard a corpse resists extraction. progression.extractionChance takes this
 // as its tierWeight. Provisional home: difficulty.js owns enemy classification
@@ -47,13 +52,22 @@ const _steerCtx = {
 };
 
 export class Game {
-  constructor({ canvas, input, audio, ui, saveData, onSave }) {
+  constructor({ canvas, input, audio, ui, saveData, onSave, appState = null, frameClock = null }) {
     this.canvas = canvas;
     this.input = input;
     this.audio = audio;
     this.ui = ui;
     this.save = saveData;
     this.onSave = onSave;
+    // The screen router and the frame pacer. Both are optional so the headless
+    // tools that construct a bare Game still work.
+    this.appState = appState;
+    this.frameClock = frameClock;
+    this._mode = null;
+    this._frameDt = 0;
+    // The rank of the last gate entered, so returning to the city puts the
+    // player back beside the portal they walked into rather than at the spawn.
+    this.lastGateRank = null;
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
@@ -85,7 +99,12 @@ export class Game {
 
     this.world = new World(this.scene, this.renderer, this.camera);
     this.fx = new Effects(this.scene, this.camera, this.renderer);
-    this.glow = new Glow(this.renderer, { scale: 0.25, strength: 1.35, spread: 1.1 });
+    // 0.85/0.9 is what glow.js actually applies — the main scene goes through
+    // ACES tone mapping at exposure 1.25 while the bloom pass is composited on
+    // top in gamma space with no rolloff, so the old 1.35/1.1 was arithmetically
+    // guaranteed to outshine the characters. Say the real numbers here rather
+    // than asking for numbers that get silently clamped.
+    this.glow = new Glow(this.renderer, { scale: 0.25, strength: 0.85, spread: 0.9 });
     this.quality = new Quality({ onChange: (t) => this._applyQuality(t) });
     this._applyQuality(this.quality.current);
 
@@ -168,7 +187,14 @@ export class Game {
     this.renderer.shadowMap.needsUpdate = true;
     this._applyQuality(this.quality.current);
     this.resize();
-    if (this.gate) this.world.build(this.gate, this.seed);
+    // Rebuild whatever level is mounted. Its geometry was uploaded to a
+    // context that no longer exists, so re-entering the mode is the only
+    // honest repair — and for the city it is also the cheapest.
+    if (this._mode?.name === 'city') {
+      this._mode.enter({ spawnAt: this.player.pos.clone() });
+    } else if (this.gate) {
+      this.world.build(this.gate, this.seed);
+    }
     // Only auto-resume the pause WE forced. A player who paused deliberately
     // and then took a phone call should still come back to the pause screen.
     if (this._lostContext) {
@@ -280,8 +306,63 @@ export class Game {
     this.player.mp = Math.min(this.derived.maxMp, this.player.mp + Math.max(0, this.derived.maxMp - prevMaxMp));
   }
 
-  // ------------------------------------------------------------- gate flow
+  // ------------------------------------------------------------- mode flow
+  //
+  // The game has exactly two places you can be: the city, or inside a gate.
+  // Which one is mounted is the ONLY thing that decides what a frame does.
+
+  get mode() { return this._mode; }
+
+  /** Swap the mounted mode. `name === null` unmounts and leaves an empty scene. */
+  _setMode(name, payload = {}) {
+    if (this._mode) {
+      this._mode.exit();
+      this._mode = null;
+    }
+    if (!name) return null;
+    this._mode = createMode(name, this);
+    this._mode.enter(payload);
+    return this._mode;
+  }
+
+  /**
+   * Walk into Threshold. Routed through AppState by main.js — call
+   * `appState.go('city', { atPortal })` rather than this directly, or the
+   * screen stack and the mounted mode disagree.
+   */
+  enterCity({ spawnAt = null, atPortal = null } = {}) {
+    return this._setMode('city', { spawnAt, atPortal: atPortal ?? this.lastGateRank });
+  }
+
+  /** Step through a portal. `rank` is 'E'..'S'. */
+  enterGate(rank, { forceBiome = null } = {}) {
+    const index = Math.max(0, GATES.findIndex((g) => g.rank === rank));
+    const resolved = GATES[index].rank;
+    this.lastGateRank = resolved;
+    if (this.appState) return this.appState.go('run', { rank: resolved, gateIndex: index, forceBiome });
+    return this.beginRun({ rank: resolved, gateIndex: index });
+  }
+
+  /** Mount the dungeon. AppState's onEnter('run') hook calls this. */
+  beginRun({ rank = null, gateIndex = null } = {}) {
+    const index = gateIndex != null
+      ? gateIndex
+      : Math.max(0, GATES.findIndex((g) => g.rank === rank));
+    this.lastGateRank = GATES[index].rank;
+    return this._setMode('dungeon', { gateIndex: index, rank: GATES[index].rank });
+  }
+
+  /** Compat wrapper for the gate-list menu, which still speaks in indices. */
   startGate(index) {
+    return this.enterGate(GATES[index]?.rank ?? GATES[0].rank);
+  }
+
+  // ------------------------------------------------------------- gate setup
+  //
+  // Everything below this line is the code that shipped, moved but not
+  // rewritten. DungeonMode.enter() calls _beginGate; the old public
+  // startGate(index) is the wrapper above.
+  _beginGate(index) {
     const gate = GATES[index];
     this.gateIndex = index;
     this.gate = gate;
@@ -417,6 +498,10 @@ export class Game {
       color: b.color, glow: b.glow, accent: 0x0d0f1c,
       weapon: 'sword', scale: b.scale, cloak: true,
       archetype: 'boss', rank: this.gate.rank ?? 'E',
+      // Name the boss explicitly. creatures.js can fall back to a rank lookup,
+      // but that is only correct today because GATES' rank order and the
+      // manifest's boss assignments happen to line up 1:1.
+      boss: this.gate.boss,
     });
     mesh.add(makeGroundRing(b.glow, 1.6, 0.6));
     mesh.position.copy(pos);
@@ -881,7 +966,10 @@ export class Game {
   update(rawDt) {
     const dt = Math.min(rawDt, 0.05);
     this.time += dt;
-    this.world.update(dt);
+    this._frameDt = dt;
+    // Atmosphere runs behind a pause, exactly as `this.world.update(dt)` did
+    // when it sat here unconditionally.
+    this._mode?.updateAlways(dt);
     this.fx.update(dt);
 
     if (this.state === 'playing') {
@@ -892,21 +980,31 @@ export class Game {
         this.levelUpDilation = Math.max(0, this.levelUpDilation - dt);
         step *= 0.35;
       }
-      this.runTime += dt;
-      this._updatePlayer(step);
-      this._updateEnemies(step);
-      this._updateShadows(step);
-      this._updateProjectiles(step);
-      this._updateCorpses(step);
-      this._updatePickups(step);
-      this._updateSpawns(step);
-      this.ui.updateHud(this);
+      this._mode?.update(step, rawDt);
     }
 
-    this._updateCamera(dt);
+    if (this._mode) this._mode.updateCamera(dt);
+    else this._updateCamera(dt);
     this.input.endFrame();
     this.glow.render(this.scene, this.camera);
     this.quality.update(rawDt);
+  }
+
+  /**
+   * One in-gate frame. This is the block that used to live inline in update()
+   * — same calls, same order, same dt. `runTime` deliberately advances on the
+   * UNSCALED frame time, as it always has, so hit-stop does not slow the clock.
+   */
+  _updateDungeonFrame(dt) {
+    this.runTime += this._frameDt;
+    this._updatePlayer(dt);
+    this._updateEnemies(dt);
+    this._updateShadows(dt);
+    this._updateProjectiles(dt);
+    this._updateCorpses(dt);
+    this._updatePickups(dt);
+    this._updateSpawns(dt);
+    this.ui.updateHud(this);
   }
 
   _updatePlayer(dt) {
@@ -1101,8 +1199,10 @@ export class Game {
         dt,
       });
 
-      // health bar billboard
-      const h = e.isBoss ? 5.6 : 2.4 * (e.base.scale || 1);
+      // health bar billboard. A flat 5.6 for bosses put the bar across the
+      // face of anything scaled past ~2.3 (a scale-3.4 boss is 7.3 m tall);
+      // scaling it like every other enemy clears the head at every rank.
+      const h = 2.4 * (e.base.scale || 1);
       e.bar.position.copy(e.pos).setY(h);
       e.bar.quaternion.copy(this.camera.quaternion);
       setHealthBar(e.bar, e.hp / e.maxHp);
@@ -1449,6 +1549,9 @@ export class Game {
     const roster = rosterSummary(this.save);
     this.onSave();
     this.ui.showHud(false);
+    // replace(), not go(): the finished run must not sit on the back stack, or
+    // hardware-back from the results panel would restart the gate.
+    this.appState?.replace('results', { rank, cleared: true });
     this.ui.showResults({
       title: 'RIFT CLEARED',
       cleared: true,
@@ -1489,6 +1592,7 @@ export class Game {
     this.fx.burst(this.player.pos.clone().setY(1), 60, 0xff4d6d, { speed: 10, up: 6, life: 1.4 });
     this.fx.addShake(1.1);
     this.ui.showHud(false);
+    this.appState?.replace('results', { rank: this.gate?.rank ?? null, cleared: false });
     const t = Math.round(this.runTime);
     this.ui.showResults({
       title: 'YOU FELL',
@@ -1513,9 +1617,11 @@ export class Game {
     this.audio.music(!on);
   }
 
+  /** Unmount whatever is running and leave an empty scene (title screen). */
   quit() {
-    this.state = 'idle';
     this.onSave();
+    this._setMode(null);
+    this.state = 'idle';
     this.clearEntities();
     this.world.clear();
     this.audio.music(false);

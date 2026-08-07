@@ -8,6 +8,8 @@ import { loadItemModels, getItemMesh, itemModelStats } from './render/models.js'
 import { loadIconIndex } from './ui/icons.js';
 import { preloadCharacters, characterStats } from './game/entities.js';
 import { FrameClock } from './core/frameclock.js';
+import { AppState } from './core/appstate.js';
+import { preloadCity } from './world/city.js';
 
 const canvas = document.getElementById('scene');
 const audio = new Audio();
@@ -37,12 +39,96 @@ const ui = new UI({
 ui.attach(saveData);
 ui.onStatChange = persist;
 
+// ---------------------------------------------------------------------------
+// THE ROUTER
+// ---------------------------------------------------------------------------
+// The flow the owner asked for, spelled out:
+//
+//   title -> CITY -> walk to a portal -> run -> results -> back to the CITY,
+//   standing beside the portal you used.
+//
+// The gate LIST survives, but only as fast travel from the Assay Hall. It is no
+// longer the way in, because menu -> gate -> boss -> menu was the thing that
+// made the game feel like a wave shooter with a lobby.
+const app = new AppState({
+  onEnter(screen, payload) {
+    switch (screen) {
+      case 'title':
+        game.quit();
+        ui.refreshTitle();
+        break;
+      case 'city':
+        audio.unlock();
+        game.enterCity(payload);
+        break;
+      case 'gates':
+        openGateList();
+        break;
+      case 'run':
+        game.beginRun(payload);
+        break;
+      default:
+        break;
+    }
+  },
+});
+
 const game = new Game({
   canvas, input, audio, ui,
   saveData,
   onSave: persist,
+  appState: app,
 });
 ui.game = game;
+
+// ui.js still owns the gate-list DOM; main.js owns where its two entry points
+// lead. Both of them — the title's play button and the results panel's
+// CONTINUE — used to open that list, and both should now put you in the city.
+// Overriding the one method reroutes both without editing ui.js.
+const openGateList = ui.showGates.bind(ui);
+ui.showGates = () => app.go('city', { atPortal: game.lastGateRank });
+
+// Two buttons in ui.js hardcode "and then show the title", which is wrong once
+// the city exists: BACK out of the fast-travel list belongs to whatever opened
+// it, and abandoning a gate belongs to the city. Intercepting in the capture
+// phase on document beats editing ui.js from here.
+document.addEventListener('click', (e) => {
+  const btn = e.target?.closest?.('#btnGatesBack, #btnQuit');
+  if (!btn) return;
+  e.stopPropagation();
+  e.preventDefault();
+  audio.ui();
+  if (btn.id === 'btnGatesBack') {
+    if (!app.back()) app.go('title');
+  } else {
+    ui.hide('pause');
+    app.go('city', { atPortal: game.lastGateRank });
+  }
+}, true);
+
+// Android hardware back. Capacitor routes it to WebView history when no plugin
+// claims it, so a pushed history entry plus popstate is what actually fires on
+// the device; the other two listeners cover Cordova-style shells and desktop.
+function handleBack() {
+  if (!document.getElementById('pause')?.classList.contains('hidden')) {
+    ui.hide('pause');
+    game.pause(false);
+    return;
+  }
+  for (const id of ['how', 'levelup']) {
+    const el = document.getElementById(id);
+    if (el && !el.classList.contains('hidden')) { ui.hide(id); return; }
+  }
+  if (app.is('run') && game.state === 'playing') { ui.showPause(); return; }
+  app.back();
+}
+history.pushState({ gb: true }, '');
+window.addEventListener('popstate', () => {
+  history.pushState({ gb: true }, '');   // stay one entry deep, forever
+  handleBack();
+});
+document.addEventListener('backbutton', (e) => { e.preventDefault?.(); handleBack(); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') handleBack(); });
 
 // Any first touch/click satisfies the browser autoplay gate.
 const unlock = () => audio.unlock();
@@ -102,6 +188,17 @@ loadIconIndex();
 // first makeHumanoid anyway, but by then the player already exists as a
 // procedural box-man and visibly pops when the real body swaps in. Starting it
 // here puts the whole load under the splash. Resolves FALSE, never throws.
+// The 1.2 MB city kit. The city is now the FIRST place the player stands, so
+// this cannot be lazy: City.build() is synchronous and silently falls back to
+// blocky procedural stand-ins for every piece the kit has not supplied yet.
+// Resolves FALSE rather than throwing when the file is absent.
+let cityReady = false;
+const cityPromise = preloadCity().then((ok) => {
+  cityReady = true;
+  if (!ok) console.warn('[city] models/citykit.glb unavailable — using procedural pieces');
+  return ok;
+});
+
 let charsReady = false;
 const charsPromise = preloadCharacters().then((ok) => {
   charsReady = true;
@@ -113,6 +210,8 @@ const charsPromise = preloadCharacters().then((ok) => {
 // inferring it from pixels.
 window.__items = { ready: () => itemsReady, stats: itemModelStats, promise: itemsPromise };
 window.__characters = { ready: () => charsReady, promise: charsPromise, stats: characterStats };
+// Not `__city` — tools/city-test.mjs already owns that name for its own scene.
+window.__citykit = { ready: () => cityReady, promise: cityPromise };
 
 let bootStep = 0;
 const bootTimer = setInterval(() => {
@@ -120,12 +219,12 @@ const bootTimer = setInterval(() => {
   const pct = Math.min(100, bootStep * 25);
   document.getElementById('bootFill').style.width = `${pct}%`;
   document.getElementById('bootMsg').textContent = bootMessages[Math.min(bootStep, bootMessages.length - 1)];
-  if (bootStep >= 4 && ((hdriReady && itemsReady && charsReady) || bootStep >= 8)) {
+  if (bootStep >= 4 && ((hdriReady && itemsReady && charsReady && cityReady) || bootStep >= 8)) {
     clearInterval(bootTimer);
     setTimeout(() => {
-      document.getElementById('boot').classList.add('hidden');
-      ui.show('title');
-      ui.refreshTitle();
+      // replace(), not go(): the splash is not somewhere back should return to.
+      // This also hides #boot, because the router hides every other screen.
+      app.replace('title');
     }, 380);
   }
 }, 260);
@@ -140,8 +239,11 @@ const clock = new FrameClock({
 });
 // Keep the governor's thresholds on the same target the clock is pacing to.
 game.quality?.setTargetFps(clock.targetFps);
+// The modes retarget this on mount: 60 in a gate, 30 in the city.
+game.frameClock = clock;
 clock.start();
 
 // Exposed for automated smoke tests; harmless in production.
 window.__game = game;
 window.__clock = clock;
+window.__app = app;

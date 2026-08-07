@@ -547,7 +547,9 @@ function bodyMaterial(glow, tintHex, tintAmount) {
     // packs' normals were not verified and single-siding an unverified
     // low-poly mesh trades fill rate for holes you only see on a phone.
     side: THREE.DoubleSide,
-  }), { color: glow, strength: 0.55 });
+    // Explicit opt-OUT. A living character is a normal person and gets normal
+    // lit shading; the rim is what made everyone read as a glowing outline.
+  }), { rim: false });
   m.userData.shared = true;
   _matCache.set(key, m);
   return m;
@@ -577,8 +579,13 @@ function ghostMaterial(glow) {
     // render of this looked like TV static wrapped round a person. Depth write
     // stays on, which is what stops the remaining front-face overdraw.
     side: THREE.FrontSide,
-  }), { color: glow, strength: 0.85 });
-  m.userData = {};   // NOT shared: disposeObject3D must free this one
+    // Explicit opt-IN, restrained preset. Shadows are the documented exception
+    // to "no rims": they are supposed to look unnatural, just not neon.
+  }), { preset: 'shadow', color: glow });
+  // `m.userData = {}` here used to WIPE the rim bookkeeping applyRim had just
+  // written. Only the shared flag needs clearing — disposeObject3D must free
+  // this material because it is per-instance.
+  delete m.userData.shared;
   return m;
 }
 

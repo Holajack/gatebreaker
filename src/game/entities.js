@@ -5,8 +5,13 @@ import { applyRim } from '../render/rim.js';
 import { DecalPool } from '../render/decalpool.js';
 import {
   loadCharacterModels, charactersReady, makeCharacter, characterStats,
-  setCharacterQuality, characterBudgetAvailable, warmAppearance, MODEL_SCALE,
+  setCharacterQuality as setCharacterTier, characterBudgetAvailable, warmAppearance, MODEL_SCALE,
 } from '../render/characters.js';
+import {
+  loadCreatureModels, creaturesReady, makeCreature, creatureStats,
+  setCreatureQuality, creatureBudgetAvailable,
+} from '../render/creatures.js';
+import { buildHeldWeapon, enemyWeaponKind } from './weapons.js';
 
 // Humanoids. There are now TWO implementations behind makeHumanoid():
 //
@@ -43,9 +48,24 @@ export { DecalPool };
 // Character-pack controls, re-exported so game.js/main.js never have to know
 // which render module the skinned path lives in.
 export {
-  loadCharacterModels, charactersReady, characterStats, setCharacterQuality,
+  loadCharacterModels, charactersReady, characterStats,
   characterBudgetAvailable, MODEL_SCALE,
 };
+// Creature-pack controls, same contract.
+export {
+  loadCreatureModels, creaturesReady, creatureStats, creatureBudgetAvailable,
+};
+
+/**
+ * Point BOTH skinned packs at a quality tier.
+ *
+ * game.js calls this from _applyQuality and knows about exactly one of the two
+ * modules, so the fan-out lives here rather than at the call site.
+ */
+export function setCharacterQuality(tier) {
+  setCharacterTier(tier);
+  setCreatureQuality(tier);
+}
 
 // ------------------------------------------------------------------- caches
 
@@ -167,10 +187,12 @@ function bodyMat(glow, ghost) {
     ...(ghost
       ? { transparent: true, opacity: 0.62, emissive: new THREE.Color(glow), emissiveIntensity: 0.55 }
       : {}),
-  }), { color: glow, strength: 0.75 }));
+    // Living bodies opt OUT of the rim entirely; shadows opt IN to the
+    // restrained preset. Explicit, rather than leaning on rim.js's heuristic.
+  }), ghost ? { preset: 'shadow', color: glow } : { rim: false }));
   // Re-rim rather than trusting the clone: customProgramCacheKey is an own
   // property applyRim installs, and Material.copy does not carry it over.
-  return ghost ? applyRim(unshare(shared), { color: glow, strength: 0.75 }) : shared;
+  return ghost ? applyRim(unshare(shared), { preset: 'shadow', color: glow }) : shared;
 }
 
 // Not cloned for ghosts: it is opaque, so the corpse fade loop skips it anyway
@@ -179,6 +201,12 @@ const eyeMat = (glow) => cachedMat(`eye:${glow}`, () => new THREE.MeshBasicMater
 
 // ------------------------------------------------------------------ weapons
 
+// THE PLANK. 1.5 units of untapered white box on the glow layer, which the
+// review of the shipped build described as a fluorescent tube brighter and
+// longer than the body carrying it. It is now reachable ONLY from the
+// procedural box-man path and from attachHandWeapon's last resort — i.e. only
+// when public/models/items.glb did not ship. It is tagged so
+// tools/creature-test.mjs can assert nothing in a live gate is holding one.
 function swordMesh(glow, ghost) {
   const geo = cachedGeo('sword', () => mergeGeometries([
     paint(box(0.1, 1.5, 0.03, 0, 0.72, 0), 0xdfe6ff),  // blade
@@ -192,6 +220,7 @@ function swordMesh(glow, ghost) {
   }));
   const m = new THREE.Mesh(geo, ghost ? unshare(shared) : shared);
   m.layers.enable(GLOW_LAYER);
+  m.userData.procedural = 'sword';
   return m;
 }
 
@@ -274,12 +303,46 @@ function warmRank(rank) {
 /** Procedural humanoids awaiting the pack: root -> the opts they were built from. */
 const _pending = new Map();
 
-/** Kick the pack load exactly once. Resolves FALSE, never throws. */
+let _creatureLoad = null;
+
+/** Kick the creature pack exactly once. Resolves FALSE, never throws. */
+export function preloadCreatures(url, manifestUrl) {
+  if (_creatureLoad) return _creatureLoad;
+  _creatureLoad = Promise.resolve()
+    .then(() => loadCreatureModels(url, manifestUrl))
+    .then((ok) => { if (ok) upgradePendingHumanoids(); return ok; })
+    .catch(() => false);
+  return _creatureLoad;
+}
+
+// Test bridge, mirroring window.__items / window.__characters in main.js.
+// Harmless in production, and the only way tools/creature-test.mjs can read the
+// pack's own counters (merge failures, budget, per-creature draw calls) rather
+// than inferring them from pixels.
+if (typeof window !== 'undefined') {
+  window.__creatures = {
+    ready: creaturesReady,
+    stats: creatureStats,
+    promise: () => _creatureLoad,
+  };
+}
+
+/**
+ * Kick BOTH skinned packs exactly once. Resolves FALSE, never throws.
+ *
+ * The returned promise settles when both have finished, but its VALUE is the
+ * character pack's result — main.js reads it to decide whether to warn about
+ * characters.glb, and it gates the splash on both loads without needing to know
+ * there are two.
+ */
 export function preloadCharacters(url, manifestUrl) {
   if (_charLoad) return _charLoad;
-  _charLoad = Promise.resolve()
+  const chars = Promise.resolve()
     .then(() => loadCharacterModels(url, manifestUrl))
     .then((ok) => { if (ok) upgradePendingHumanoids(); return ok; })
+    .catch(() => false);
+  _charLoad = Promise.all([chars, preloadCreatures()])
+    .then(([ok]) => ok)
     .catch(() => false);
   return _charLoad;
 }
@@ -302,10 +365,39 @@ function inferArchetype({ ghost, boss, weapon, scale }) {
   return 'grunt';
 }
 
-/** The hardcoded weapon makeHumanoid builds, re-hung on a bone socket. */
-function attachProceduralWeapon(socket, weapon, glow, ghost) {
+/**
+ * Put something in a skinned character's fist.
+ *
+ * THE PACK MODEL IS TRIED FIRST, always. `weapon` is the coarse kind game.js
+ * asks for ('sword'/'claw'/'staff'); `archetype` refines it, so a shadow gets a
+ * sword, a brute gets a hammer and a stalker gets a dagger instead of all three
+ * carrying the same object. The procedural builders below are what is left when
+ * items.glb did not ship — the plank is the last resort, not the default.
+ */
+function attachHandWeapon(socket, weapon, glow, ghost, archetype) {
   if (!socket) return null;
+  if (weapon === 'staff') {
+    // The item pack has no staff and nothing that reads as one; a wand-shaped
+    // dagger would be a worse lie than the procedural staff, which is a wooden
+    // pole with an orb and is not the thing anyone complained about.
+    const staff = staffMesh(glow);
+    socket.add(staff);
+    return staff;
+  }
+
+  const kind = enemyWeaponKind(archetype) || (weapon === 'sword' ? 'sword' : null);
+  if (kind) {
+    const packed = buildHeldWeapon(kind, { ghost });
+    if (packed) { socket.add(packed); return packed; }
+  }
+
+  if (weapon === 'claw') {
+    const claw = clawMesh(glow);
+    socket.add(claw);
+    return claw;
+  }
   if (weapon === 'sword') {
+    // Offline fallback only: items.glb is absent.
     const blade = new THREE.Group();
     blade.add(swordMesh(glow, ghost));
     // Identical local transform to the procedural rig: the socket is built so
@@ -315,17 +407,26 @@ function attachProceduralWeapon(socket, weapon, glow, ghost) {
     socket.add(blade);
     return blade;
   }
-  if (weapon === 'claw') {
-    const claw = clawMesh(glow);
-    socket.add(claw);
-    return claw;
-  }
-  if (weapon === 'staff') {
-    const staff = staffMesh(glow);
-    socket.add(staff);
-    return staff;
-  }
   return null;
+}
+
+/**
+ * A monster's weapon, if it should have one at all.
+ *
+ * Most creatures answer 'native' (their weapon mesh is skinned to their own
+ * skeleton and is already in the body draw call) or 'kit' (creatures.js
+ * socketed the KayKit axe/shield/staff the skeleton was modelled with), and
+ * both are already done by the time this runs. 'none' is a real answer: a yeti
+ * and a demon fight with what they have, and claws beat a glowing plank.
+ */
+function attachCreatureWeapon(inst) {
+  const slot = inst.weaponSlot;
+  if (!slot || slot === 'none' || slot === 'native' || slot === 'kit') return null;
+  if (!inst.sockets.hand) return null;
+  const held = buildHeldWeapon(slot);
+  if (!held) return null;
+  inst.sockets.hand.add(held);
+  return held;
 }
 
 const _dummy = () => new THREE.Object3D();
@@ -335,9 +436,26 @@ const _dummy = () => new THREE.Object3D();
  * the tier's character budget is already spent, or the merge failed — in every
  * one of those cases the caller falls back to the procedural rig.
  */
+/**
+ * Archetypes that are MONSTERS and come out of creatures.glb.
+ *
+ * The two that are missing are the two that are supposed to be people: the
+ * PLAYER, and the SHADOW soldiers — shadows are raised from the fallen, so a
+ * humanoid silhouette is not a placeholder there, it is the fiction. Corpses go
+ * the same way, because a corpse is a shadow that has not been bound yet.
+ */
+const CREATURE_ARCHETYPES = new Set([
+  'grunt', 'stalker', 'brute', 'caster', 'lancer', 'howler', 'boss',
+]);
+
 function buildSkinnedInto(root, opts) {
-  if (!charactersReady()) return false;
   const archetype = opts.archetype || inferArchetype(opts);
+  const monster = !opts.ghost
+    && opts.creatures !== false
+    && CREATURE_ARCHETYPES.has(archetype)
+    && creaturesReady();
+  if (!monster && !charactersReady()) return false;
+
   // The player must look the same every session; everything else varies per
   // spawn, which is the entire point of this change.
   let seed = opts.seed;
@@ -350,23 +468,50 @@ function buildSkinnedInto(root, opts) {
     }
   }
 
-  warmRank(opts.rank || 'E');
+  const rank = opts.rank || 'E';
+  // Warm the WHOLE rank's character looks up front, even when this spawn is
+  // going to be a monster. Shadows, corpses and the over-budget fallback all
+  // still come from characters.glb, so those geometries get allocated either
+  // way — and allocating them in one early pass is the difference between a
+  // cache that converges by the first gate and one that adds five geometries in
+  // gate six, which tools/entity-test.mjs reads (correctly) as a leak.
+  if (charactersReady()) warmRank(rank);
 
-  const inst = makeCharacter({
-    seed,
-    archetype,
-    rank: opts.rank || 'E',
-    scale: 1,                       // the caller's scale rides on `root`
-    glow: opts.glow,
-    color: opts.color,
-    ghost: opts.ghost,
-    // The telegraph mote costs 2 draw calls (main pass + glow pass) and only
-    // earns them on something that winds up an attack at you. The player can
-    // see his own swing and shadows are already emissive head to foot.
-    eyes: archetype !== 'player' && !opts.ghost,
-    armed: opts.weapon && opts.weapon !== 'none',
-    ignoreBudget: archetype === 'player' || archetype === 'boss',
-  });
+  let inst = null;
+  if (monster) {
+    inst = makeCreature({
+      seed,
+      archetype,
+      rank,
+      // game.js does not name the boss today, and creatures.js falls back to a
+      // rank lookup that happens to be exact. Passing it (see the handoff) is
+      // still strictly better than relying on that coincidence.
+      boss: typeof opts.boss === 'string' ? opts.boss : null,
+      scale: 1,                     // the caller's scale rides on `root`
+      glow: opts.glow,
+      eyes: true,
+      ignoreBudget: archetype === 'boss',
+    });
+  }
+  if (!inst && charactersReady()) {
+    // Creature pack absent, or its budget spent: a humanoid enemy is a worse
+    // read than a monster but a far better one than no enemy at all.
+    inst = makeCharacter({
+      seed,
+      archetype,
+      rank,
+      scale: 1,
+      glow: opts.glow,
+      color: opts.color,
+      ghost: opts.ghost,
+      // The telegraph mote costs 2 draw calls (main pass + glow pass) and only
+      // earns them on something that winds up an attack at you. The player can
+      // see his own swing and shadows are already emissive head to foot.
+      eyes: archetype !== 'player' && !opts.ghost,
+      armed: opts.weapon && opts.weapon !== 'none',
+      ignoreBudget: archetype === 'player' || archetype === 'boss',
+    });
+  }
   if (!inst) return false;
 
   // Tear the procedural body out, but never the DecalPool proxies — the ground
@@ -419,9 +564,13 @@ function buildSkinnedInto(root, opts) {
     inst.sockets.hand.add(equipped.main);
     root.userData.rig.blade = equipped.main;
     if (equipped.offhand && inst.sockets.handL) inst.sockets.handL.add(equipped.offhand);
+  } else if (inst.isCreature) {
+    // game.js hands every enemy a 'sword'/'claw'/'staff' string. A monster
+    // ignores it: what it carries was decided when it was modelled.
+    root.userData.rig.blade = attachCreatureWeapon(inst);
   } else {
-    root.userData.rig.blade = attachProceduralWeapon(
-      inst.sockets.hand, opts.weapon, opts.glow, opts.ghost,
+    root.userData.rig.blade = attachHandWeapon(
+      inst.sockets.hand, opts.weapon, opts.glow, opts.ghost, archetype,
     );
   }
   return true;
@@ -433,7 +582,7 @@ function buildSkinnedInto(root, opts) {
  * GLB can arrive — would be a box-man for the whole session.
  */
 export function upgradePendingHumanoids() {
-  if (!charactersReady()) return 0;
+  if (!charactersReady() && !creaturesReady()) return 0;
   let n = 0;
   for (const [root, opts] of Array.from(_pending)) {
     _pending.delete(root);
@@ -461,7 +610,7 @@ export function makeHumanoid(opts = {}) {
   preloadCharacters();
 
   const built = { color, glow, accent, scale, weapon, cloak, ghost, boss, ...opts };
-  if (charactersReady() && opts.characters !== false) {
+  if ((charactersReady() || creaturesReady()) && opts.characters !== false) {
     const skinned = new THREE.Group();
     if (buildSkinnedInto(skinned, built)) {
       skinned.scale.setScalar(scale);
@@ -546,7 +695,8 @@ export function makeHumanoid(opts = {}) {
   // it was asked for so upgradePendingHumanoids can rebuild it as a real
   // character the moment characters.glb resolves. Bounded, because the map is
   // drained on the first upgrade pass and entries are removed on disposal.
-  if (!charactersReady() && opts.characters !== false && _pending.size < 128) {
+  if ((!charactersReady() || !creaturesReady())
+    && opts.characters !== false && _pending.size < 128) {
     _pending.set(root, built);
   }
   return root;
