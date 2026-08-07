@@ -1,4 +1,4 @@
-name: Build Gatebound APK
+name: Build Embergate APK
 
 # The APK is built here rather than in the dev container because the Android
 # SDK, aapt2 and the AndroidX artifacts all live on dl.google.com, which the
@@ -79,14 +79,14 @@ jobs:
       #
       # The tag and the .apk filename keep the old gatebreaker name on purpose:
       # the owner's bookmarked download URL points at them, and renaming either
-      # would 404 the stable link. Only the text a person reads says Gatebound.
+      # would 404 the stable link. Only the text a person reads says Embergate.
       - name: Publish APK to the rolling release
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cp android/app/build/outputs/apk/debug/app-debug.apk out/gatebreaker.apk
-          NOTES="Debug-signed build of Gatebound.
+          NOTES="Debug-signed build of Embergate.
 
           **[Download gatebreaker.apk](https://github.com/${GITHUB_REPOSITORY}/releases/download/gatebreaker-latest/gatebreaker.apk)**
 
@@ -99,10 +99,10 @@ jobs:
 
           if gh release view gatebreaker-latest >/dev/null 2>&1; then
             gh release upload gatebreaker-latest out/gatebreaker.apk --clobber
-            gh release edit gatebreaker-latest --title "Gatebound — latest build" --notes "$NOTES"
+            gh release edit gatebreaker-latest --title "Embergate — latest build" --notes "$NOTES"
           else
             gh release create gatebreaker-latest out/gatebreaker.apk \
-              --title "Gatebound — latest build" \
+              --title "Embergate — latest build" \
               --notes "$NOTES"
           fi
           echo "APK: https://github.com/${GITHUB_REPOSITORY}/releases/download/gatebreaker-latest/gatebreaker.apk"

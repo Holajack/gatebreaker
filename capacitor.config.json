@@ -1,6 +1,6 @@
 {
   "appId": "com.gatebreaker.riftascension",
-  "appName": "Gatebound",
+  "appName": "Embergate",
   "webDir": "dist",
   "android": {
     "allowMixedContent": false,

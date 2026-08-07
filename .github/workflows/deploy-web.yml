@@ -1,4 +1,4 @@
-name: Deploy Gatebound web
+name: Deploy Embergate web
 
 # The owner plays in desktop Chrome as well as on the phone. GitHub Pages
 # serves the same dist/ that Capacitor packages into the APK — vite's base is

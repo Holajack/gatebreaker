@@ -3,7 +3,7 @@
 Owner feedback (first real playtest, Samsung S25 Ultra + wants Chrome play):
 game is fun and looks good as-is; direction confirmed. New identity, deeper
 world, better combat feel. Repo slug stays `gatebreaker`; the game gets a new
-title (provisional: **GATEBOUND**) and "Arise" is renamed (**Bind** — fallen
+title (final, owner-picked 2026-08-07: **EMBERGATE**) and "Arise" is renamed (**Bind** — fallen
 monsters are bound into the shadow army, keeping their own silhouette, recolored
 near-black).
 
