@@ -4,13 +4,16 @@
 //
 //   node tools/jump-test.mjs
 
-import { launchBrowser, newPhonePage, ensureServer, gotoGame, enterGate, evalGame, writeReport } from './_harness.mjs';
+import { launchBrowser, newPhonePage, ensureServer, gotoGame, enterGate, evalGame, writeReport, forceOpenGates } from './_harness.mjs';
 
 const server = await ensureServer();
 const browser = await launchBrowser();
 const { page, errors } = await newPhonePage(browser, { width: 892, height: 412 });
 
 await gotoGame(page, { waitMs: 3500 });
+// Arena-behaviour tool: pin the flat arena for E/D via the sanctioned
+// forceOpen dev override (see _harness.forceOpenGates).
+await forceOpenGates(page);
 await enterGate(page, { waitMs: 1500 });
 
 const r = await evalGame(page, (g) => {

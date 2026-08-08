@@ -1,0 +1,144 @@
+{
+ "atlas": "particles.webp",
+ "cell": 224,
+ "cols": 5,
+ "rows": 5,
+ "width": 1120,
+ "height": 1120,
+ "count": 24,
+ "note": "All keys lowercase. [col,row] cells in one atlas — bind once, draw every effect. Sprites are white/grey masks: tint via material color, additive blending. SKILLS, TELEGRAPHS, PORTALS and shadow-army treatment ONLY — the no-glow-on-living-characters rule stands.",
+ "source": {
+  "pack": "Kenney Particle Pack (1.1)",
+  "author": "Kenney (Kenney Vleugels, kenney.nl)",
+  "licence": "CC0 1.0 (License.txt inside the zip re-verified at download time)",
+  "url": "https://kenney.nl/assets/particle-pack",
+  "downloaded": "2026-08-07",
+  "used": 24,
+  "available": 80,
+  "note": "Curated from PNG (Transparent)/, 512px sources downsampled to the cell size. Pristine zip at assets/source/vfx/kenney-particle/kenney_particle-pack.zip. Skipped families: muzzle (no guns), slash (procedural arcs per DUNGEON_SPEC), window/symbol/scratch/dirt (no caller), Rotated/ duplicates (runtime transform)."
+ },
+ "roles": {
+  "smoke_01": "soft round puff — dash/dodge smoke",
+  "smoke_04": "billowy puff — portal ambience",
+  "smoke_07": "wispy puff — summon dust",
+  "fire_01": "fire burst — impact flash",
+  "flame_01": "flame tongue — burning tick",
+  "flame_05": "small flame — ember trail",
+  "magic_01": "pentagon rune ring — cast flash / summon circle accent",
+  "magic_02": "octagon rune ring — Bind extraction circle accent",
+  "magic_04": "sparkle cluster — buff apply",
+  "magic_05": "dense wisp — summon core",
+  "flare_01": "horizontal flare — portal rim accent",
+  "light_01": "radial glow — telegraph pulse",
+  "spark_01": "star spark — melee impact",
+  "spark_04": "thin spark burst — parry/clash",
+  "spark_06": "small spark — chip hit",
+  "star_04": "four-point glint — loot sparkle",
+  "star_07": "soft star — crit accent",
+  "twirl_01": "spiral twirl — buff loop",
+  "twirl_02": "double twirl — level-up burst",
+  "trace_01": "streak — projectile trace",
+  "trace_06": "tapered streak — dash trail",
+  "scorch_01": "scorch mark — AoE aftermath",
+  "circle_02": "soft dot — generic particle",
+  "circle_05": "hard-edge dot — dense particle"
+ },
+ "sprites": {
+  "circle_02": [
+   0,
+   0
+  ],
+  "circle_05": [
+   1,
+   0
+  ],
+  "fire_01": [
+   2,
+   0
+  ],
+  "flame_01": [
+   3,
+   0
+  ],
+  "flame_05": [
+   4,
+   0
+  ],
+  "flare_01": [
+   0,
+   1
+  ],
+  "light_01": [
+   1,
+   1
+  ],
+  "magic_01": [
+   2,
+   1
+  ],
+  "magic_02": [
+   3,
+   1
+  ],
+  "magic_04": [
+   4,
+   1
+  ],
+  "magic_05": [
+   0,
+   2
+  ],
+  "scorch_01": [
+   1,
+   2
+  ],
+  "smoke_01": [
+   2,
+   2
+  ],
+  "smoke_04": [
+   3,
+   2
+  ],
+  "smoke_07": [
+   4,
+   2
+  ],
+  "spark_01": [
+   0,
+   3
+  ],
+  "spark_04": [
+   1,
+   3
+  ],
+  "spark_06": [
+   2,
+   3
+  ],
+  "star_04": [
+   3,
+   3
+  ],
+  "star_07": [
+   4,
+   3
+  ],
+  "trace_01": [
+   0,
+   4
+  ],
+  "trace_06": [
+   1,
+   4
+  ],
+  "twirl_01": [
+   2,
+   4
+  ],
+  "twirl_02": [
+   3,
+   4
+  ]
+ }
+}

@@ -144,10 +144,16 @@ export function getHdriTexture() { return _hdriTexture; }
  * Returns a PMREM render target for a biome. Uses the real HDRI when it has
  * finished loading, otherwise the synthesised stand-in.
  * The caller owns the result and must dispose it.
+ *
+ * `interior: true` skips the HDRI branch unconditionally: the captured map is
+ * an open sky, and an enclosed dungeon lit by it reads as a meadow with the
+ * roof missing. Interiors always get the synthesised per-biome map, whose
+ * colour identity comes from the biome palette. Optional argument — every
+ * existing call site keeps the HDRI path untouched.
  */
-export function buildBiomeEnvironment(renderer, biome) {
+export function buildBiomeEnvironment(renderer, biome, { interior = false } = {}) {
   const gen = pmrem(renderer);
-  if (_hdriTexture) return gen.fromEquirectangular(_hdriTexture);
+  if (_hdriTexture && !interior) return gen.fromEquirectangular(_hdriTexture);
   const src = makeEnvSource(biome);
   const rt = gen.fromEquirectangular(src);
   src.dispose();

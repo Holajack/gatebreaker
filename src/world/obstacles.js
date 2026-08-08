@@ -319,6 +319,29 @@ export class ObstacleField {
     return this;
   }
 
+  /**
+   * O(1) height mutation for an existing record — how dungeon door membranes
+   * toggle solid <-> open without a remove API: sealed = Infinity, open = 0
+   * (a top at 0 is at-or-below every skip height, so resolve()/blocked()
+   * ignore the record entirely). The broadphase does NOT rebuild: a record's
+   * bucket stamp depends only on its footprint, which setTop never changes.
+   *
+   * There is deliberately NO index return from addCircle/addBox (they chain —
+   * collision-test builds fields as .addCircle(...).build() everywhere): the
+   * caller reads `field.count - 1` right after the add, which IS the new
+   * record's index because count increments per add and nothing removes.
+   *
+   * @param {number} index record index (field.count - 1 at add time)
+   * @param {number} top   new world-Y top surface
+   * @returns {ObstacleField} this
+   */
+  setTop(index, top) {
+    if (index < 0 || index >= this.count || !(Number.isFinite(top) || top === Infinity)) return this;
+    this._top[index] = top;
+    if (this._packed) this._packed.top[index] = top;
+    return this;
+  }
+
   // ------------------------------------------------------------ narrowphase
 
   /**
@@ -502,6 +525,50 @@ export class ObstacleField {
           }
         }
       }
+    }
+    return false;
+  }
+
+  /**
+   * True if the straight segment (x0,z0)->(x1,z1) crosses anything solid at
+   * `feetY` — the caster line-of-sight probe (game.js EDIT 5) and any future
+   * AI peek. Implemented as sampled blocked() calls every `step` metres
+   * (endpoints included), so a wall thinner than `step` could in principle
+   * slip between samples — the dungeon's 0.6 m walls cannot, because the
+   * 0.2 m probe radius closes the gap (1.2 m step needs only >= 1.0 m of
+   * combined wall+2r, and 0.6 + 0.4 = 1.0). Cost is ~len/step broadphase
+   * lookups; callers throttle (the AI probes on a 0.4 s cadence), never
+   * per-frame across the whole field.
+   *
+   * The internal sample spacing is capped at (2*radius + 0.5) even when
+   * `step` is larger: successive probe discs cover 2*radius + wallDepth of
+   * the crossing axis, so at the default step 1.2 a 0.6 m dungeon wall hit
+   * near-perpendicular could land exactly between two samples and leak a
+   * caster shot through the wall. The 0.5 constant is the 0.6 m wall-run
+   * thickness minus a 0.1 m phase-alignment margin.
+   *
+   * stepOver is passed as 0 so `feetY` alone decides what the line clears:
+   * a projectile at 1.2 m sails over kerb-height crates (top 0.4), while
+   * walls (top Infinity) always block.
+   *
+   * @param {number} x0 @param {number} z0 segment start
+   * @param {number} x1 @param {number} z1 segment end
+   * @param {object} [opts]
+   * @param {number} [opts.step=1.2]   requested sample spacing, metres
+   * @param {number} [opts.radius=0.2] probe disc radius
+   * @param {number} [opts.feetY=1.2]  height the line travels at
+   * @returns {boolean}
+   */
+  lineBlocked(x0, z0, x1, z1, { step = 1.2, radius = 0.2, feetY = 1.2 } = {}) {
+    if (this.count === 0) return false;
+    const dx = x1 - x0;
+    const dz = z1 - z0;
+    const len = Math.hypot(dx, dz);
+    const s = Math.max(0.05, Math.min(step > 0 ? step : 1.2, radius * 2 + 0.5));
+    const n = Math.max(1, Math.ceil(len / s));
+    for (let i = 0; i <= n; i++) {
+      const t = i / n;
+      if (this.blocked(x0 + dx * t, z0 + dz * t, radius, 0, feetY)) return true;
     }
     return false;
   }

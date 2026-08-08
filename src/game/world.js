@@ -7,15 +7,12 @@ import { ObstacleField } from '../world/obstacles.js';
 import { buildNavGrid } from '../world/navgrid.js';
 
 // Deterministic PRNG so a given seed always rebuilds the same gate layout.
-export function mulberry32(seed) {
-  let a = seed >>> 0;
-  return function () {
-    a |= 0; a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+// The implementation now lives in src/core/rng.js (THREE-free, so the pure
+// dungeon layout generator and the Node soak test can import it headlessly);
+// re-exported here so existing `import { mulberry32 } from './world.js'`
+// call sites are untouched.
+export { mulberry32 } from '../core/rng.js';
+import { mulberry32 } from '../core/rng.js';
 
 const _lightDir = new THREE.Vector3(18, 34, 12).normalize();
 const _snapM = new THREE.Matrix4();

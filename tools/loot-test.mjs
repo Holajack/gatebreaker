@@ -14,7 +14,7 @@
 
 import {
   OUT, launchBrowser, newPhonePage, ensureServer, gotoGame, enterGate,
-  evalGame, writeReport, shotPath,
+  evalGame, writeReport, shotPath, forceOpenGates,
 } from './_harness.mjs';
 
 const NO_MODELS = process.argv.slice(2).includes('--no-models');
@@ -40,6 +40,9 @@ try {
   }
 
   await gotoGame(page);
+  // Arena-behaviour tool: pin the flat arena for E/D via the sanctioned
+  // forceOpen dev override (see _harness.forceOpenGates).
+  await forceOpenGates(page);
 
   const stats = await page.evaluate(() => window.__items?.stats?.() || null);
   if (NO_MODELS) {

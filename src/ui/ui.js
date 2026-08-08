@@ -286,7 +286,11 @@ export class UI {
     if (game.bossActive && game.boss) {
       this.setObjective(game.boss.base.name, `${Math.ceil((game.boss.hp / game.boss.maxHp) * 100)}%`);
     } else {
-      this.setObjective(`${game.gate.rank}-GRADE RIFT`, `${game.killed} / ${game.gate.enemies}`);
+      // Clamp: the boss kill increments `killed` past gate.enemies, and in a
+      // crawl the HUD stays up through the exit-portal walk — "13 / 12" read
+      // as a bug. (The arena clears instantly on boss death, so this is a
+      // no-op there.)
+      this.setObjective(`${game.gate.rank}-GRADE RIFT`, `${Math.min(game.killed, game.gate.enemies)} / ${game.gate.enemies}`);
     }
 
     // cooldown wipes on the skill buttons

@@ -26,7 +26,7 @@
 import fs from 'node:fs';
 import {
   launchBrowser, newPhonePage, ensureServer, gotoGame, enterGate,
-  writeReport, shotPath, evalGame, OUT,
+  writeReport, shotPath, evalGame, OUT, forceOpenGates,
 } from './_harness.mjs';
 
 const HEADED = process.argv.includes('--headed') || process.argv.includes('--gpu');
@@ -183,6 +183,9 @@ try {
     window.__charTest = true;
   });
   await gotoGame(page);
+  // Arena-behaviour tool: pin the flat arena for E/D via the sanctioned
+  // forceOpen dev override (see _harness.forceOpenGates).
+  await forceOpenGates(page);
   const packOk = await page.evaluate(async () => {
     const m = await import('/src/render/characters.js');
     window.__chars = m;
@@ -389,6 +392,32 @@ try {
     perBody <= crowdBudget,
     `${perBody} calls/body (${calls.characters + calls.creatures} total; `
     + `${perCharacter}/character, ${perCreature}/creature)`);
+  // The blend above can MASK a per-population regression: in a creature-heavy
+  // crowd (20 creatures at ~6/body) the lone character was once measured at 12
+  // calls and still sailed under the 8.8 blended budget on the creatures'
+  // slack. So each population is ALSO bounded on its own. Ceilings carry
+  // headroom over today's measured numbers — 12/character for the lone player
+  // (his held-weapon main+glow passes and other fixed presence costs amortise
+  // over nobody, and a tier-governed procedural fallback body runs ~11) and
+  // 6.05/creature across a 20-body creature crowd (prop-heavy rolls like a
+  // skeleton warrior's axe+shield push individual bodies toward 9, so the
+  // population average gets room to breathe) — but each ceiling is tight
+  // enough that roughly one extra render pass across a population fails THAT
+  // population instead of hiding in the other's headroom.
+  const CHAR_CALL_CEILING = 14;
+  const CREATURE_CALL_CEILING = 8;
+  console.log(`  per-population: ${perCharacter}/character (ceiling ${CHAR_CALL_CEILING}), `
+    + `${perCreature}/creature (ceiling ${CREATURE_CALL_CEILING})`);
+  if (calls.count) {
+    check(`the character population alone stays under ${CHAR_CALL_CEILING} calls/character`,
+      perCharacter <= CHAR_CALL_CEILING,
+      `${perCharacter}/character across ${calls.count} character(s)`);
+  }
+  if (calls.creatureCount) {
+    check(`the creature population alone stays under ${CREATURE_CALL_CEILING} calls/creature`,
+      perCreature <= CREATURE_CALL_CEILING,
+      `${perCreature}/creature across ${calls.creatureCount} creature bodies`);
+  }
 
   const render = await evalGame(page, probeRenderStats);
 
@@ -443,6 +472,7 @@ try {
   await p2.route('**/models/characters.*', (route) => route.fulfill({ status: 404, body: '' }));
   await p2.route('**/models/creatures.*', (route) => route.fulfill({ status: 404, body: '' }));
   await gotoGame(p2);
+  await forceOpenGates(p2);
   await p2.evaluate(async () => { window.__chars = await import('/src/render/characters.js'); });
   await enterGate(p2, { rank: 'E', waitMs: 2500 });
   await evalGame(p2, (game, [want]) => {
@@ -524,6 +554,12 @@ try {
     lineup,
     render,
     drawCallsPerCharacter: perCharacter,
+    perPopulation: {
+      perCharacter,
+      perCreature,
+      charCeiling: CHAR_CALL_CEILING,
+      creatureCeiling: CREATURE_CALL_CEILING,
+    },
     entities: snap1,
     results,
   });

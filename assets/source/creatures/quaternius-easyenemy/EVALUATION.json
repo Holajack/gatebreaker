@@ -1,0 +1,21 @@
+{
+  "pack": "Quaternius Easy Enemy Pack",
+  "author": "Quaternius",
+  "licence": "CC0 1.0 (License.txt in this directory, fetched from the pack's Drive folder; also stated on quaternius.com/packs/easyenemy.html)",
+  "url": "https://quaternius.com/packs/easyenemy.html",
+  "driveFolder": "1VbJIslXPWK-1KybQN6yezZrfJcw608qe",
+  "downloaded": "2026-08-07",
+  "gate": "EVALUATE per docs/CONTENT_PACKS.json enemyVariety: download-and-render before any build work; 'only worth the Blender work if the contact sheet clears 3+'.",
+  "method": "All 6 FBX rendered via headless Blender 5.1.2 (EEVEE, factory settings, <name>__part rename before handle Empties). Contact sheet reviewed model by model against the menace bar that culled Ultimate Monsters ('silhouette reads as a threat rather than a mascot').",
+  "verdict": "SKIP ALL. 1 of 6 clears the menace bar; the gate needs 3+.",
+  "opacityTrap": "CONFIRMED pack-wide: every one of the 6 FBX imports materials with alpha 0 (Frog 4, Rat 2, Snake 7, Snake_angry 7, Spider 2, Wasp 4). Any future revisit MUST route through the blender-items.py alpha-force step or the models render as nothing.",
+  "models": {
+    "Frog": { "verdict": "FAIL", "reason": "Green tree frog with a big red cartoon eye. Cute by construction, same class as the never-candidate chicken/dog set." },
+    "Rat": { "verdict": "FAIL (borderline)", "reason": "Rounded pet-store rat with pink ears/feet/tail. A giant rat is a plausible Warren trash slot, but this silhouette reads mascot at 2-3x scale; no mangy or threatening cue anywhere." },
+    "Snake": { "verdict": "FAIL", "reason": "Mint-green, huge yellow eyes, pink lolling tongue. Language-app mascot, not a gate creature." },
+    "Snake_angry": { "verdict": "FAIL", "reason": "Same snake with eyebrows/eyelashes. Comic, not angry." },
+    "Spider": { "verdict": "PASS (unused)", "reason": "Dark widow-shape with red eye cluster - the one genuine menace in the pack. One keeper cannot justify the FBX/Blender pipeline cost by itself; noted here in case a future wave assembles a vermin-themed batch worth a shared Blender pass." },
+    "Wasp": { "verdict": "FAIL", "reason": "Yellow-and-black cartoon bee. Bees were explicitly never-candidates in the Ultimate Monsters cull; this is the same call." }
+  },
+  "evidence": "Contact sheet + per-model renders archived with the Wave 2 asset evidence (gb-wave2a/assets/easyenemy-sheet.png); FBX sources retained beside this file for any future re-evaluation at zero download cost."
+}

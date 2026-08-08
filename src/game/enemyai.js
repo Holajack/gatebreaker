@@ -338,7 +338,11 @@ export function steerAgent(agent, ctx, dt) {
       }
       // It keeps shooting either way. Committing must not read as retreating.
       out.attackKind = 'ranged';
-      if (dist < agent.range) { out.wantAttack = true; out.telegraph = 0.55; }
+      // DUNGEON_SPEC EDIT 5: a wall between (caller-sampled lineBlocked) means
+      // hold fire and close instead — the flow field walks the caster round
+      // the corner rather than letting it shell masonry.
+      if (ctx.losBlocked) desired = speed;
+      else if (dist < agent.range) { out.wantAttack = true; out.telegraph = 0.55; }
       break;
     }
 
@@ -384,7 +388,9 @@ export function steerAgent(agent, ctx, dt) {
       else if (dist < band - 3) desired = -speed * 0.6;
       else strafe = T.flankStrafe * agent.detourSide;
       out.attackKind = 'ranged';
-      if (dist < agent.range) { out.wantAttack = true; out.telegraph = 0.55; }
+      // Same wall-LOS rule as 'ranged' (game.js samples both behaviors).
+      if (ctx.losBlocked) desired = speed;
+      else if (dist < agent.range) { out.wantAttack = true; out.telegraph = 0.55; }
       break;
     }
 

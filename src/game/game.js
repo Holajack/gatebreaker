@@ -48,6 +48,17 @@ const STASH_LIMIT = 12;
 const WEAPON_DROP_CHANCE = 0.06;
 const tierWeightOf = (e) => (e.isBoss ? 'boss' : TIER_WEIGHT[e.key] || 'trash');
 
+// Shadow-soldier attack timing — the same telegraph-to-contact shape enemies
+// got in Wave 1. WINDUP is how long the soldier stands planted winding up
+// before the blow lands (the contact frame _shadowStrike fires on), STRIKE is
+// the follow-through the clip plays out afterwards. 0.42 matches the standard
+// enemy chase telegraph, and windup + strike (0.72 s) fits inside the 0.85 s
+// attack cycle in _updateShadows — that cycle and s.atk are the DPS knobs and
+// are deliberately untouched: these constants only move WHEN inside the cycle
+// the damage lands, not how much of it there is.
+const SHADOW_WINDUP = 0.42;
+const SHADOW_STRIKE = 0.3;
+
 const tmpV = new THREE.Vector3();
 const tmpV2 = new THREE.Vector3();
 
@@ -104,6 +115,11 @@ export class Game {
     this.camPos = new THREE.Vector3();
 
     this.world = new World(this.scene, this.renderer, this.camera);
+    // The arena survives world swaps: DungeonMode mounts a Dungeon over
+    // this.world for crawl ranks (E/D) and restores this alias for open ranks
+    // and on exit. Everything else in this file keeps talking to this.world
+    // and never learns which class is mounted (DUNGEON_SPEC worldContract).
+    this._arenaWorld = this.world;
     this.fx = new Effects(this.scene, this.camera, this.renderer);
     // 0.85/0.9 is what glow.js actually applies — the main scene goes through
     // ACES tone mapping at exposure 1.25 while the bloom pass is composited on
@@ -200,6 +216,10 @@ export class Game {
       this._mode.enter({ spawnAt: this.player.pos.clone() });
     } else if (this.gate) {
       this.world.build(this.gate, this.seed);
+      // The rebuild is deterministic but stateless: door membranes come back
+      // OPEN and the exit portal is gone. The mounted mode re-stamps whatever
+      // its run state implies (no-op for the arena — the hook is optional).
+      this._mode?.onContextRestored?.();
     }
     // Only auto-resume the pause WE forced. A player who paused deliberately
     // and then took a phone call should still come back to the pause screen.
@@ -359,22 +379,30 @@ export class Game {
     return this._setMode('city', { spawnAt, atPortal: atPortal ?? this.lastGateRank });
   }
 
-  /** Step through a portal. `rank` is 'E'..'S'. */
-  enterGate(rank, { forceBiome = null } = {}) {
+  /**
+   * Step through a portal. `rank` is 'E'..'S'. `forceBiome` pins the biome
+   * roll; `forceOpen` is the dev override that mounts the flat arena for a
+   * crawl rank (DUNGEON_SPEC worldJsArenasFate — old tests and screenshot
+   * baselines still exercise the arena through it).
+   */
+  enterGate(rank, { forceBiome = null, forceOpen = false } = {}) {
     const index = Math.max(0, GATES.findIndex((g) => g.rank === rank));
     const resolved = GATES[index].rank;
     this.lastGateRank = resolved;
-    if (this.appState) return this.appState.go('run', { rank: resolved, gateIndex: index, forceBiome });
-    return this.beginRun({ rank: resolved, gateIndex: index });
+    if (this.appState) return this.appState.go('run', { rank: resolved, gateIndex: index, forceBiome, forceOpen });
+    return this.beginRun({ rank: resolved, gateIndex: index, forceBiome, forceOpen });
   }
 
   /** Mount the dungeon. AppState's onEnter('run') hook calls this. */
-  beginRun({ rank = null, gateIndex = null } = {}) {
+  beginRun({ rank = null, gateIndex = null, ...extra } = {}) {
     const index = gateIndex != null
       ? gateIndex
       : Math.max(0, GATES.findIndex((g) => g.rank === rank));
     this.lastGateRank = GATES[index].rank;
-    return this._setMode('dungeon', { gateIndex: index, rank: GATES[index].rank });
+    // Forward whatever else rode in (forceBiome, forceOpen) — the mode owns
+    // what those mean, and stripping the payload down to {gateIndex, rank}
+    // here silently killed every dev override routed through AppState.
+    return this._setMode('dungeon', { gateIndex: index, rank: GATES[index].rank, ...extra });
   }
 
   /** Compat wrapper for the gate-list menu, which still speaks in indices. */
@@ -387,8 +415,13 @@ export class Game {
   // Everything below this line is the code that shipped, moved but not
   // rewritten. DungeonMode.enter() calls _beginGate; the old public
   // startGate(index) is the wrapper above.
-  _beginGate(index) {
-    const gate = GATES[index];
+  _beginGate(index, gateOverride = null) {
+    // `gateOverride` is DungeonMode's shallow copy {...gate, biome} from the
+    // anomaly/forceBiome roll. Storing it as this.gate is what makes the
+    // context-loss repair (this.world.build(this.gate, this.seed), line ~213)
+    // rebuild the SAME anomaly rather than re-rolling. Absent, this line is
+    // byte-identical to the shipped arena path.
+    const gate = gateOverride || GATES[index];
     this.gateIndex = index;
     this.gate = gate;
     this.seed = (index + 1) * 7919 + Math.floor(Math.random() * 100000);
@@ -430,8 +463,14 @@ export class Game {
 
     this.state = 'playing';
     this.audio.music(true);
-    this.ui.showHud(true);
-    this.ui.toast(`${gate.rank}-GRADE RIFT — ${gate.name}`, 'gold');
+    // DUNGEON_SPEC EDIT 7: crawl entry presentation is mode-owned. The HUD and
+    // the rank toast land at the end of the walk-in (DungeonMode fires them;
+    // STEP 6 moves them to intro end) so arriving reads as an entrance, not a
+    // menu transition. The arena path keeps both inline, byte-identical.
+    if (!this.world.encounterDriven) {
+      this.ui.showHud(true);
+      this.ui.toast(`${gate.rank}-GRADE RIFT — ${gate.name}`, 'gold');
+    }
     this._spawnWave();
   }
 
@@ -451,6 +490,10 @@ export class Game {
   }
 
   _spawnWave() {
+    // DUNGEON_SPEC EDIT 1(b): encounter-driven worlds meter every spawn
+    // through the room director — _beginGate calls this directly, and
+    // unguarded it dumps the opening wave into rooms that must stay dormant.
+    if (this.world.encounterDriven) return;
     const gate = this.gate;
     const remaining = gate.enemies - this.spawned;
     if (remaining <= 0) return;
@@ -458,20 +501,25 @@ export class Game {
     for (let i = 0; i < n; i++) this._spawnEnemy();
   }
 
-  _spawnEnemy() {
+  // DUNGEON_SPEC EDIT 2: the encounter director passes both `pos` (a room
+  // spawn point) and `key` (its per-room pack roll). Existing callers pass
+  // nothing and get exactly the shipped roll + randomSpawn.
+  _spawnEnemy(pos = null, key = null) {
     const gate = this.gate;
-    const roll = this.rnd();
-    let key = 'grunt';
-    // Deeper gates skew toward the nastier archetypes.
-    const tier = this.gateIndex / (GATES.length - 1);
-    if (roll > 0.85 - tier * 0.15) key = 'caster';
-    else if (roll > 0.68 - tier * 0.12) key = 'brute';
-    else if (roll > 0.44 - tier * 0.14) key = 'stalker';
+    if (!key) {
+      const roll = this.rnd();
+      key = 'grunt';
+      // Deeper gates skew toward the nastier archetypes.
+      const tier = this.gateIndex / (GATES.length - 1);
+      if (roll > 0.85 - tier * 0.15) key = 'caster';
+      else if (roll > 0.68 - tier * 0.12) key = 'brute';
+      else if (roll > 0.44 - tier * 0.14) key = 'stalker';
+    }
 
     const base = ENEMY_TYPES[key];
     const level = gate.enemyLevel + Math.floor(this.rnd() * 3);
     const s = scaleEnemy(base, level);
-    const pos = this.world.randomSpawn(this.rnd, this.player.pos, 12);
+    pos = pos || this.world.randomSpawn(this.rnd, this.player.pos, 12);
 
     const weapon = key === 'caster' ? 'staff' : key === 'stalker' ? 'claw' : 'sword';
     const mesh = makeHumanoid({
@@ -518,7 +566,9 @@ export class Game {
 
   _spawnBoss() {
     const b = BOSSES[this.gate.boss];
-    const pos = new THREE.Vector3(0, 0, -this.world.radius * 0.55);
+    // DUNGEON_SPEC EDIT 3: interiors anchor the boss in the boss chamber;
+    // the arena keeps its disc formula (World has no bossSpawn).
+    const pos = this.world.bossSpawn?.() ?? new THREE.Vector3(0, 0, -this.world.radius * 0.55);
     const mesh = makeHumanoid({
       color: b.color, glow: b.glow, accent: 0x0d0f1c,
       weapon: 'sword', scale: b.scale, cloak: true,
@@ -651,7 +701,10 @@ export class Game {
       radius: c.radius, speed: c.speed,
       hp: c.hp, maxHp: c.hp,
       atk: c.atk,
-      attackCd: 0, swing: 0, target: null, life: 0, kills: 0,
+      // telegraph/telegraphMax mirror the enemy fields: windup timer counting
+      // down to the contact frame, and its start value for the animation span.
+      attackCd: 0, swing: 0, telegraph: 0, telegraphMax: 0,
+      target: null, life: 0, kills: 0,
     });
     if (!silent) {
       this.fx.ring(pos, 0x35e6ff, 4, 0.6);
@@ -730,7 +783,10 @@ export class Game {
     if (e.isBoss) {
       this.bossActive = false;
       this.boss = null;
-      this._clearGate();
+      // DUNGEON_SPEC EDIT 6: in a crawl the walk-out exit portal owns run end
+      // (STEP 5's director calls _clearGate on walk-in); the arena keeps the
+      // instant clear.
+      if (!this.world.encounterDriven) this._clearGate();
       return;
     }
 
@@ -750,10 +806,15 @@ export class Game {
       enemyLevel: e.level, tierWeight: tierWeightOf(e), attempts: 0,
     });
 
-    if (this.killed >= this.gate.enemies && !this.bossActive) {
-      this._spawnBoss();
-    } else if (this.enemies.length <= 1 && this.spawned < this.gate.enemies) {
-      this.spawnTimer = 0.9;
+    // DUNGEON_SPEC EDIT 1(c): unguarded, the last trash kill in a crawl would
+    // spawn the boss on the spot, bypassing the sealed boss door. The director
+    // owns both transitions when the world is encounter-driven.
+    if (!this.world.encounterDriven) {
+      if (this.killed >= this.gate.enemies && !this.bossActive) {
+        this._spawnBoss();
+      } else if (this.enemies.length <= 1 && this.spawned < this.gate.enemies) {
+        this.spawnTimer = 0.9;
+      }
     }
   }
 
@@ -1207,6 +1268,29 @@ export class Game {
     });
   }
 
+  /**
+   * Real wall line-of-sight for ranged/flank agents (DUNGEON_SPEC EDIT 5).
+   * Sampled through obstacleField.lineBlocked at torso height, throttled to
+   * the agents' shared probe cadence (0.4 s) with the result stashed on the
+   * agent — a per-frame segment walk for every caster on the field is exactly
+   * the kind of quiet cost the phone frame budget cannot absorb. Melee agents
+   * skip it entirely: losBlocked only gates standoff/strafe decisions, and
+   * out-of-range agents are approaching anyway.
+   */
+  _agentLosBlocked(e, dist, dt) {
+    const a = e.agent;
+    if (!a || (a.behavior !== 'ranged' && a.behavior !== 'flank')) return false;
+    if (a.losT === undefined) { a.losT = 0; a.losBlocked = false; }
+    a.losT -= dt;
+    if (a.losT <= 0) {
+      a.losT = 0.4;
+      a.losBlocked = dist <= a.range
+        && Boolean(this.world.obstacleField?.lineBlocked(
+          e.pos.x, e.pos.z, this.player.pos.x, this.player.pos.z, { feetY: 1.2 }));
+    }
+    return a.losBlocked;
+  }
+
   _updateEnemies(dt) {
     const p = this.player;
     // Crowd separation happens once for the whole field, BEFORE anyone moves.
@@ -1256,7 +1340,8 @@ export class Game {
         if (!e.agent) e.agent = makeAgent(e, e.base.ai);
         _steerCtx.navGrid = this.world.navGrid || null;
         _steerCtx.targetPos = p.pos; _steerCtx.selfPos = e.pos;
-        _steerCtx.distance = dist; _steerCtx.losBlocked = false;
+        // DUNGEON_SPEC EDIT 5: casters stop shooting through walls.
+        _steerCtx.distance = dist; _steerCtx.losBlocked = this._agentLosBlocked(e, dist, dt);
         _steerCtx.aggression = 1; _steerCtx.dt = dt;
         const steer = steerAgent(e.agent, _steerCtx, dt);
         moveX = steer.moveX; moveZ = steer.moveZ;
@@ -1441,24 +1526,38 @@ export class Game {
         continue;
       }
       if (s.attackCd > 0) s.attackCd -= dt;
+      // Windup running down to the contact frame, exactly like the enemy path:
+      // the attack CLIP plays its windup while this timer runs (the soldier
+      // stands planted) and the damage lands the frame it crosses zero. The
+      // old code paid the damage at swing START, from a standing pose, before
+      // the clip had moved — the same no-windup unfairness Wave 1 fixed on
+      // enemies but never gave their allied mirror.
+      if (s.telegraph > 0) {
+        s.telegraph -= dt;
+        if (s.telegraph <= 0) this._shadowStrike(s);
+      }
       if (s.swing > 0) s.swing -= dt;
 
-      const target = this._nearestEnemy(s.pos, 26);
+      const target = s.telegraph > 0 ? null : this._nearestEnemy(s.pos, 26);
       let moving = false;
-      if (target) {
+      if (s.telegraph > 0) {
+        // Planted mid-windup, like a telegraphing enemy: no chase, no
+        // retarget, yaw held where the windup began so the blow lands where
+        // the windup pointed.
+      } else if (target) {
         const d = tmpV.copy(target.pos).sub(s.pos).setY(0);
         const dist = d.length();
         if (dist > 0.001) d.divideScalar(dist);
         s.yaw = Math.atan2(d.x, d.z);
         if (dist > 2.2) { s.vel.addScaledVector(d, s.speed * 9 * dt); moving = true; }
         else if (s.attackCd <= 0) {
+          // Start the windup; _shadowStrike applies the damage when it ends.
+          // The 0.85 s cycle is unchanged, so sustained DPS is what it was —
+          // only the contact frame moved deeper into the cycle.
           s.attackCd = 0.85;
-          s.swing = 0.3;
-          // s.atk already carries grade, owner level and INT via shadowCombat;
-          // the old extra level multiplier here double-dipped.
-          const before = target.hp;
-          this._damageEnemy(target, s.atk);
-          if (before > 0 && target.hp <= 0) s.kills++;
+          s.telegraph = SHADOW_WINDUP;
+          s.telegraphMax = SHADOW_WINDUP;
+          s.target = target;
         }
       } else {
         // No targets: fall in behind the player.
@@ -1476,12 +1575,47 @@ export class Game {
       this.world.resolve(s.pos, s.radius, s.vel);
       s.mesh.position.copy(s.pos);
       s.mesh.rotation.y = s.yaw;
+      // The attack animation spans WINDUP + STRIKE as one motion, the same
+      // bridge the enemy path uses: attackPhase covers the whole span and
+      // attackContact tells the rig which fraction of it is the contact frame,
+      // so the clip's blow lands exactly when _shadowStrike pays the damage.
+      const atkSpan = (s.telegraphMax || SHADOW_WINDUP) + SHADOW_STRIKE;
+      let atkPhase = 0;
+      if (s.telegraph > 0) atkPhase = Math.min(1, (s.telegraph + SHADOW_STRIKE) / atkSpan);
+      else if (s.swing > 0) atkPhase = s.swing / atkSpan;
       animateRig(s.mesh, {
         moving, speed: Math.hypot(s.vel.x, s.vel.z), t: this.time + s.life,
-        attackPhase: s.swing > 0 ? s.swing / 0.3 : 0,
+        attackPhase: atkPhase,
+        attackContact: (s.telegraphMax || SHADOW_WINDUP) / atkSpan,
         dt,
       });
     }
+  }
+
+  /**
+   * The shadow soldier's contact frame — fires when s.telegraph crosses zero,
+   * mirroring _enemyStrike. Damage numbers (s.atk) and cadence are the same as
+   * the old instant hit; only the moment inside the cycle moved.
+   */
+  _shadowStrike(s) {
+    s.swing = SHADOW_STRIKE;
+    // Prefer the windup target, but let the blow land on whoever else is in
+    // reach when that one is already dead or gone: a windup begun on a monster
+    // the player finished first must not cost the squad its whole attack
+    // cycle, or crowded fights would quietly run below Wave 1's shadow DPS.
+    // 2.8 is the 2.2 engage range plus the same 0.6 reach slack enemies get.
+    let target = s.target;
+    s.target = null;
+    if (!target || target.hp <= 0 || target.pos.distanceTo(s.pos) > 2.8) {
+      const near = this._nearestEnemy(s.pos, 2.8);
+      target = near && near.hp > 0 ? near : null;
+    }
+    if (!target) return;
+    // s.atk already carries grade, owner level and INT via shadowCombat;
+    // the old extra level multiplier here double-dipped.
+    const before = target.hp;
+    this._damageEnemy(target, s.atk);
+    if (before > 0 && target.hp <= 0) s.kills++;
   }
 
   _updateProjectiles(dt) {
@@ -1492,7 +1626,12 @@ export class Game {
       pr.mesh.position.copy(pr.pos);
       pr.mesh.rotation.x += dt * 9;
       pr.mesh.rotation.y += dt * 7;
-      if (pr.life <= 0 || Math.hypot(pr.pos.x, pr.pos.z) > this.world.radius + 2) {
+      // DUNGEON_SPEC EDIT 4: a bolt dies on the first solid it enters. feetY
+      // is the projectile's own height, so kerb-height props with real tops do
+      // not eat bolts; walls are top-Infinity and always block. The radius+2
+      // disc cull stays as the outer bound in both worlds.
+      if (pr.life <= 0 || Math.hypot(pr.pos.x, pr.pos.z) > this.world.radius + 2
+          || this.world.obstacleField?.blocked(pr.pos.x, pr.pos.z, 0.25, 0, pr.pos.y)) {
         this._removeProjectile(i);
         continue;
       }
@@ -1639,6 +1778,9 @@ export class Game {
   }
 
   _updateSpawns(dt) {
+    // DUNGEON_SPEC EDIT 1(a): the wave timer is the arena's spawn driver; the
+    // crawl's encounter director meters spawns room by room instead.
+    if (this.world.encounterDriven) return;
     if (this.bossActive) return;
     if (this.spawnTimer > 0) {
       this.spawnTimer -= dt;

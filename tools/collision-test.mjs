@@ -418,6 +418,112 @@ function runNav() {
 }
 
 // --------------------------------------------------------------------------
+// 4b. dungeon helpers: setTop (door membranes) + lineBlocked (caster LOS)
+//     DUNGEON_SPEC STEP 2 — additive, so everything above must be untouched.
+// --------------------------------------------------------------------------
+
+function runDungeonHelpers() {
+  head('4b. SETTOP (DOOR MEMBRANES) + LINEBLOCKED (CASTER LOS)');
+
+  // --- count-1 indexing: the documented way to get a record's index --------
+  {
+    const field = new ObstacleField();
+    const chained = field.addCircle(3, 3, 1) === field && field.addBox(9, 9, 2, 2) === field;
+    ok('addCircle/addBox still return `this` (chain compatibility)', chained);
+    ok('field.count - 1 right after an add IS that record',
+      field.count === 2 && field.get(0).kind === 'circle' && field.get(1).kind === 'box',
+      `count ${field.count}`);
+  }
+
+  // --- membrane seal / unseal roundtrip ------------------------------------
+  {
+    const field = new ObstacleField();
+    // The dungeon pattern verbatim: membrane pre-registered OPEN (top 0) in a
+    // 4 m doorway between two wall runs (a lone membrane can be walked AROUND
+    // — the slide is working as intended — so the flanks must be real), index
+    // recorded as count-1 immediately after the add.
+    field.addBox(0, -6, 4, 1.2, 0, { top: 0, nav: false, tag: 'membrane' });
+    const membrane = field.count - 1;
+    field.addBox(-22, -6, 40, 0.6, 0, { tag: 'wall-west' });
+    field.addBox(22, -6, 40, 0.6, 0, { tag: 'wall-east' });
+    field.build();
+
+    const through = drive(body(field), field, 0, -1, 2.2);
+    ok('open membrane (top 0): body walks straight through the doorway',
+      through.end.z < -8, `ended z=${f2(through.end.z)}`);
+
+    ok('setTop returns `this`', field.setTop(membrane, Infinity) === field);
+    ok('setTop after build() reaches the packed narrowphase',
+      field.get(membrane).top === Infinity);
+    const sealed = drive(body(field), field, 0, -1, 2.2);
+    ok('sealed membrane (top Infinity): body is held inside the room',
+      sealed.end.z > -6.5, `ended z=${f2(sealed.end.z)}`);
+    ok('sealed membrane: never penetrated', sealed.worst > -1e-6,
+      `min clearance ${f3(sealed.worst)}`);
+    ok('blocked() agrees while sealed', field.blocked(0, -6, 0.2, 0, 1.2));
+
+    field.setTop(membrane, 0);
+    const reopened = drive(body(field), field, 0, -1, 2.2);
+    ok('unsealed again (top 0): body walks through once more',
+      reopened.end.z < -8, `ended z=${f2(reopened.end.z)}`);
+    ok('blocked() agrees while open', !field.blocked(0, -6, 0.2, 0, 1.2));
+
+    // The seal/unseal cycle must not have forced a broadphase rebuild — the
+    // footprint never moved, so generation is the tell.
+    const gen = field.generation;
+    field.setTop(membrane, Infinity).setTop(membrane, 0);
+    ok('setTop does not rebuild the broadphase', field.generation === gen,
+      `generation ${gen} -> ${field.generation}`);
+
+    ok('out-of-range / NaN setTop is a safe no-op',
+      field.setTop(99, Infinity) === field && field.setTop(membrane, NaN) === field
+      && field.get(membrane).top === 0);
+  }
+
+  // --- lineBlocked through a doorway gap -----------------------------------
+  {
+    // Two wall runs at z=-6 with a 4 m doorway between them (the dungeon's
+    // exact geometry: 0.6 m thick walls, 4 m door spans).
+    const field = new ObstacleField();
+    field.addBox(-12, -6, 20, 0.6, 0, { tag: 'wall-west' });
+    field.addBox(12, -6, 20, 0.6, 0, { tag: 'wall-east' });
+    field.addCircle(0, -14, 1.0, { top: 0.4, tag: 'crate' });   // kerb-height
+    field.build();
+
+    ok('straight shot through the doorway is clear',
+      !field.lineBlocked(0, 0, 0, -12));
+    ok('straight shot into a wall is blocked',
+      field.lineBlocked(-10, 0, -10, -12));
+    ok('diagonal shot threading the doorway is clear',
+      !field.lineBlocked(-3, 0, 3, -12));
+    ok('diagonal shot crossing a wall is blocked',
+      field.lineBlocked(-10, 0, -2.5, -12));
+    // Worst-case phase: a perpendicular crossing whose naive 1.2 m samples
+    // would straddle the 0.6 m wall — the internal spacing cap must catch it.
+    ok('perpendicular crossing at the worst sample phase is still blocked',
+      field.lineBlocked(-10, -0.5, -10, -12.5));
+    ok('projectile height (feetY 1.2) sails over a kerb-height crate',
+      !field.lineBlocked(0, -10, 0, -18, { feetY: 1.2 }));
+    ok('ankle height (feetY 0) is stopped by the same crate',
+      field.lineBlocked(0, -10, 0, -18, { feetY: 0 }));
+    ok('zero-length segment degenerates to a point probe',
+      field.lineBlocked(-12, -6, -12, -6) && !field.lineBlocked(0, 0, 0, 0));
+    ok('empty field never blocks', !new ObstacleField().lineBlocked(0, 0, 0, -50));
+  }
+
+  // --- sealed membrane also gates lineBlocked (boss-door LOS) --------------
+  {
+    const field = new ObstacleField();
+    field.addBox(0, -6, 4, 1.2, 0, { top: 0, nav: false, tag: 'membrane' });
+    const membrane = field.count - 1;
+    field.build();
+    ok('open membrane is LOS-transparent', !field.lineBlocked(0, 0, 0, -12));
+    field.setTop(membrane, Infinity);
+    ok('sealed membrane blocks LOS', field.lineBlocked(0, 0, 0, -12));
+  }
+}
+
+// --------------------------------------------------------------------------
 // 5. broadphase cost
 // --------------------------------------------------------------------------
 
@@ -536,6 +642,9 @@ async function runBrowser() {
   const { page, errors } = await h.newPhonePage(browser, { width: 892, height: 412 });
   try {
     await h.gotoGame(page, { waitMs: 1800 });
+    // Arena-behaviour phase: pin the flat arena for E via the sanctioned
+    // forceOpen dev override (see _harness.forceOpenGates).
+    await h.forceOpenGates(page);
     const vp = page.viewportSize();
     ok('viewport is landscape', vp.width > vp.height, `${vp.width}x${vp.height}`);
 
@@ -548,10 +657,25 @@ async function runBrowser() {
       g.fx.damageNumber = () => {};
       g.startGate(0);
 
+      // DETERMINISM (this phase was the battery's recurring 1-2/70 flake):
+      // the body collides through TWO providers — the bound ObstacleField
+      // AND the world resolver (game._arenaResolve -> world.resolve), whose
+      // pillars/rocks are seeded per run. A seeded rock in the probe lane
+      // blocked or bent the walk on unlucky seeds, so both runs were
+      // seed-luck. The checks are about the FIELD mechanism, so the world
+      // resolver is no-op'd (and restored below) and the look yaw reset:
+      // the probe rock becomes the only solid in play, every run identical.
+      const savedResolve = g.world.resolve;
+      g.world.resolve = () => {};
+      g.input.resetLook?.();
+
       const ROCK = { x: 6, z: 0, r: 1.2 };
       const run = (field, seconds) => {
         p.body.setObstacles(field);
-        p.body.reset(0, 0, 0);
+        // 0.15 m off the rock's centreline: a dead-centre hit is degenerate
+        // (contact normal exactly opposes the walk, slide component zero) —
+        // the offset makes the deflection direction a fact, not a race.
+        p.body.reset(0, 0, 0.15);
         p.hp = 9999;
         let worst = Infinity;
         const steps = Math.round(seconds * 60);
@@ -572,6 +696,7 @@ async function runBrowser() {
       solid.addCircle(ROCK.x, ROCK.z, ROCK.r, { tag: 'rock' }).build();
       const withRock = run(solid, 3);
       const withoutRock = run(new mod.ObstacleField(), 3);
+      g.world.resolve = savedResolve;
 
       // What the arena registers as solid TODAY, for the handoff.
       const arenaCircles = g.world.obstacles.length;
@@ -594,9 +719,9 @@ async function runBrowser() {
     ok('live player is deflected around it rather than stopped',
       Math.abs(res.withRock.z) > 0.4 && res.withRock.x > 7.5,
       `x=${f2(res.withRock.x)} z=${f2(res.withRock.z)}`);
-    // The arena is seeded per run, so its own pillars can nudge the control
-    // line; what matters is that with an empty registry the body walks clean
-    // THROUGH the rock volume exactly as the shipped build does.
+    // Negative control: with an empty registry (and the world resolver
+    // parked, see above) the body walks clean THROUGH the rock volume —
+    // proving the field, not something else, is what stopped the first run.
     ok('with an EMPTY field the live player still walks through the rock volume',
       res.withoutRock.worst < -0.5,
       `deepest penetration ${f3(-res.withoutRock.worst)}u, ended z=${f2(res.withoutRock.z)}`);
@@ -671,6 +796,7 @@ if (want('degrade')) runDegradation();
 if (want('solids')) runSolids();
 if (want('tunnel')) runTunnelling();
 if (want('nav')) runNav();
+if (want('dungeon')) runDungeonHelpers();
 if (want('perf')) runPerf();
 if (!NO_BROWSER && want('browser')) {
   try {

@@ -4,7 +4,7 @@
 //
 //   node tools/playtest.mjs [gateIndex] [simSeconds] [forceLevel]
 
-import { launchBrowser, newPhonePage, ensureServer, gotoGame, evalGame, writeReport } from './_harness.mjs';
+import { launchBrowser, newPhonePage, ensureServer, gotoGame, evalGame, writeReport, forceOpenGates } from './_harness.mjs';
 
 const gateIndex = Number(process.argv[2] ?? 0);
 const simSeconds = Number(process.argv[3] ?? 400);
@@ -15,6 +15,9 @@ const browser = await launchBrowser();
 const { page, errors } = await newPhonePage(browser);
 
 await gotoGame(page, { waitMs: 2000 });
+// Arena-behaviour tool: pin the flat arena for E/D via the sanctioned
+// forceOpen dev override (see _harness.forceOpenGates).
+await forceOpenGates(page);
 
 const result = await evalGame(page, (g, [gateIdx, seconds, level]) => {
   g.renderer.render = () => {};

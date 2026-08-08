@@ -627,16 +627,26 @@ function bodyMaterial(glow, tintHex, tintAmount, hero = false) {
  * against a shared material that would fade every shadow on the field with it.
  */
 function ghostMaterial(glow) {
+  // Numbers match creatures.js applyShadowSkin exactly — that recipe was
+  // screenshot-tuned against a living skeleton in the pinned harness arena,
+  // where THIS material's old 0.45/0.25/0.16/0.72 read as a bright teal
+  // hologram instead of a shadow (under ACES at exposure 1.25 even a small
+  // emissiveIntensity repaints a black body cyan, and the 0.45-rough specular,
+  // 0.35 env pickup and 0.72 sky bleed-through each added their own glaze).
+  // The humanoid ghost is only seen when creatures.glb is missing, and it must
+  // read as the same near-black army as the bound-creature clones it stands in
+  // for: matte, near-opaque, emissive at a whisper, the rim alone as the cold
+  // accent.
   const m = applyRim(new THREE.MeshStandardMaterial({
     color: 0x0a1220,
     vertexColors: false,
-    roughness: 0.45,
-    metalness: 0.25,
-    envMapIntensity: 0.35,
+    roughness: 0.9,
+    metalness: 0.05,
+    envMapIntensity: 0.12,
     emissive: new THREE.Color(glow),
-    emissiveIntensity: 0.16,
+    emissiveIntensity: 0.025,
     transparent: true,
-    opacity: 0.72,
+    opacity: 0.94,
     // FrontSide, unlike the living. A transparent DOUBLE-sided low-poly body
     // draws its own back faces in undefined order and speckles: the first
     // render of this looked like TV static wrapped round a person. Depth write

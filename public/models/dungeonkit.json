@@ -1,0 +1,4165 @@
+{
+ "file": "models/dungeonkit.glb",
+ "generatedBy": "tools/build-dungeonkit-glb.mjs",
+ "sources": [
+  {
+   "name": "KayKit — Dungeon Remastered Pack (FREE tier, 1.1)",
+   "author": "Kay Lousberg",
+   "url": "https://kaylousberg.itch.io/kaykit-dungeon-remastered",
+   "licence": "CC0 1.0 (License.txt inside the zip re-verified at download time)",
+   "downloaded": "2026-08-07",
+   "prefix": "dungeon_",
+   "pieces": 141,
+   "authoredGrid": 4,
+   "scaleBaked": 0.5,
+   "note": "Authored on a 4 m cell with a 4 m storey (measured: wall 4.000 wide x 4.000 tall, floor_tile_large 4.000 x 4.000, floor_tile_small the 2 m half tile). Multiplied by 0.5 INTO THE VERTEX DATA at build time so it shares the 2 m grid and 2 m storey of citykit.glb. Sizes below are post-scale; multiply by 2 to compare with KayKit's docs. The itch URL 301s to /kaykit-dungeon-pack — same product, the page devlog is \"Dungeon Remastered 1.1 Update\". Pristine zip: assets/source/dungeon/kaykit/dungeon-free.zip."
+  }
+ ],
+ "grid": {
+  "gridded": true,
+  "unit": 2,
+  "bestGuess": 2,
+  "confidence": 0.8118,
+  "tolerance": 0.05,
+  "onGridPieces": 134,
+  "note": "Cell size in metres on the XZ plane, post-bake. Same fit vocabulary as citykit.json: exact/overhang/half tile on 2 m centres, \"sub\" snaps its centre, \"free\" is hand-placed. Y is unconstrained."
+ },
+ "gridCandidates": [
+  {
+   "grid": 0.25,
+   "hits": 186,
+   "considered": 251,
+   "score": 0.741
+  },
+  {
+   "grid": 0.5,
+   "hits": 149,
+   "considered": 235,
+   "score": 0.634
+  },
+  {
+   "grid": 1,
+   "hits": 114,
+   "considered": 194,
+   "score": 0.5876
+  },
+  {
+   "grid": 2,
+   "hits": 69,
+   "considered": 85,
+   "score": 0.8118
+  },
+  {
+   "grid": 4,
+   "hits": 10,
+   "considered": 13,
+   "score": 0.7692
+  }
+ ],
+ "stats": {
+  "pieces": 141,
+  "bytes": 999944,
+  "triangles": 62982,
+  "materials": 1,
+  "textures": 1
+ },
+ "notes": [
+  "SCALE: everything in this file is metres on the shared 2 m grid, exactly like citykit.glb and nature.glb. The 0.5x is baked into vertices — do not apply any further factor.",
+  "PIVOTS: floor tiles and walls are centred on their cell origin; y = 0 is the walk plane. dungeon_wall is a full-cell 0.5 m-thick slab centred on the cell (z -0.25..0.25 post-bake), spanning y 0..2 — the ruin_wall convention (cell-bisecting), NOT the town_wall edge slab.",
+  "STOREY HEIGHT is 2 m post-bake, matching both citykit sub-kits, so dungeon walls stack and mix with ruin_* pieces at the same floor intervals.",
+  "DUNGEON_MODULES coverage (docs/DUNGEON_SPEC.json step 9): floors (dungeon_floor_tile_*, dungeon_floor_dirt_*, dungeon_floor_wood_*), walls (dungeon_wall*), doorframe (dungeon_wall_doorway*), archway (dungeon_wall_arched*), column (dungeon_column, dungeon_pillar*, dungeon_wall_pillar), torch (dungeon_torch, dungeon_torch_lit, dungeon_torch_mounted), chest (dungeon_chest, dungeon_chest_gold, dungeon_trunk_*), barrel (dungeon_barrel_*, dungeon_keg*), banner (dungeon_banner_*), stairs (dungeon_stairs*), traps (dungeon_floor_tile_big_spikes, dungeon_floor_tile_*grate*).",
+  "All pieces are textured by ONE shared gradient atlas (downscaled with per-UV pixel verification). Flat-shaded low-poly; no normal map, no PBR set.",
+  "Keys are lowercase with a dungeon_ prefix: this kit's wall/floor stems collide with citykit lineage by case and by name, which macOS hides and Android does not."
+ ],
+ "pieces": [
+  {
+   "key": "dungeon_banner_blue",
+   "source": "kaykit-dungeon-remastered-free/banner_blue.gltf",
+   "size": [
+    0.75,
+    1.598,
+    0.1559
+   ],
+   "min": [
+    -0.375,
+    0.2657,
+    0.1888
+   ],
+   "max": [
+    0.375,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 97,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_brown",
+   "source": "kaykit-dungeon-remastered-free/banner_brown.gltf",
+   "size": [
+    0.75,
+    1.598,
+    0.1559
+   ],
+   "min": [
+    -0.375,
+    0.2657,
+    0.1888
+   ],
+   "max": [
+    0.375,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 97,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_green",
+   "source": "kaykit-dungeon-remastered-free/banner_green.gltf",
+   "size": [
+    0.75,
+    1.598,
+    0.1559
+   ],
+   "min": [
+    -0.375,
+    0.2657,
+    0.1888
+   ],
+   "max": [
+    0.375,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 97,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_patterna_blue",
+   "source": "kaykit-dungeon-remastered-free/banner_patternA_blue.gltf",
+   "size": [
+    0.75,
+    1.598,
+    0.1559
+   ],
+   "min": [
+    -0.375,
+    0.2657,
+    0.1888
+   ],
+   "max": [
+    0.375,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 110,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_patterna_brown",
+   "source": "kaykit-dungeon-remastered-free/banner_patternA_brown.gltf",
+   "size": [
+    0.75,
+    1.598,
+    0.1559
+   ],
+   "min": [
+    -0.375,
+    0.2657,
+    0.1888
+   ],
+   "max": [
+    0.375,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 110,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_patterna_green",
+   "source": "kaykit-dungeon-remastered-free/banner_patternA_green.gltf",
+   "size": [
+    0.75,
+    1.598,
+    0.1559
+   ],
+   "min": [
+    -0.375,
+    0.2657,
+    0.1888
+   ],
+   "max": [
+    0.375,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 110,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_patterna_red",
+   "source": "kaykit-dungeon-remastered-free/banner_patternA_red.gltf",
+   "size": [
+    0.75,
+    1.598,
+    0.1559
+   ],
+   "min": [
+    -0.375,
+    0.2657,
+    0.1888
+   ],
+   "max": [
+    0.375,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 110,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_patterna_white",
+   "source": "kaykit-dungeon-remastered-free/banner_patternA_white.gltf",
+   "size": [
+    0.75,
+    1.598,
+    0.1559
+   ],
+   "min": [
+    -0.375,
+    0.2657,
+    0.1888
+   ],
+   "max": [
+    0.375,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 110,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_patterna_yellow",
+   "source": "kaykit-dungeon-remastered-free/banner_patternA_yellow.gltf",
+   "size": [
+    0.75,
+    1.598,
+    0.1559
+   ],
+   "min": [
+    -0.375,
+    0.2657,
+    0.1888
+   ],
+   "max": [
+    0.375,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 110,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_red",
+   "source": "kaykit-dungeon-remastered-free/banner_red.gltf",
+   "size": [
+    0.75,
+    1.598,
+    0.1559
+   ],
+   "min": [
+    -0.375,
+    0.2657,
+    0.1888
+   ],
+   "max": [
+    0.375,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 97,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_shield_blue",
+   "source": "kaykit-dungeon-remastered-free/banner_shield_blue.gltf",
+   "size": [
+    1.116,
+    1.598,
+    0.1871
+   ],
+   "min": [
+    -0.558,
+    0.2657,
+    0.1577
+   ],
+   "max": [
+    0.558,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 639,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_shield_brown",
+   "source": "kaykit-dungeon-remastered-free/banner_shield_brown.gltf",
+   "size": [
+    1.116,
+    1.598,
+    0.1871
+   ],
+   "min": [
+    -0.558,
+    0.2657,
+    0.1577
+   ],
+   "max": [
+    0.558,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 639,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_shield_green",
+   "source": "kaykit-dungeon-remastered-free/banner_shield_green.gltf",
+   "size": [
+    1.116,
+    1.598,
+    0.1871
+   ],
+   "min": [
+    -0.558,
+    0.2657,
+    0.1577
+   ],
+   "max": [
+    0.558,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 639,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_shield_red",
+   "source": "kaykit-dungeon-remastered-free/banner_shield_red.gltf",
+   "size": [
+    1.116,
+    1.598,
+    0.1871
+   ],
+   "min": [
+    -0.558,
+    0.2657,
+    0.1577
+   ],
+   "max": [
+    0.558,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 639,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_shield_white",
+   "source": "kaykit-dungeon-remastered-free/banner_shield_white.gltf",
+   "size": [
+    1.116,
+    1.598,
+    0.1871
+   ],
+   "min": [
+    -0.558,
+    0.2657,
+    0.1577
+   ],
+   "max": [
+    0.558,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 639,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_shield_yellow",
+   "source": "kaykit-dungeon-remastered-free/banner_shield_yellow.gltf",
+   "size": [
+    1.116,
+    1.598,
+    0.1871
+   ],
+   "min": [
+    -0.558,
+    0.2657,
+    0.1577
+   ],
+   "max": [
+    0.558,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 639,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_white",
+   "source": "kaykit-dungeon-remastered-free/banner_white.gltf",
+   "size": [
+    0.75,
+    1.598,
+    0.1559
+   ],
+   "min": [
+    -0.375,
+    0.2657,
+    0.1888
+   ],
+   "max": [
+    0.375,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 97,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_banner_yellow",
+   "source": "kaykit-dungeon-remastered-free/banner_yellow.gltf",
+   "size": [
+    0.75,
+    1.598,
+    0.1559
+   ],
+   "min": [
+    -0.375,
+    0.2657,
+    0.1888
+   ],
+   "max": [
+    0.375,
+    1.8637,
+    0.3448
+   ],
+   "triangles": 97,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_barrel_large",
+   "source": "kaykit-dungeon-remastered-free/barrel_large.gltf",
+   "size": [
+    0.9,
+    1,
+    0.9
+   ],
+   "min": [
+    -0.45,
+    0,
+    -0.45
+   ],
+   "max": [
+    0.45,
+    1,
+    0.45
+   ],
+   "triangles": 561,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_barrel_large_decorated",
+   "source": "kaykit-dungeon-remastered-free/barrel_large_decorated.gltf",
+   "size": [
+    0.969,
+    1.2782,
+    0.9277
+   ],
+   "min": [
+    -0.4593,
+    -0.001,
+    -0.4593
+   ],
+   "max": [
+    0.5096,
+    1.2772,
+    0.4684
+   ],
+   "triangles": 1047,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_barrel_small",
+   "source": "kaykit-dungeon-remastered-free/barrel_small.gltf",
+   "size": [
+    0.5007,
+    0.5088,
+    0.5007
+   ],
+   "min": [
+    -0.2503,
+    0,
+    -0.2503
+   ],
+   "max": [
+    0.2503,
+    0.5088,
+    0.2503
+   ],
+   "triangles": 207,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_barrel_small_stack",
+   "source": "kaykit-dungeon-remastered-free/barrel_small_stack.gltf",
+   "size": [
+    0.9251,
+    0.8851,
+    0.5
+   ],
+   "min": [
+    -0.4625,
+    0,
+    -0.25
+   ],
+   "max": [
+    0.4625,
+    0.8851,
+    0.25
+   ],
+   "triangles": 1149,
+   "cells": [
+    0.5,
+    0
+   ],
+   "fit": [
+    "half",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_barrier",
+   "source": "kaykit-dungeon-remastered-free/barrier.gltf",
+   "size": [
+    2,
+    0.55,
+    0.25
+   ],
+   "min": [
+    -1,
+    0,
+    -0.125
+   ],
+   "max": [
+    1,
+    0.55,
+    0.125
+   ],
+   "triangles": 90,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_barrier_colum_half",
+   "source": "kaykit-dungeon-remastered-free/barrier_colum_half.gltf",
+   "size": [
+    1.175,
+    0.7,
+    0.35
+   ],
+   "min": [
+    -0.175,
+    0,
+    -0.175
+   ],
+   "max": [
+    1,
+    0.7,
+    0.175
+   ],
+   "triangles": 86,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_barrier_column",
+   "source": "kaykit-dungeon-remastered-free/barrier_column.gltf",
+   "size": [
+    2,
+    0.7,
+    0.35
+   ],
+   "min": [
+    -1,
+    0,
+    -0.175
+   ],
+   "max": [
+    1,
+    0.7,
+    0.175
+   ],
+   "triangles": 110,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_barrier_corner",
+   "source": "kaykit-dungeon-remastered-free/barrier_corner.gltf",
+   "size": [
+    1.1975,
+    0.7,
+    1.1975
+   ],
+   "min": [
+    -1,
+    0,
+    -0.1975
+   ],
+   "max": [
+    0.1975,
+    0.7,
+    1
+   ],
+   "triangles": 128,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_barrier_half",
+   "source": "kaykit-dungeon-remastered-free/barrier_half.gltf",
+   "size": [
+    1,
+    0.55,
+    0.25
+   ],
+   "min": [
+    0,
+    0,
+    -0.125
+   ],
+   "max": [
+    1,
+    0.55,
+    0.125
+   ],
+   "triangles": 42,
+   "cells": [
+    0.5,
+    0
+   ],
+   "fit": [
+    "half",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_box_large",
+   "source": "kaykit-dungeon-remastered-free/box_large.gltf",
+   "size": [
+    0.75,
+    0.75,
+    0.75
+   ],
+   "min": [
+    -0.375,
+    0,
+    -0.375
+   ],
+   "max": [
+    0.375,
+    0.75,
+    0.375
+   ],
+   "triangles": 188,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_box_small",
+   "source": "kaykit-dungeon-remastered-free/box_small.gltf",
+   "size": [
+    0.5,
+    0.5,
+    0.5
+   ],
+   "min": [
+    -0.25,
+    0,
+    -0.25
+   ],
+   "max": [
+    0.25,
+    0.5,
+    0.25
+   ],
+   "triangles": 188,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_box_small_decorated",
+   "source": "kaykit-dungeon-remastered-free/box_small_decorated.gltf",
+   "size": [
+    0.7449,
+    0.7414,
+    0.7436
+   ],
+   "min": [
+    -0.3059,
+    0,
+    -0.3164
+   ],
+   "max": [
+    0.439,
+    0.7414,
+    0.4272
+   ],
+   "triangles": 928,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_box_stacked",
+   "source": "kaykit-dungeon-remastered-free/box_stacked.gltf",
+   "size": [
+    1.7376,
+    1.6545,
+    1.8174
+   ],
+   "min": [
+    -0.8752,
+    0,
+    -0.8867
+   ],
+   "max": [
+    0.8624,
+    1.6545,
+    0.9306
+   ],
+   "triangles": 2173,
+   "cells": [
+    null,
+    null
+   ],
+   "fit": [
+    "free",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "dungeon_candle",
+   "source": "kaykit-dungeon-remastered-free/candle.gltf",
+   "size": [
+    0.1672,
+    0.4365,
+    0.1646
+   ],
+   "min": [
+    -0.0836,
+    0,
+    -0.0849
+   ],
+   "max": [
+    0.0836,
+    0.4365,
+    0.0798
+   ],
+   "triangles": 66,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_candle_lit",
+   "source": "kaykit-dungeon-remastered-free/candle_lit.gltf",
+   "size": [
+    0.1672,
+    0.5255,
+    0.1646
+   ],
+   "min": [
+    -0.0836,
+    0,
+    -0.0849
+   ],
+   "max": [
+    0.0836,
+    0.5255,
+    0.0798
+   ],
+   "triangles": 120,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_candle_melted",
+   "source": "kaykit-dungeon-remastered-free/candle_melted.gltf",
+   "size": [
+    0.1672,
+    0.3508,
+    0.1646
+   ],
+   "min": [
+    -0.0836,
+    0,
+    -0.0849
+   ],
+   "max": [
+    0.0836,
+    0.3508,
+    0.0798
+   ],
+   "triangles": 66,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_candle_thin",
+   "source": "kaykit-dungeon-remastered-free/candle_thin.gltf",
+   "size": [
+    0.0966,
+    0.4365,
+    0.0951
+   ],
+   "min": [
+    -0.0483,
+    0,
+    -0.049
+   ],
+   "max": [
+    0.0483,
+    0.4365,
+    0.0461
+   ],
+   "triangles": 66,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_candle_thin_lit",
+   "source": "kaykit-dungeon-remastered-free/candle_thin_lit.gltf",
+   "size": [
+    0.0966,
+    0.5255,
+    0.0951
+   ],
+   "min": [
+    -0.0483,
+    0,
+    -0.049
+   ],
+   "max": [
+    0.0483,
+    0.5255,
+    0.0461
+   ],
+   "triangles": 120,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_candle_triple",
+   "source": "kaykit-dungeon-remastered-free/candle_triple.gltf",
+   "size": [
+    0.2506,
+    0.4365,
+    0.195
+   ],
+   "min": [
+    -0.0836,
+    0,
+    -0.0798
+   ],
+   "max": [
+    0.167,
+    0.4365,
+    0.1152
+   ],
+   "triangles": 198,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_ceiling_tile",
+   "source": "kaykit-dungeon-remastered-free/ceiling_tile.gltf",
+   "size": [
+    2,
+    0.175,
+    2
+   ],
+   "min": [
+    -1,
+    -0.125,
+    -1
+   ],
+   "max": [
+    1,
+    0.05,
+    1
+   ],
+   "triangles": 60,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_chest",
+   "source": "kaykit-dungeon-remastered-free/chest.gltf",
+   "size": [
+    0.85,
+    0.65,
+    0.7229
+   ],
+   "min": [
+    -0.425,
+    0,
+    -0.35
+   ],
+   "max": [
+    0.425,
+    0.65,
+    0.3729
+   ],
+   "triangles": 728,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_chest_gold",
+   "source": "kaykit-dungeon-remastered-free/chest_gold.gltf",
+   "size": [
+    0.85,
+    0.65,
+    0.7229
+   ],
+   "min": [
+    -0.425,
+    0,
+    -0.35
+   ],
+   "max": [
+    0.425,
+    0.65,
+    0.3729
+   ],
+   "triangles": 1568,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_coin_stack_large",
+   "source": "kaykit-dungeon-remastered-free/coin_stack_large.gltf",
+   "size": [
+    0.7182,
+    0.5784,
+    0.8293
+   ],
+   "min": [
+    -0.3597,
+    0,
+    -0.4078
+   ],
+   "max": [
+    0.3586,
+    0.5784,
+    0.4216
+   ],
+   "triangles": 1776,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_coin_stack_medium",
+   "source": "kaykit-dungeon-remastered-free/coin_stack_medium.gltf",
+   "size": [
+    0.4967,
+    0.3203,
+    0.5171
+   ],
+   "min": [
+    -0.2232,
+    0,
+    -0.2537
+   ],
+   "max": [
+    0.2735,
+    0.3203,
+    0.2634
+   ],
+   "triangles": 968,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_coin_stack_small",
+   "source": "kaykit-dungeon-remastered-free/coin_stack_small.gltf",
+   "size": [
+    0.4796,
+    0.2391,
+    0.4482
+   ],
+   "min": [
+    -0.2226,
+    0,
+    -0.2304
+   ],
+   "max": [
+    0.2569,
+    0.2391,
+    0.2178
+   ],
+   "triangles": 416,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_column",
+   "source": "kaykit-dungeon-remastered-free/column.gltf",
+   "size": [
+    0.35,
+    0.7,
+    0.35
+   ],
+   "min": [
+    -0.175,
+    0,
+    -0.175
+   ],
+   "max": [
+    0.175,
+    0.7,
+    0.175
+   ],
+   "triangles": 44,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_crates_stacked",
+   "source": "kaykit-dungeon-remastered-free/crates_stacked.gltf",
+   "size": [
+    1.0446,
+    1.0711,
+    1.1247
+   ],
+   "min": [
+    -0.545,
+    0,
+    -0.5786
+   ],
+   "max": [
+    0.4996,
+    1.0711,
+    0.5461
+   ],
+   "triangles": 1331,
+   "cells": [
+    0.5,
+    0
+   ],
+   "fit": [
+    "half",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_dirt_large",
+   "source": "kaykit-dungeon-remastered-free/floor_dirt_large.gltf",
+   "size": [
+    2,
+    0.1043,
+    2
+   ],
+   "min": [
+    -1,
+    -0.05,
+    -1
+   ],
+   "max": [
+    1,
+    0.0543,
+    1
+   ],
+   "triangles": 104,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_dirt_large_rocky",
+   "source": "kaykit-dungeon-remastered-free/floor_dirt_large_rocky.gltf",
+   "size": [
+    2,
+    0.1964,
+    2
+   ],
+   "min": [
+    -1,
+    -0.05,
+    -1
+   ],
+   "max": [
+    1,
+    0.1464,
+    1
+   ],
+   "triangles": 187,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_dirt_small_a",
+   "source": "kaykit-dungeon-remastered-free/floor_dirt_small_A.gltf",
+   "size": [
+    1,
+    0.0932,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.0432,
+    0.5
+   ],
+   "triangles": 45,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_dirt_small_b",
+   "source": "kaykit-dungeon-remastered-free/floor_dirt_small_B.gltf",
+   "size": [
+    1,
+    0.0943,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.0443,
+    0.5
+   ],
+   "triangles": 36,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_dirt_small_c",
+   "source": "kaykit-dungeon-remastered-free/floor_dirt_small_C.gltf",
+   "size": [
+    1,
+    0.1043,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.0543,
+    0.5
+   ],
+   "triangles": 33,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_dirt_small_corner",
+   "source": "kaykit-dungeon-remastered-free/floor_dirt_small_corner.gltf",
+   "size": [
+    1,
+    0.0769,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.0269,
+    0.5
+   ],
+   "triangles": 56,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_dirt_small_d",
+   "source": "kaykit-dungeon-remastered-free/floor_dirt_small_D.gltf",
+   "size": [
+    1,
+    0.0692,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.0192,
+    0.5
+   ],
+   "triangles": 20,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_dirt_small_weeds",
+   "source": "kaykit-dungeon-remastered-free/floor_dirt_small_weeds.gltf",
+   "size": [
+    1,
+    0.1477,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.0977,
+    0.5
+   ],
+   "triangles": 416,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_foundation_allsides",
+   "source": "kaykit-dungeon-remastered-free/floor_foundation_allsides.gltf",
+   "size": [
+    1.1,
+    1,
+    1.1
+   ],
+   "min": [
+    -0.55,
+    0,
+    -0.55
+   ],
+   "max": [
+    0.55,
+    1,
+    0.55
+   ],
+   "triangles": 360,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_foundation_corner",
+   "source": "kaykit-dungeon-remastered-free/floor_foundation_corner.gltf",
+   "size": [
+    1.05,
+    1,
+    1.05
+   ],
+   "min": [
+    -0.55,
+    0,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    1,
+    0.55
+   ],
+   "triangles": 202,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_foundation_diagonal_corner",
+   "source": "kaykit-dungeon-remastered-free/floor_foundation_diagonal_corner.gltf",
+   "size": [
+    1.05,
+    1,
+    1.05
+   ],
+   "min": [
+    -0.55,
+    0,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    1,
+    0.55
+   ],
+   "triangles": 111,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_foundation_front",
+   "source": "kaykit-dungeon-remastered-free/floor_foundation_front.gltf",
+   "size": [
+    1,
+    1,
+    1.05
+   ],
+   "min": [
+    -0.5,
+    0,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    1,
+    0.55
+   ],
+   "triangles": 123,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_foundation_front_and_back",
+   "source": "kaykit-dungeon-remastered-free/floor_foundation_front_and_back.gltf",
+   "size": [
+    1,
+    1,
+    1.1
+   ],
+   "min": [
+    -0.5,
+    0,
+    -0.55
+   ],
+   "max": [
+    0.5,
+    1,
+    0.55
+   ],
+   "triangles": 202,
+   "cells": [
+    0.5,
+    0
+   ],
+   "fit": [
+    "half",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_foundation_front_and_sides",
+   "source": "kaykit-dungeon-remastered-free/floor_foundation_front_and_sides.gltf",
+   "size": [
+    1.1,
+    1,
+    1.05
+   ],
+   "min": [
+    -0.55,
+    0,
+    -0.5
+   ],
+   "max": [
+    0.55,
+    1,
+    0.55
+   ],
+   "triangles": 281,
+   "cells": [
+    0,
+    0.5
+   ],
+   "fit": [
+    "sub",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_big_grate",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_big_grate.gltf",
+   "size": [
+    2,
+    0.525,
+    2
+   ],
+   "min": [
+    -1,
+    -0.5,
+    -1
+   ],
+   "max": [
+    1,
+    0.025,
+    1
+   ],
+   "triangles": 292,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_big_grate_open",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_big_grate_open.gltf",
+   "size": [
+    2,
+    0.525,
+    2
+   ],
+   "min": [
+    -1,
+    -0.5,
+    -1
+   ],
+   "max": [
+    1,
+    0.025,
+    1
+   ],
+   "triangles": 284,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_big_spikes",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_big_spikes.gltf",
+   "size": [
+    2,
+    1.05,
+    2
+   ],
+   "min": [
+    -1,
+    -0.05,
+    -1
+   ],
+   "max": [
+    1,
+    1,
+    1
+   ],
+   "triangles": 638,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_extralarge_grates",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_extralarge_grates.gltf",
+   "size": [
+    4,
+    0.565,
+    4
+   ],
+   "min": [
+    -2,
+    -0.49,
+    -2
+   ],
+   "max": [
+    2,
+    0.075,
+    2
+   ],
+   "triangles": 772,
+   "cells": [
+    2,
+    2
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_extralarge_grates_open",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_extralarge_grates_open.gltf",
+   "size": [
+    4,
+    0.565,
+    4
+   ],
+   "min": [
+    -2,
+    -0.49,
+    -2
+   ],
+   "max": [
+    2,
+    0.075,
+    2
+   ],
+   "triangles": 764,
+   "cells": [
+    2,
+    2
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_grate",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_grate.gltf",
+   "size": [
+    2,
+    0.515,
+    1
+   ],
+   "min": [
+    -1,
+    -0.49,
+    -0.5
+   ],
+   "max": [
+    1,
+    0.025,
+    0.5
+   ],
+   "triangles": 142,
+   "cells": [
+    1,
+    0.5
+   ],
+   "fit": [
+    "exact",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_grate_open",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_grate_open.gltf",
+   "size": [
+    2,
+    0.515,
+    1
+   ],
+   "min": [
+    -1,
+    -0.49,
+    -0.5
+   ],
+   "max": [
+    1,
+    0.025,
+    0.5
+   ],
+   "triangles": 140,
+   "cells": [
+    1,
+    0.5
+   ],
+   "fit": [
+    "exact",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_large",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_large.gltf",
+   "size": [
+    2,
+    0.075,
+    2
+   ],
+   "min": [
+    -1,
+    -0.05,
+    -1
+   ],
+   "max": [
+    1,
+    0.025,
+    1
+   ],
+   "triangles": 188,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_large_rocks",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_large_rocks.gltf",
+   "size": [
+    2,
+    0.3181,
+    2
+   ],
+   "min": [
+    -1,
+    -0.05,
+    -1
+   ],
+   "max": [
+    1,
+    0.2681,
+    1
+   ],
+   "triangles": 338,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_small",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_small.gltf",
+   "size": [
+    1,
+    0.075,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.025,
+    0.5
+   ],
+   "triangles": 66,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_small_broken_a",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_small_broken_A.gltf",
+   "size": [
+    1,
+    0.075,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.025,
+    0.5
+   ],
+   "triangles": 94,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_small_broken_b",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_small_broken_B.gltf",
+   "size": [
+    1,
+    0.075,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.025,
+    0.5
+   ],
+   "triangles": 76,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_small_corner",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_small_corner.gltf",
+   "size": [
+    1,
+    0.075,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.025,
+    0.5
+   ],
+   "triangles": 31,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_small_decorated",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_small_decorated.gltf",
+   "size": [
+    1,
+    0.3865,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.3365,
+    0.5
+   ],
+   "triangles": 390,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_small_weeds_a",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_small_weeds_A.gltf",
+   "size": [
+    1,
+    0.1477,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.0977,
+    0.5
+   ],
+   "triangles": 589,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_tile_small_weeds_b",
+   "source": "kaykit-dungeon-remastered-free/floor_tile_small_weeds_B.gltf",
+   "size": [
+    1,
+    0.1477,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.0977,
+    0.5
+   ],
+   "triangles": 447,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_wood_large",
+   "source": "kaykit-dungeon-remastered-free/floor_wood_large.gltf",
+   "size": [
+    2,
+    0.075,
+    2
+   ],
+   "min": [
+    -1,
+    -0.05,
+    -1
+   ],
+   "max": [
+    1,
+    0.025,
+    1
+   ],
+   "triangles": 272,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_wood_large_dark",
+   "source": "kaykit-dungeon-remastered-free/floor_wood_large_dark.gltf",
+   "size": [
+    2,
+    0.075,
+    2
+   ],
+   "min": [
+    -1,
+    -0.05,
+    -1
+   ],
+   "max": [
+    1,
+    0.025,
+    1
+   ],
+   "triangles": 272,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_wood_small",
+   "source": "kaykit-dungeon-remastered-free/floor_wood_small.gltf",
+   "size": [
+    1,
+    0.075,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.025,
+    0.5
+   ],
+   "triangles": 78,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_floor_wood_small_dark",
+   "source": "kaykit-dungeon-remastered-free/floor_wood_small_dark.gltf",
+   "size": [
+    1,
+    0.075,
+    1
+   ],
+   "min": [
+    -0.5,
+    -0.05,
+    -0.5
+   ],
+   "max": [
+    0.5,
+    0.025,
+    0.5
+   ],
+   "triangles": 78,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_keg",
+   "source": "kaykit-dungeon-remastered-free/keg.gltf",
+   "size": [
+    0.9,
+    1.0254,
+    1
+   ],
+   "min": [
+    -0.45,
+    0,
+    -0.4878
+   ],
+   "max": [
+    0.45,
+    1.0254,
+    0.5122
+   ],
+   "triangles": 807,
+   "cells": [
+    0.5,
+    0.5
+   ],
+   "fit": [
+    "half",
+    "half"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_keg_decorated",
+   "source": "kaykit-dungeon-remastered-free/keg_decorated.gltf",
+   "size": [
+    1.7597,
+    1.0254,
+    1
+   ],
+   "min": [
+    -0.9097,
+    0,
+    -0.4878
+   ],
+   "max": [
+    0.85,
+    1.0254,
+    0.5122
+   ],
+   "triangles": 2058,
+   "cells": [
+    null,
+    0.5
+   ],
+   "fit": [
+    "free",
+    "half"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "dungeon_pillar",
+   "source": "kaykit-dungeon-remastered-free/pillar.gltf",
+   "size": [
+    0.75,
+    2,
+    0.75
+   ],
+   "min": [
+    -0.375,
+    0,
+    -0.375
+   ],
+   "max": [
+    0.375,
+    2,
+    0.375
+   ],
+   "triangles": 136,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_pillar_decorated",
+   "source": "kaykit-dungeon-remastered-free/pillar_decorated.gltf",
+   "size": [
+    1.116,
+    2,
+    0.8551
+   ],
+   "min": [
+    -0.558,
+    0,
+    -0.375
+   ],
+   "max": [
+    0.558,
+    2,
+    0.4801
+   ],
+   "triangles": 761,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_rubble_half",
+   "source": "kaykit-dungeon-remastered-free/rubble_half.gltf",
+   "size": [
+    1.9998,
+    1.75,
+    1.5
+   ],
+   "min": [
+    0,
+    0,
+    -0.7582
+   ],
+   "max": [
+    1.9998,
+    1.75,
+    0.7418
+   ],
+   "triangles": 390,
+   "cells": [
+    1,
+    null
+   ],
+   "fit": [
+    "exact",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "dungeon_rubble_large",
+   "source": "kaykit-dungeon-remastered-free/rubble_large.gltf",
+   "size": [
+    4.0646,
+    1.748,
+    1.5916
+   ],
+   "min": [
+    -2.0344,
+    0,
+    -0.7928
+   ],
+   "max": [
+    2.0302,
+    1.748,
+    0.7987
+   ],
+   "triangles": 788,
+   "cells": [
+    2,
+    null
+   ],
+   "fit": [
+    "exact",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "dungeon_stairs",
+   "source": "kaykit-dungeon-remastered-free/stairs.gltf",
+   "size": [
+    2.5,
+    2.55,
+    2
+   ],
+   "min": [
+    -1.25,
+    0,
+    0
+   ],
+   "max": [
+    1.25,
+    2.55,
+    2
+   ],
+   "triangles": 358,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_stairs_long",
+   "source": "kaykit-dungeon-remastered-free/stairs_long.gltf",
+   "size": [
+    2.5,
+    2.55,
+    4
+   ],
+   "min": [
+    -1.25,
+    0,
+    0
+   ],
+   "max": [
+    1.25,
+    2.55,
+    4
+   ],
+   "triangles": 442,
+   "cells": [
+    1,
+    2
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_stairs_long_modular_center",
+   "source": "kaykit-dungeon-remastered-free/stairs_long_modular_center.gltf",
+   "size": [
+    1,
+    2,
+    4
+   ],
+   "min": [
+    -0.5,
+    0,
+    0
+   ],
+   "max": [
+    0.5,
+    2,
+    4
+   ],
+   "triangles": 54,
+   "cells": [
+    0.5,
+    2
+   ],
+   "fit": [
+    "half",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_stairs_long_modular_left",
+   "source": "kaykit-dungeon-remastered-free/stairs_long_modular_left.gltf",
+   "size": [
+    0.75,
+    2.55,
+    4
+   ],
+   "min": [
+    -1.25,
+    0,
+    0
+   ],
+   "max": [
+    -0.5,
+    2.55,
+    4
+   ],
+   "triangles": 248,
+   "cells": [
+    0,
+    2
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_stairs_long_modular_right",
+   "source": "kaykit-dungeon-remastered-free/stairs_long_modular_right.gltf",
+   "size": [
+    0.75,
+    2.55,
+    4
+   ],
+   "min": [
+    0.5,
+    0,
+    0
+   ],
+   "max": [
+    1.25,
+    2.55,
+    4
+   ],
+   "triangles": 248,
+   "cells": [
+    0,
+    2
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_stairs_modular_center",
+   "source": "kaykit-dungeon-remastered-free/stairs_modular_center.gltf",
+   "size": [
+    1,
+    2,
+    2
+   ],
+   "min": [
+    -0.5,
+    0,
+    0
+   ],
+   "max": [
+    0.5,
+    2,
+    2
+   ],
+   "triangles": 54,
+   "cells": [
+    0.5,
+    1
+   ],
+   "fit": [
+    "half",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_stairs_modular_left",
+   "source": "kaykit-dungeon-remastered-free/stairs_modular_left.gltf",
+   "size": [
+    0.75,
+    2.55,
+    2
+   ],
+   "min": [
+    -1.25,
+    0,
+    0
+   ],
+   "max": [
+    -0.5,
+    2.55,
+    2
+   ],
+   "triangles": 206,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_stairs_modular_right",
+   "source": "kaykit-dungeon-remastered-free/stairs_modular_right.gltf",
+   "size": [
+    0.75,
+    2.55,
+    2
+   ],
+   "min": [
+    0.5,
+    0,
+    0
+   ],
+   "max": [
+    1.25,
+    2.55,
+    2
+   ],
+   "triangles": 206,
+   "cells": [
+    0,
+    1
+   ],
+   "fit": [
+    "sub",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_stairs_narrow",
+   "source": "kaykit-dungeon-remastered-free/stairs_narrow.gltf",
+   "size": [
+    2,
+    2.55,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    0
+   ],
+   "max": [
+    1,
+    2.55,
+    2
+   ],
+   "triangles": 358,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_stairs_wall_left",
+   "source": "kaykit-dungeon-remastered-free/stairs_wall_left.gltf",
+   "size": [
+    2,
+    2.55,
+    2.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2.55,
+    2.25
+   ],
+   "triangles": 574,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_stairs_wall_right",
+   "source": "kaykit-dungeon-remastered-free/stairs_wall_right.gltf",
+   "size": [
+    2,
+    2.55,
+    2.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2.55,
+    2.25
+   ],
+   "triangles": 574,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "overhang"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_stairs_walled",
+   "source": "kaykit-dungeon-remastered-free/stairs_walled.gltf",
+   "size": [
+    2.5,
+    2,
+    2
+   ],
+   "min": [
+    -1.25,
+    0,
+    0
+   ],
+   "max": [
+    1.25,
+    2,
+    2
+   ],
+   "triangles": 790,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_stairs_wide",
+   "source": "kaykit-dungeon-remastered-free/stairs_wide.gltf",
+   "size": [
+    3.5,
+    2.55,
+    2
+   ],
+   "min": [
+    -1.75,
+    0,
+    0
+   ],
+   "max": [
+    1.75,
+    2.55,
+    2
+   ],
+   "triangles": 358,
+   "cells": [
+    null,
+    1
+   ],
+   "fit": [
+    "free",
+    "exact"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "dungeon_stairs_wood",
+   "source": "kaykit-dungeon-remastered-free/stairs_wood.gltf",
+   "size": [
+    1.65,
+    2.025,
+    3
+   ],
+   "min": [
+    -0.825,
+    0,
+    0
+   ],
+   "max": [
+    0.825,
+    2.025,
+    3
+   ],
+   "triangles": 296,
+   "cells": [
+    null,
+    null
+   ],
+   "fit": [
+    "free",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "dungeon_stairs_wood_decorated",
+   "source": "kaykit-dungeon-remastered-free/stairs_wood_decorated.gltf",
+   "size": [
+    1.65,
+    2.025,
+    3
+   ],
+   "min": [
+    -0.825,
+    0,
+    0
+   ],
+   "max": [
+    0.825,
+    2.025,
+    3
+   ],
+   "triangles": 2537,
+   "cells": [
+    null,
+    null
+   ],
+   "fit": [
+    "free",
+    "free"
+   ],
+   "onGrid": false
+  },
+  {
+   "key": "dungeon_sword_shield",
+   "source": "kaykit-dungeon-remastered-free/sword_shield.gltf",
+   "size": [
+    1.116,
+    0.8337,
+    0.1679
+   ],
+   "min": [
+    -0.558,
+    -0.4075,
+    -0.0423
+   ],
+   "max": [
+    0.558,
+    0.4262,
+    0.1256
+   ],
+   "triangles": 542,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_sword_shield_broken",
+   "source": "kaykit-dungeon-remastered-free/sword_shield_broken.gltf",
+   "size": [
+    0.7128,
+    0.9811,
+    0.1679
+   ],
+   "min": [
+    -0.3793,
+    -0.3965,
+    -0.0423
+   ],
+   "max": [
+    0.3335,
+    0.5846,
+    0.1256
+   ],
+   "triangles": 396,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_sword_shield_gold",
+   "source": "kaykit-dungeon-remastered-free/sword_shield_gold.gltf",
+   "size": [
+    1.116,
+    0.8337,
+    0.1679
+   ],
+   "min": [
+    -0.558,
+    -0.4075,
+    -0.0423
+   ],
+   "max": [
+    0.558,
+    0.4262,
+    0.1256
+   ],
+   "triangles": 542,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_torch",
+   "source": "kaykit-dungeon-remastered-free/torch.gltf",
+   "size": [
+    0.2751,
+    0.5208,
+    0.2751
+   ],
+   "min": [
+    -0.1376,
+    -0.1975,
+    -0.1376
+   ],
+   "max": [
+    0.1376,
+    0.3233,
+    0.1376
+   ],
+   "triangles": 216,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_torch_lit",
+   "source": "kaykit-dungeon-remastered-free/torch_lit.gltf",
+   "size": [
+    0.2751,
+    0.5629,
+    0.2751
+   ],
+   "min": [
+    -0.1376,
+    -0.1975,
+    -0.1376
+   ],
+   "max": [
+    0.1376,
+    0.3654,
+    0.1376
+   ],
+   "triangles": 270,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_torch_mounted",
+   "source": "kaykit-dungeon-remastered-free/torch_mounted.gltf",
+   "size": [
+    0.2751,
+    0.5312,
+    0.3079
+   ],
+   "min": [
+    -0.1376,
+    -0.1904,
+    0
+   ],
+   "max": [
+    0.1376,
+    0.3408,
+    0.3079
+   ],
+   "triangles": 278,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_trunk_large_a",
+   "source": "kaykit-dungeon-remastered-free/trunk_large_A.gltf",
+   "size": [
+    0.75,
+    0.5,
+    0.65
+   ],
+   "min": [
+    -0.375,
+    0,
+    -0.325
+   ],
+   "max": [
+    0.375,
+    0.5,
+    0.325
+   ],
+   "triangles": 204,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_trunk_medium_a",
+   "source": "kaykit-dungeon-remastered-free/trunk_medium_A.gltf",
+   "size": [
+    0.4765,
+    0.3632,
+    0.4375
+   ],
+   "min": [
+    -0.2383,
+    0,
+    -0.2188
+   ],
+   "max": [
+    0.2383,
+    0.3632,
+    0.2188
+   ],
+   "triangles": 148,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_trunk_small_a",
+   "source": "kaykit-dungeon-remastered-free/trunk_small_A.gltf",
+   "size": [
+    0.3377,
+    0.2422,
+    0.2917
+   ],
+   "min": [
+    -0.1688,
+    0,
+    -0.1458
+   ],
+   "max": [
+    0.1688,
+    0.2422,
+    0.1458
+   ],
+   "triangles": 204,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall",
+   "source": "kaykit-dungeon-remastered-free/wall.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 494,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_arched",
+   "source": "kaykit-dungeon-remastered-free/wall_arched.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 724,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_archedwindow_gated",
+   "source": "kaykit-dungeon-remastered-free/wall_archedwindow_gated.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 732,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_archedwindow_gated_scaffold",
+   "source": "kaykit-dungeon-remastered-free/wall_archedwindow_gated_scaffold.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 674,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_archedwindow_open",
+   "source": "kaykit-dungeon-remastered-free/wall_archedwindow_open.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 635,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_broken",
+   "source": "kaykit-dungeon-remastered-free/wall_broken.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 784,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_corner",
+   "source": "kaykit-dungeon-remastered-free/wall_corner.gltf",
+   "size": [
+    1.25,
+    2,
+    1.25
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    0.25,
+    2,
+    1
+   ],
+   "triangles": 443,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_corner_gated",
+   "source": "kaykit-dungeon-remastered-free/wall_corner_gated.gltf",
+   "size": [
+    1.25,
+    2,
+    1.25
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    0.25,
+    2,
+    1
+   ],
+   "triangles": 557,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_corner_scaffold",
+   "source": "kaykit-dungeon-remastered-free/wall_corner_scaffold.gltf",
+   "size": [
+    1.25,
+    2,
+    1.25
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    0.25,
+    2,
+    1
+   ],
+   "triangles": 515,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_corner_small",
+   "source": "kaykit-dungeon-remastered-free/wall_corner_small.gltf",
+   "size": [
+    0.75,
+    2,
+    0.75
+   ],
+   "min": [
+    -0.5,
+    0,
+    -0.25
+   ],
+   "max": [
+    0.25,
+    2,
+    0.5
+   ],
+   "triangles": 223,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_cracked",
+   "source": "kaykit-dungeon-remastered-free/wall_cracked.gltf",
+   "size": [
+    2,
+    2,
+    0.6297
+   ],
+   "min": [
+    -1,
+    0,
+    -0.3148
+   ],
+   "max": [
+    1,
+    2,
+    0.3148
+   ],
+   "triangles": 2010,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_crossing",
+   "source": "kaykit-dungeon-remastered-free/wall_crossing.gltf",
+   "size": [
+    2,
+    2,
+    2
+   ],
+   "min": [
+    -1,
+    0,
+    -1
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 698,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "exact",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_doorway",
+   "source": "kaykit-dungeon-remastered-free/wall_doorway.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 1068,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_doorway_scaffold",
+   "source": "kaykit-dungeon-remastered-free/wall_doorway_scaffold.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 1150,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_doorway_sides",
+   "source": "kaykit-dungeon-remastered-free/wall_doorway_sides.gltf",
+   "size": [
+    2.5,
+    2,
+    2
+   ],
+   "min": [
+    -1.25,
+    0,
+    -1
+   ],
+   "max": [
+    1.25,
+    2,
+    1
+   ],
+   "triangles": 1160,
+   "cells": [
+    1,
+    1
+   ],
+   "fit": [
+    "overhang",
+    "exact"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_doorway_tsplit",
+   "source": "kaykit-dungeon-remastered-free/wall_doorway_Tsplit.gltf",
+   "size": [
+    4,
+    2,
+    1.25
+   ],
+   "min": [
+    -2,
+    0,
+    -0.25
+   ],
+   "max": [
+    2,
+    2,
+    1
+   ],
+   "triangles": 1096,
+   "cells": [
+    2,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_endcap",
+   "source": "kaykit-dungeon-remastered-free/wall_endcap.gltf",
+   "size": [
+    0.5335,
+    2,
+    0.5
+   ],
+   "min": [
+    0,
+    0,
+    -0.25
+   ],
+   "max": [
+    0.5335,
+    2,
+    0.25
+   ],
+   "triangles": 222,
+   "cells": [
+    0,
+    0
+   ],
+   "fit": [
+    "sub",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_gated",
+   "source": "kaykit-dungeon-remastered-free/wall_gated.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 449,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_half",
+   "source": "kaykit-dungeon-remastered-free/wall_half.gltf",
+   "size": [
+    1,
+    2,
+    0.5
+   ],
+   "min": [
+    0,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 272,
+   "cells": [
+    0.5,
+    0
+   ],
+   "fit": [
+    "half",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_half_endcap",
+   "source": "kaykit-dungeon-remastered-free/wall_half_endcap.gltf",
+   "size": [
+    1,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    0,
+    2,
+    0.25
+   ],
+   "triangles": 268,
+   "cells": [
+    0.5,
+    0
+   ],
+   "fit": [
+    "half",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_half_endcap_sloped",
+   "source": "kaykit-dungeon-remastered-free/wall_half_endcap_sloped.gltf",
+   "size": [
+    1,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    0,
+    2,
+    0.25
+   ],
+   "triangles": 230,
+   "cells": [
+    0.5,
+    0
+   ],
+   "fit": [
+    "half",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_open_scaffold",
+   "source": "kaykit-dungeon-remastered-free/wall_open_scaffold.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 196,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_pillar",
+   "source": "kaykit-dungeon-remastered-free/wall_pillar.gltf",
+   "size": [
+    2,
+    2,
+    0.75
+   ],
+   "min": [
+    -1,
+    0,
+    -0.375
+   ],
+   "max": [
+    1,
+    2,
+    0.375
+   ],
+   "triangles": 540,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_scaffold",
+   "source": "kaykit-dungeon-remastered-free/wall_scaffold.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 584,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_shelves",
+   "source": "kaykit-dungeon-remastered-free/wall_shelves.gltf",
+   "size": [
+    2,
+    2,
+    0.6838
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.4338
+   ],
+   "triangles": 1582,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_sloped",
+   "source": "kaykit-dungeon-remastered-free/wall_sloped.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 257,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_tsplit",
+   "source": "kaykit-dungeon-remastered-free/wall_Tsplit.gltf",
+   "size": [
+    2,
+    2,
+    1.25
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 596,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_tsplit_sloped",
+   "source": "kaykit-dungeon-remastered-free/wall_Tsplit_sloped.gltf",
+   "size": [
+    2,
+    2,
+    1.25
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    1
+   ],
+   "triangles": 555,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_window_closed",
+   "source": "kaykit-dungeon-remastered-free/wall_window_closed.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 664,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_window_closed_scaffold",
+   "source": "kaykit-dungeon-remastered-free/wall_window_closed_scaffold.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 736,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_window_open",
+   "source": "kaykit-dungeon-remastered-free/wall_window_open.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 604,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  },
+  {
+   "key": "dungeon_wall_window_open_scaffold",
+   "source": "kaykit-dungeon-remastered-free/wall_window_open_scaffold.gltf",
+   "size": [
+    2,
+    2,
+    0.5
+   ],
+   "min": [
+    -1,
+    0,
+    -0.25
+   ],
+   "max": [
+    1,
+    2,
+    0.25
+   ],
+   "triangles": 676,
+   "cells": [
+    1,
+    0
+   ],
+   "fit": [
+    "exact",
+    "sub"
+   ],
+   "onGrid": true
+  }
+ ]
+}

@@ -28,7 +28,7 @@
 import fs from 'node:fs';
 import {
   launchBrowser, newPhonePage, ensureServer, gotoGame,
-  evalGame, writeReport, shotPath, OUT,
+  evalGame, writeReport, shotPath, OUT, forceOpenGates,
 } from './_harness.mjs';
 
 const RANK = process.env.GB_RANK || 'E';
@@ -244,6 +244,9 @@ async function runGate(browser, { blockCreatures, tag }) {
   }
 
   await gotoGame(page, { waitMs: 2600 });
+  // Arena-behaviour tool: pin the flat arena for E/D via the sanctioned
+  // forceOpen dev override (see _harness.forceOpenGates).
+  await forceOpenGates(page);
   // Drive the API rather than the menu. The entry flow is title -> CITY ->
   // walk to a portal now, and this test is about what is INSIDE the gate;
   // tools/flow-test.mjs owns the walk. game.enterGate routes through AppState

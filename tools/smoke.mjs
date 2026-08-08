@@ -14,7 +14,7 @@
 
 import {
   OUT, launchBrowser, newPhonePage, ensureServer, gotoGame,
-  evalGame, writeReport, shotPath,
+  evalGame, writeReport, shotPath, forceOpenGates,
 } from './_harness.mjs';
 
 const argv = process.argv.slice(2);
@@ -41,6 +41,9 @@ let fatal = null;
 try {
   // ---------------------------------------------------------------- boot
   await gotoGame(page);
+  // Arena-behaviour tool: pin the flat arena for E/D via the sanctioned
+  // forceOpen dev override (see _harness.forceOpenGates).
+  await forceOpenGates(page);
   await page.screenshot({ path: shotPath('01-title.png') });
 
   const canvas = await page.evaluate(() => {

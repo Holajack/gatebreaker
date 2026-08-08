@@ -3,13 +3,16 @@
 //
 //   node tools/pillartest.mjs
 
-import { launchBrowser, newPhonePage, ensureServer, gotoGame, evalGame, writeReport } from './_harness.mjs';
+import { launchBrowser, newPhonePage, ensureServer, gotoGame, evalGame, writeReport, forceOpenGates } from './_harness.mjs';
 
 const server = await ensureServer();
 const browser = await launchBrowser();
 const { page, errors } = await newPhonePage(browser);
 
 await gotoGame(page, { waitMs: 2000 });
+// Arena-behaviour tool: pin the flat arena for E/D via the sanctioned
+// forceOpen dev override (see _harness.forceOpenGates).
+await forceOpenGates(page);
 
 const r = await evalGame(page, (g) => {
   g.renderer.render = () => {};

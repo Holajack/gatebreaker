@@ -28,6 +28,8 @@
     "test:flow": "node tools/flow-test.mjs",
     "test:acceptance": "node tools/acceptance.mjs",
     "test:collision": "node tools/collision-test.mjs",
+    "test:dungeon-gen": "node tools/dungeon-gen-test.mjs",
+    "test:dungeon": "node tools/dungeon-test.mjs",
     "test:visual": "node tools/visual-test.mjs",
     "test:creatures-live": "node tools/creature-test.mjs"
   },

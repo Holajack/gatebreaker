@@ -26,6 +26,7 @@
 import fs from 'node:fs';
 import {
   launchBrowser, newPhonePage, ensureServer, gotoGame, writeReport, shotPath,
+  forceOpenGates,
 } from './_harness.mjs';
 
 const argv = process.argv.slice(2);
@@ -58,6 +59,9 @@ const report = {};
 
 try {
   await gotoGame(page, { waitMs: 2000 });
+  // Arena-behaviour tool: pin the flat arena for E/D via the sanctioned
+  // forceOpen dev override (see _harness.forceOpenGates).
+  await forceOpenGates(page);
   phase('booted to title');
 
   // ------------------------------------------------------------ 1. the city

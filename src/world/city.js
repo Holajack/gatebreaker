@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { mulberry32, fbm } from './terrain.js';
 import {
   KIT_CELL, KIT_STOREY, KitField, cityKitLoaded, cityMaterials,
-  disposeCityKit, cityKitStats, loadCityKit,
+  disposeCityKit, cityKitStats, loadCityKit, loadDungeonKit,
 } from './citykit.js';
 import { NatureField, loadNatureKit, natureKitStats } from './naturekit.js';
 import { Citizens } from './citizens.js';
@@ -2208,8 +2208,14 @@ function mergeAll(geos) {
  * inside naturekit.js) and it logs its own warning, so no caller changes.
  */
 export async function preloadCity() {
-  const [cityOk, natureOk] = await Promise.all([loadCityKit(), loadNatureKit()]);
+  const [cityOk, natureOk, dungeonOk] = await Promise.all([
+    loadCityKit(), loadNatureKit(), loadDungeonKit(),
+  ]);
   if (!natureOk) console.warn('[city] models/nature.glb unavailable — using procedural ground scatter');
+  // DUNGEON_SPEC STEP 9: the dungeon kit rides the same boot preload so a
+  // gate entry never races the fetch. Non-fatal by design — the dressing
+  // pass degrades to the dungeon_* PROC twins in citykit.js.
+  if (!dungeonOk) console.warn('[city] models/dungeonkit.glb unavailable — dungeon dressing falls back to procedural twins');
   return cityOk;
 }
 

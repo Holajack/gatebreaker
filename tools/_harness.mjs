@@ -164,6 +164,24 @@ export async function enterGate(page, { rank = null, waitMs = 2200 } = {}) {
   await page.waitForTimeout(waitMs);
 }
 
+// DUNGEON_SPEC worldJsArenasFate: since STEP 4, E/D gates open into the
+// generated crawl interior. The flat disc arena remains reachable for those
+// ranks only through the sanctioned dev override (DungeonMode enter payload
+// { forceOpen: true }). Tools written against arena behaviour — wave spawns,
+// scatter rocks, kill-everything-to-boss-to-results — call this once after
+// gotoGame: it wraps game.enterGate on the live instance, so EVERY route into
+// a gate (gate-list clicks, startGate, city portal confirms) carries the
+// override. Crawl-facing tools (dungeon-test) simply do not call it.
+export async function forceOpenGates(page) {
+  await page.evaluate(() => {
+    const g = window.__game;
+    if (!g || g.__forceOpenPatched) return;
+    g.__forceOpenPatched = true;
+    const orig = g.enterGate.bind(g);
+    g.enterGate = (rank, opts = {}) => orig(rank, { forceOpen: true, ...opts });
+  });
+}
+
 export function writeReport(name, data) {
   fs.mkdirSync(OUT, { recursive: true });
   const file = path.join(OUT, name.endsWith('.json') ? name : `${name}.json`);

@@ -1,0 +1,214 @@
+{
+  "generated": "2026-08-07T16:34:02.255Z",
+  "glb": "models/adventurers.glb",
+  "bytes": 808048,
+  "note": "Character keys are lowercase and are DIRECT children of the single scene. Every clip is named `<character key>__<clip>` and binds to that character ONLY — each of the five carries its own namespaced copy of the shared KayKit vocabulary, because three.js GLTFLoader renames duplicate node names on load and a genuinely shared clip library binds to exactly one of them. Build the AnimationMixer against a SkeletonUtils.clone of the character subtree. Deliverable only this wave: no src/ consumer exists yet.",
+  "sources": [
+    {
+      "pack": "KayKit Character Pack: Adventurers (FREE tier, 2.0)",
+      "author": "Kay Lousberg",
+      "licence": "CC0 1.0 (License.txt inside the zip re-verified at download time)",
+      "url": "https://kaylousberg.itch.io/kaykit-adventurers",
+      "downloaded": "2026-08-07",
+      "used": 5,
+      "available": 6,
+      "note": "Rogue_Hooded left in source unconverted; pristine zip at assets/source/creatures/kaykit/adventurers-free.zip."
+    },
+    {
+      "pack": "KayKit Character Animations (FREE tier, 1.1)",
+      "author": "Kay Lousberg",
+      "licence": "CC0 1.0",
+      "url": "https://kaylousberg.itch.io/kaykit-character-animations",
+      "downloaded": "2026-08-06 (skeletons wave; re-used from assets/source/creatures/kaykit/animations-free.zip)",
+      "used": 18,
+      "available": 133
+    }
+  ],
+  "kaykitClipVocabulary": [
+    "Death_A",
+    "Dodge_Backward",
+    "Hit_A",
+    "Idle_A",
+    "Melee_1H_Attack_Chop",
+    "Melee_1H_Attack_Slice_Diagonal",
+    "Melee_2H_Attack_Chop",
+    "Melee_2H_Attack_Spinning",
+    "Melee_Blocking",
+    "Melee_Dualwield_Attack_Stab",
+    "Ranged_Bow_Aiming_Idle",
+    "Ranged_Bow_Draw",
+    "Ranged_Bow_Release",
+    "Ranged_Magic_Shoot",
+    "Ranged_Magic_Spellcasting",
+    "Ranged_Magic_Summon",
+    "Running_A",
+    "Walking_A"
+  ],
+  "characters": {
+    "knight": {
+      "pack": "kaykit-adventurers",
+      "role": "tank",
+      "archetype": "lancer",
+      "note": "Full helm, cape. Sword-and-board hunter; the guild-vanguard silhouette. Visor and cape are separate skinned parts (knight_Knight_Cape / knight_Knight_HelmetVisor) if a bare variant is ever needed.",
+      "clips": [
+        "knight__death_a",
+        "knight__hit_a",
+        "knight__idle_a",
+        "knight__running_a",
+        "knight__walking_a",
+        "knight__melee_1h_attack_chop",
+        "knight__melee_1h_attack_slice_diagonal",
+        "knight__melee_blocking"
+      ],
+      "triangles": 5800
+    },
+    "barbarian": {
+      "pack": "kaykit-adventurers",
+      "role": "bruiser",
+      "archetype": "brute",
+      "note": "Bear-hat two-hander. Reads as the heavy of a rival hunter squad.",
+      "clips": [
+        "barbarian__death_a",
+        "barbarian__hit_a",
+        "barbarian__idle_a",
+        "barbarian__running_a",
+        "barbarian__walking_a",
+        "barbarian__melee_2h_attack_chop",
+        "barbarian__melee_2h_attack_spinning"
+      ],
+      "triangles": 7123
+    },
+    "rogue": {
+      "pack": "kaykit-adventurers",
+      "role": "skirmisher",
+      "archetype": "stalker",
+      "note": "Leathers and daggers. The \"fallen hunter\" dungeon miniboss read. Rogue_Hooded variant kept in source, unconverted.",
+      "clips": [
+        "rogue__death_a",
+        "rogue__hit_a",
+        "rogue__idle_a",
+        "rogue__running_a",
+        "rogue__walking_a",
+        "rogue__melee_dualwield_attack_stab",
+        "rogue__dodge_backward"
+      ],
+      "triangles": 7562
+    },
+    "mage": {
+      "pack": "kaykit-adventurers",
+      "role": "caster",
+      "archetype": "caster",
+      "note": "Hat and robe. Human caster to complement the skeleton mage.",
+      "clips": [
+        "mage__death_a",
+        "mage__hit_a",
+        "mage__idle_a",
+        "mage__running_a",
+        "mage__walking_a",
+        "mage__ranged_magic_shoot",
+        "mage__ranged_magic_spellcasting",
+        "mage__ranged_magic_summon"
+      ],
+      "triangles": 6668
+    },
+    "ranger": {
+      "pack": "kaykit-adventurers",
+      "role": "ranged",
+      "archetype": "archer",
+      "note": "Hooded archer. The pack ships a real bow (adv_bow), so bow clips do not mime.",
+      "clips": [
+        "ranger__death_a",
+        "ranger__hit_a",
+        "ranger__idle_a",
+        "ranger__running_a",
+        "ranger__walking_a",
+        "ranger__ranged_bow_aiming_idle",
+        "ranger__ranged_bow_draw",
+        "ranger__ranged_bow_release"
+      ],
+      "triangles": 8900
+    }
+  },
+  "props": {
+    "adv_sword_1h": {
+      "pack": "kaykit-adventurers",
+      "attach": "handslot_r",
+      "attachNodeFor": {
+        "knight": "knight_handslot_r"
+      },
+      "suits": [
+        "knight"
+      ]
+    },
+    "adv_shield_badge": {
+      "pack": "kaykit-adventurers",
+      "attach": "handslot_l",
+      "attachNodeFor": {
+        "knight": "knight_handslot_l"
+      },
+      "suits": [
+        "knight"
+      ]
+    },
+    "adv_axe_2h": {
+      "pack": "kaykit-adventurers",
+      "attach": "handslot_r",
+      "attachNodeFor": {
+        "barbarian": "barbarian_handslot_r"
+      },
+      "suits": [
+        "barbarian"
+      ]
+    },
+    "adv_dagger": {
+      "pack": "kaykit-adventurers",
+      "attach": "handslot_r",
+      "attachNodeFor": {
+        "rogue": "rogue_handslot_r"
+      },
+      "suits": [
+        "rogue"
+      ]
+    },
+    "adv_staff": {
+      "pack": "kaykit-adventurers",
+      "attach": "handslot_r",
+      "attachNodeFor": {
+        "mage": "mage_handslot_r"
+      },
+      "suits": [
+        "mage"
+      ]
+    },
+    "adv_bow": {
+      "pack": "kaykit-adventurers",
+      "attach": "handslot_l",
+      "attachNodeFor": {
+        "ranger": "ranger_handslot_l"
+      },
+      "suits": [
+        "ranger"
+      ]
+    },
+    "adv_quiver": {
+      "pack": "kaykit-adventurers",
+      "attach": "spine",
+      "attachNodeFor": {
+        "ranger": "ranger_spine"
+      },
+      "suits": [
+        "ranger"
+      ]
+    },
+    "adv_arrow": {
+      "pack": "kaykit-adventurers",
+      "attach": "handslot_r",
+      "attachNodeFor": {
+        "ranger": "ranger_handslot_r"
+      },
+      "suits": [
+        "ranger"
+      ]
+    }
+  }
+}

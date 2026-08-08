@@ -7,6 +7,11 @@ import { GLOW_LAYER } from './glow.js';
 import { applyRim } from './rim.js';
 import { PROCEDURAL_HEIGHT } from './characters.js';
 import { Quality, TIERS } from '../core/quality.js';
+// One-way dependency: weapons.js pulls in nothing from render/ beyond glow.js,
+// so this cannot cycle. Needed for bound clones of creatures whose modelled
+// weapon lives in items.glb (alien dagger, tribal axe) — see the shadow branch
+// in makeCreature's weapon block.
+import { buildHeldWeapon } from '../game/weapons.js';
 
 // MONSTERS. 17 curated creatures out of public/models/creatures.glb (13
 // Quaternius Ultimate Monsters + 4 KayKit skeletons, all CC0), built by
@@ -708,9 +713,10 @@ function castForKey(key, { archetype = null, rank = 'E' } = {}) {
 // entities.disposeObject3D reaps them by traversal, and _owned covers callers
 // that dispose the instance directly).
 //
-// The numbers deliberately diverge from ghostMaterial's 0.45/0.25/0.16/0.72:
-// screenshot-tuned against a living skeleton in the pinned harness arena,
-// where that recipe read as a bright teal hologram, not a shadow. Isolating
+// The numbers were screenshot-tuned against a living skeleton in the pinned
+// harness arena, where ghostMaterial's old 0.45/0.25/0.16/0.72 recipe read as
+// a bright teal hologram, not a shadow (characters.js has since adopted these
+// same numbers, so the two treatments match again). Isolating
 // the terms one at a time showed the whole teal wash was emitted, not lit —
 // under ACES at exposure 1.25 even emissiveIntensity 0.05 repaints a black
 // body cyan — while roughness 0.45 specular, metalness 0.25 env pickup and
@@ -1116,6 +1122,19 @@ export function makeCreature({
     inst.weaponSlot = 'native';
   } else if (typeof want === 'string' && inst.sockets.hand) {
     inst.weaponSlot = want;
+    // A LIVING creature gets this weapon from entities.attachCreatureWeapon,
+    // but bound clones are built directly by game.js's _makeBoundBody and
+    // never pass through entities.js — which is why the alien's dagger and
+    // the tribal's axe (items.glb kinds, unlike the kit/native weapons that
+    // live in this GLB) vanished the moment their owner was bound. Attach
+    // the model here for shadow clones, BEFORE applyShadowSkin runs below,
+    // so the same traversal that darkens the arm darkens the blade with it.
+    // buildHeldWeapon is null offline (items.glb absent) — empty hands then,
+    // exactly like the living creature in the same state.
+    if (shadow) {
+      const held = buildHeldWeapon(want);
+      if (held) inst.sockets.hand.add(held);
+    }
   } else {
     inst.weaponSlot = 'none';
   }

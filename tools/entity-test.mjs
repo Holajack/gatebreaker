@@ -66,6 +66,15 @@ page.on('pageerror', (e) => pageErrors.push(e.message));
 
 await page.goto(URL, { waitUntil: 'networkidle' });
 await page.waitForFunction(() => window.__game, null, { timeout: 20000 });
+// E gates open into the generated crawl since DUNGEON_SPEC STEP 4. This tool
+// measures the ARENA's entity lifecycle (its numbers and its shadow-leak
+// carve-out are calibrated against world.js), so pin the arena via the
+// sanctioned dev override; the crawl's own leak audit is tools/dungeon-test.
+await page.evaluate(() => {
+  const g = window.__game;
+  const orig = g.enterGate.bind(g);
+  g.enterGate = (rank, opts = {}) => orig(rank, { forceOpen: true, ...opts });
+});
 // Boot sequence gates the title screen behind a ~2.5s timer.
 await page.waitForSelector('#btnPlay', { state: 'visible', timeout: 20000 });
 await page.click('#btnPlay');

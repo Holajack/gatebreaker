@@ -1,4 +1,4 @@
-// Balance tables and content definitions for Gatebreaker: Rift Ascension.
+// Balance tables and content definitions for EMBERGATE.
 // Everything the designer would want to tune lives here.
 //
 // This file is deliberately THREE-free and side-effect free so the headless

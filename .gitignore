@@ -13,11 +13,19 @@ Ultimate RPG Items Pack - Aug 2019/
 # The provenance and licence files stay tracked so the packs can be re-fetched
 # and the CC0 attribution survives without the art.
 assets/source/**
-!assets/source/*/
+# Directories at EVERY depth must be re-included or git never descends far
+# enough to see the whitelisted files below — `!assets/source/*/` alone
+# silently swallowed every License.txt more than two levels deep (KayKit packs
+# nest theirs 4-5 deep). Only the trailing-slash dir pattern is un-ignored;
+# files still fall to `assets/source/**` unless a whitelist below names them.
+!assets/source/**/
 !assets/source/**/PROVENANCE.md
 !assets/source/**/CREDITS.md
 !assets/source/**/LICENSE*
 !assets/source/**/License*
+# The Easy Enemy EVALUATE-gate verdict (all 6 skipped) is a decision record,
+# not art: it must survive the art being pruned, same as PROVENANCE.md.
+!assets/source/**/EVALUATION.json
 
 # Android build output
 android/.gradle/

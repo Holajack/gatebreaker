@@ -34,7 +34,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
 import {
-  launchBrowser, newPhonePage, ensureServer, gotoGame, evalGame, OUT,
+  launchBrowser, newPhonePage, ensureServer, gotoGame, evalGame, OUT, forceOpenGates,
 } from './_harness.mjs';
 
 const argv = process.argv.slice(2);
@@ -134,6 +134,9 @@ try {
   });
 
   await gotoGame(page, { waitMs: 1600 });
+  // Arena-behaviour tool: pin the flat arena for E/D via the sanctioned
+  // forceOpen dev override (see _harness.forceOpenGates).
+  await forceOpenGates(page);
 
   // Deliberately NOT the harness's enterGate(): that clicks through #gateList,
   // and the city hub landing mid-task moved Play from "pick a gate" to "walk to

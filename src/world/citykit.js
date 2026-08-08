@@ -45,6 +45,12 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 // opposite of the goal; see the note in city.js.
 
 export const KIT_URL = 'models/citykit.glb';
+// DUNGEON_SPEC STEP 9: the dungeon kit (KayKit Dungeon Remastered as
+// `dungeon_*`, built by tools/build-dungeonkit-glb.mjs) loads into the SAME
+// piece index — its keys are prefix-disjoint from town_*/ruin_*, so both kits
+// share pieceParts/pieceBounds/pieceGeometryColored and the procedural
+// fallback discipline without a second pipeline.
+export const DUNGEON_KIT_URL = 'models/dungeonkit.glb';
 export const KIT_CELL = 2.0;      // grid size in metres, from citykit.json
 export const KIT_STOREY = 2.0;    // floor-to-floor, both sub-kits
 
@@ -92,9 +98,12 @@ export const PROPS = {
 // ---------------------------------------------------------------------------
 
 // lowercase key -> { parts: [{ geometry, material, offset: Matrix4 }], box }
+// Shared by BOTH kits (citykit's town_*/ruin_* and dungeonkit's dungeon_*).
 const _kit = new Map();
 let _kitLoaded = false;
 let _kitLoading = null;
+let _dkitLoaded = false;
+let _dkitLoading = null;
 let _kitTextures = new Set();
 // Metre-space Float32 copies, built lazily for callers outside the instancing
 // path (moduleGeometry / propGeometry / buildFacade). See bakePiece().
@@ -205,34 +214,33 @@ function tryMerge(geos) {
 }
 
 /**
- * Load public/models/citykit.glb. Resolves TRUE on success and FALSE on any
- * failure — it never throws and never rejects, exactly like loadItemModels.
- * On false, every pieceGeometry() call falls through to its procedural twin.
+ * Load one kit GLB into the shared piece index. Resolves the number of pieces
+ * added (0 on any failure) — it never throws and never rejects, exactly like
+ * loadItemModels. On 0, every pieceGeometry() call for that kit's keys falls
+ * through to its procedural twin.
  */
-export async function loadCityKit(url = KIT_URL) {
-  if (_kitLoaded) return true;
-  if (_kitLoading) return _kitLoading;
-
-  _kitLoading = new Promise((resolve) => {
+function loadKitGlb(url) {
+  return new Promise((resolve) => {
     let loader;
     try {
       loader = new GLTFLoader();
       loader.setMeshoptDecoder(MeshoptDecoder);
     } catch {
-      resolve(false);
+      resolve(0);
       return;
     }
     loader.load(url, (gltf) => {
       try {
+        let added = 0;
         for (const child of gltf.scene.children) {
           if (!child.name) continue;
           const entry = indexPiece(child);
-          if (entry) _kit.set(child.name.toLowerCase(), entry);
-        }
-        // The item pack shipped materials with opacity 0 that survived every
-        // stage of the pipeline and drew nothing. Correct geometry, correct
-        // bounds, invisible. Cheap to check, expensive to miss.
-        for (const entry of _kit.values()) {
+          if (!entry) continue;
+          _kit.set(child.name.toLowerCase(), entry);
+          added++;
+          // The item pack shipped materials with opacity 0 that survived
+          // every stage of the pipeline and drew nothing. Correct geometry,
+          // correct bounds, invisible. Cheap to check, expensive to miss.
           for (const p of entry.parts) {
             const m = p.material;
             if (!m) continue;
@@ -240,17 +248,42 @@ export async function loadCityKit(url = KIT_URL) {
             if (m.map) _kitTextures.add(m.map);
           }
         }
-        _kitLoaded = _kit.size > 0;
-        resolve(_kitLoaded);
+        resolve(added);
       } catch {
-        resolve(false);
+        resolve(0);
       }
-    }, undefined, () => resolve(false));
+    }, undefined, () => resolve(0));
+  });
+}
+
+/** Load public/models/citykit.glb; true on success, false on any failure. */
+export async function loadCityKit(url = KIT_URL) {
+  if (_kitLoaded) return true;
+  if (_kitLoading) return _kitLoading;
+  _kitLoading = loadKitGlb(url).then((added) => {
+    _kitLoaded = added > 0;
+    return _kitLoaded;
   });
   return _kitLoading;
 }
 
+/**
+ * Load public/models/dungeonkit.glb — DUNGEON_SPEC "tilesets" contract: the
+ * loadDungeonKit clone of loadCityKit. Same never-rejects rule; on false the
+ * DUNGEON_MODULES dungeon_* roles render their bespoke PROC twins below.
+ */
+export async function loadDungeonKit(url = DUNGEON_KIT_URL) {
+  if (_dkitLoaded) return true;
+  if (_dkitLoading) return _dkitLoading;
+  _dkitLoading = loadKitGlb(url).then((added) => {
+    _dkitLoaded = added > 0;
+    return _dkitLoaded;
+  });
+  return _dkitLoading;
+}
+
 export function cityKitLoaded() { return _kitLoaded; }
+export function dungeonKitLoaded() { return _dkitLoaded; }
 export function hasPiece(key) { return _kit.has(String(key).toLowerCase()) || key in PROC; }
 export function listKitPieces() { return Array.from(_kit.keys()).sort(); }
 
@@ -288,6 +321,8 @@ const COL = {
   cloth:   0xb3413c,
   cloth2:  0x3f8a52,
   rock:    0x7b8090,
+  clay:    0x96603e,   // dungeon pots — fired earthenware, not cut stone
+  wax:     0xd6cfae,   // candle clusters
 };
 
 const _procCache = new Map();
@@ -301,7 +336,7 @@ const _procCache = new Map();
 const _linear = (hex) => new THREE.Color(hex);
 
 function paint(geo, hex) {
-  const c = _linear(hex);
+  const c = hex && hex.isColor ? hex : _linear(hex);
   const n = geo.attributes.position.count;
   const arr = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) { arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b; }
@@ -460,9 +495,95 @@ const PROC = {
   ]),
   ruin_brick:  () => slab(-0.3, 0.3, 0, 0.3, -0.2, 0.2, COL.stone),
   ruin_bricks: () => slab(-0.6, 0.6, 0, 0.5, -0.5, 0.5, COL.stone),
+
+  // --- dungeon dressing twins (DUNGEON_SPEC "tilesets") -------------------
+  // Every DUNGEON_MODULES role must degrade to a bespoke twin authored to the
+  // kit piece's manifest bounds and pivot — the anonymous unit-block fallback
+  // below is a debugging aid, not shippable dressing. Bounds are measured off
+  // public/models/citykit.json, not guessed, same discipline as MODULES.
+  ruin_arch_round: () => group([                     // 3.09 w x 3.53 h x 0.49 d
+    slab(-1.55, -1.1, 0, 2.9, -0.36, 0.13, COL.stone),
+    slab(1.1, 1.55, 0, 2.9, -0.36, 0.13, COL.stone),
+    slab(-1.55, 1.55, 2.9, 3.53, -0.36, 0.13, COL.stone),
+  ]),
+  ruin_doors_roundarch: () => group([                // 2.31 w x 2.97 h — frame
+    slab(-1.16, -0.86, 0, 2.96, -0.14, 0.14, COL.stone),   // + CLOSED leaves:
+    slab(0.86, 1.16, 0, 2.96, -0.14, 0.14, COL.stone),     // this piece dresses
+    slab(-1.16, 1.16, 2.6, 2.96, -0.14, 0.14, COL.stone),  // the SEALED way in,
+    slab(-0.88, -0.02, 0, 2.62, -0.06, 0.06, COL.darkwood),// so shut is correct
+    slab(0.02, 0.88, 0, 2.62, -0.06, 0.06, COL.darkwood),
+  ]),
+  ruin_wall_archround: () => group([                 // 4.0 w x 4.0 h alcove wall
+    slab(-2.0, -0.75, 0, 4.0, -0.25, 0.06, COL.stone),
+    slab(0.75, 2.0, 0, 4.0, -0.25, 0.06, COL.stone),
+    slab(-0.75, 0.75, 2.5, 4.0, -0.25, 0.06, COL.stone),
+    slab(-0.75, 0.75, 0, 2.5, -0.25, -0.15, COL.slate),    // dark niche back
+  ]),
+  ruin_torch: () => group([                          // wall sconce, mount at y 0
+    slab(-0.05, 0.05, -0.27, 0.62, -0.05, 0.05, COL.darkwood),
+    slab(-0.11, 0.11, 0.62, 0.9, -0.11, 0.11, COL.slate),
+  ]),
+  ruin_pot1:  () => cylGeo(0.36, 0.96, COL.clay),
+  ruin_pot2:  () => cylGeo(0.22, 0.64, COL.clay),
+  ruin_crate: () => slab(-0.41, 0.41, 0, 0.81, -0.41, 0.41, COL.wood),
+  ruin_barrel: () => cylGeo(0.4, 1.07, COL.darkwood),
+  ruin_bookcase_empty: () => group([                 // 2.08 w x 2.63 h x 0.66 d
+    slab(-1.04, 1.04, 0, 2.63, -0.05, 0.05, COL.darkwood),
+    slab(-1.04, -0.9, 0, 2.63, -0.33, 0.31, COL.darkwood),
+    slab(0.9, 1.04, 0, 2.63, -0.33, 0.31, COL.darkwood),
+    slab(-0.9, 0.9, 0.8, 0.92, -0.31, 0.29, COL.wood),
+    slab(-0.9, 0.9, 1.7, 1.82, -0.31, 0.29, COL.wood),
+    slab(-0.9, 0.9, 2.51, 2.63, -0.33, 0.31, COL.darkwood),
+  ]),
+  ruin_statue_fox: () => group([                     // 1.35 w x 3.75 h plinth+figure
+    slab(-0.6, 0.75, 0, 1.0, -0.9, 0.78, COL.stone),
+    slab(-0.42, 0.55, 1.0, 2.6, -0.55, 0.5, COL.stone),
+    slab(-0.28, 0.4, 2.6, 3.45, -0.38, 0.3, COL.stone),
+    slab(-0.1, 0.24, 3.45, 3.75, -0.24, 0.12, COL.stone),
+  ]),
+  ruin_candles_1: () => group([                      // low cluster, 0.6 h max
+    cylGeo(0.09, 0.6, COL.wax),
+    (() => { const g = cylGeo(0.07, 0.34, COL.wax); g.translate(0.28, 0, -0.22); return g; })(),
+    (() => { const g = cylGeo(0.11, 0.2, COL.wax); g.translate(-0.24, 0, 0.2); return g; })(),
+    (() => { const g = cylGeo(0.06, 0.42, COL.wax); g.translate(0.3, 0, 0.22); return g; })(),
+  ]),
   town_fountain_round: () => group([
     ringGeo(1.6, 2.0, 0.56, COL.stone),
     cylGeo(1.6, 0.28, 0x2f6f9e),
+  ]),
+
+  // --- dungeonkit twins (DUNGEON_SPEC STEP 9) -----------------------------
+  // Bounds and pivots measured off public/models/dungeonkit.json. All wall
+  // pieces are cell-BISECTING 0.5 m slabs (z -0.25..0.25, the ruin_wall
+  // convention), y 0..2, per the manifest's pivot notes.
+  dungeon_wall_arched: () => group([                 // 2 w x 2 h, open arch
+    slab(-1.0, -0.68, 0, 2.0, -0.25, 0.25, COL.stone),
+    slab(0.68, 1.0, 0, 2.0, -0.25, 0.25, COL.stone),
+    slab(-0.68, 0.68, 1.45, 2.0, -0.25, 0.25, COL.stone),
+  ]),
+  dungeon_wall_doorway: () => group([                // wall + CLOSED wood door
+    slab(-1.0, -0.55, 0, 2.0, -0.25, 0.25, COL.stone),
+    slab(0.55, 1.0, 0, 2.0, -0.25, 0.25, COL.stone),
+    slab(-0.55, 0.55, 1.6, 2.0, -0.25, 0.25, COL.stone),
+    slab(-0.53, -0.02, 0, 1.6, -0.06, 0.06, COL.darkwood),  // shut leaves: this
+    slab(0.02, 0.53, 0, 1.6, -0.06, 0.06, COL.darkwood),    // dresses the SEALED
+  ]),                                                       // arrival door
+  dungeon_pillar: () => group([                      // 0.75 sq x 2 h column
+    slab(-0.3, 0.3, 0, 2.0, -0.3, 0.3, COL.stone),
+    slab(-0.375, 0.375, 0, 0.22, -0.375, 0.375, COL.slate),
+    slab(-0.375, 0.375, 1.78, 2.0, -0.375, 0.375, COL.slate),
+  ]),
+  dungeon_torch_mounted: () => group([               // wall sconce; plate at z 0
+    slab(-0.09, 0.09, -0.19, 0.05, 0, 0.08, COL.slate),     // mount plate
+    slab(-0.05, 0.05, -0.12, 0.24, 0.1, 0.2, COL.darkwood), // stick
+    slab(-0.14, 0.14, 0.24, 0.34, 0.03, 0.31, COL.slate),   // head basket
+  ]),
+  dungeon_box_large: () => slab(-0.375, 0.375, 0, 0.75, -0.375, 0.375, COL.wood),
+  dungeon_barrel_large: () => cylGeo(0.42, 1.0, COL.darkwood),
+  dungeon_candle_triple: () => group([               // low cluster, 0.44 h
+    (() => { const g = cylGeo(0.07, 0.44, COL.wax); g.translate(0.05, 0, 0); return g; })(),
+    (() => { const g = cylGeo(0.05, 0.3, COL.wax); g.translate(0.12, 0, 0.07); return g; })(),
+    (() => { const g = cylGeo(0.045, 0.22, COL.wax); g.translate(-0.04, 0, -0.04); return g; })(),
   ]),
 };
 
@@ -536,6 +657,130 @@ export function pieceGeometry(key) {
   const k = String(key).toLowerCase();
   if (_kit.has(k)) return bakePiece(k);
   return procGeometry(k);
+}
+
+// key -> merged vertex-coloured metre-space geometry. Shared; disposeCityKit
+// owns it. Kit-backed entries only — procedural fallthroughs live in _procCache.
+const _coloredCache = new Map();
+
+// texture.uuid -> { data: Uint8ClampedArray, w, h } | null. CPU-side readback
+// of a kit atlas so pieceGeometryColored can bake textured pieces to vertex
+// colours (dungeonkit ships ONE flat gradient atlas — each face's UVs sit in
+// a solid colour block, so a per-vertex point sample reproduces the authored
+// look exactly). null is cached too: a readback that failed once will fail
+// every time, and re-throwing per piece would spam the console.
+const _texData = new Map();
+
+function textureData(tex) {
+  if (!tex || !tex.image) return null;
+  if (_texData.has(tex.uuid)) return _texData.get(tex.uuid);
+  let entry = null;
+  try {
+    const img = tex.image;
+    const w = img.width | 0;
+    const h = img.height | 0;
+    if (w > 0 && h > 0) {
+      const cv = typeof OffscreenCanvas !== 'undefined'
+        ? new OffscreenCanvas(w, h)
+        : Object.assign(document.createElement('canvas'), { width: w, height: h });
+      cv.width = w; cv.height = h;
+      const ctx = cv.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      entry = { data: ctx.getImageData(0, 0, w, h).data, w, h };
+    }
+  } catch {
+    entry = null;
+  }
+  _texData.set(tex.uuid, entry);
+  return entry;
+}
+
+/**
+ * Bake a `color` attribute onto baked-geometry `g` by sampling the material's
+ * atlas at each vertex UV. gltfpack carries its UV quantisation scale in
+ * KHR_texture_transform, which GLTFLoader stores on the texture — so the
+ * texture matrix must be applied to the raw UVs before sampling, exactly as
+ * the shader would. Returns false when there is nothing to sample (no map,
+ * no uv channel, readback failed) so the caller can fall back to the flat
+ * material colour.
+ */
+function bakeAtlasColors(g, srcGeo, material) {
+  const map = material?.map;
+  const uv = srcGeo.attributes.uv;
+  if (!map || !uv) return false;
+  const td = textureData(map);
+  if (!td) return false;
+  map.updateMatrix();
+  const m = map.matrix.elements;   // Matrix3, column-major
+  const tint = material.color;
+  const n = uv.count;
+  const arr = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const u0 = uv.getX(i);
+    const v0 = uv.getY(i);
+    let u = m[0] * u0 + m[3] * v0 + m[6];
+    let v = m[1] * u0 + m[4] * v0 + m[7];
+    u -= Math.floor(u);            // repeat wrap
+    v -= Math.floor(v);
+    // glTF textures load with flipY=false: image row 0 is v=0.
+    const px = Math.min(td.w - 1, Math.floor(u * td.w));
+    const py = Math.min(td.h - 1, Math.floor(v * td.h));
+    const o = (py * td.w + px) * 4;
+    // Atlas bytes are sRGB; the color attribute feeds the linear working
+    // space, so convert exactly as `new THREE.Color(hex)` would (see the
+    // _linear note above — double conversion reads as broken lighting).
+    _sc.setRGB(td.data[o] / 255, td.data[o + 1] / 255, td.data[o + 2] / 255,
+      THREE.SRGBColorSpace);
+    arr[i * 3] = _sc.r * (tint ? tint.r : 1);
+    arr[i * 3 + 1] = _sc.g * (tint ? tint.g : 1);
+    arr[i * 3 + 2] = _sc.b * (tint ? tint.b : 1);
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+  return true;
+}
+const _sc = new THREE.Color();
+
+/**
+ * ONE vertex-coloured, metre-space geometry for a piece — the whole piece in
+ * a single draw no matter how many materials the source split it over.
+ *
+ * The dungeon dressing fields (DUNGEON_SPEC STEP 7) use this instead of
+ * pieceParts: the ruin_* pieces ship as 1-4 solid-COLOUR materials with no
+ * maps, so per-part materials spend a draw call apiece on information a
+ * colour attribute carries for free — a 12-role dressing pass tripled its
+ * draw count that way. Each part is baked to Float32 metres (same reasoning
+ * as bakePiece: never scale the quantised source in place), painted with its
+ * material colour — or, for atlas-textured pieces (dungeonkit, STEP 9), with
+ * a per-vertex sample of the atlas, which turns the texture into the vertex
+ * colours the art direction prefers anyway — and merged. Position + colour
+ * only — the flat-shaded vertex-colour materials this is drawn with read
+ * neither normals nor uvs.
+ *
+ * Kit absent -> the procedural twin, which is already vertex-coloured and
+ * single-draw, so callers get one geometry either way.
+ */
+export function pieceGeometryColored(key) {
+  const k = String(key).toLowerCase();
+  const cached = _coloredCache.get(k);
+  if (cached) return cached;
+  const entry = _kit.get(k);
+  if (!entry) return procGeometry(k);
+  const baked = [];
+  for (const p of entry.parts) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', toFloat(p.geometry.attributes.position));
+    if (p.geometry.index) g.setIndex(Array.from(p.geometry.index.array));
+    g.applyMatrix4(p.offset);
+    if (!bakeAtlasColors(g, p.geometry, p.material)) {
+      paint(g, p.material?.color ?? 0xffffff);
+    }
+    baked.push(g);
+  }
+  const geo = baked.length === 1 ? baked[0] : group(baked);
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+  _coloredCache.set(k, geo);
+  return geo;
 }
 
 export function moduleGeometry(key) {
@@ -809,10 +1054,15 @@ export function disposeCityKit() {
   _kit.clear();
   for (const g of _bakedCache.values()) g.dispose();
   _bakedCache.clear();
+  for (const g of _coloredCache.values()) g.dispose();
+  _coloredCache.clear();
   for (const t of _kitTextures) t.dispose();
   _kitTextures = new Set();
+  _texData.clear();
   _kitLoaded = false;
   _kitLoading = null;
+  _dkitLoaded = false;
+  _dkitLoading = null;
 
   for (const g of _procCache.values()) g.dispose();
   _procCache.clear();
@@ -820,7 +1070,7 @@ export function disposeCityKit() {
 }
 
 export function cityKitStats() {
-  let geometries = _procCache.size + _bakedCache.size;
+  let geometries = _procCache.size + _bakedCache.size + _coloredCache.size;
   const materials = new Set();
   if (_mats) for (const m of Object.values(_mats)) materials.add(m.uuid);
   for (const entry of _kit.values()) {
