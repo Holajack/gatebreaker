@@ -79,7 +79,7 @@ try {
       screen: window.__app?.current ?? null,
       state: g.state,
       hasCity: Boolean(c?.built),
-      portals: c ? c.portals.map((p) => ({ rank: p.rank, locked: p.locked, x: +p.pos.x.toFixed(2), z: +p.pos.z.toFixed(2) })) : [],
+      portals: c ? c.portals.map((p) => ({ rank: p.rank, locked: p.locked, wild: Boolean(p.wild), x: +p.pos.x.toFixed(2), z: +p.pos.z.toFixed(2) })) : [],
       gateBuilt: Boolean(g.gate),
       enemies: g.enemies.length,
       worldObjects: g.world.group.children.length,
@@ -94,7 +94,10 @@ try {
 
   ok(arrived.mode === 'city', `PLAY did not put the player in the city (mode=${arrived.mode})`);
   ok(arrived.hasCity, 'no City was built on entering the hub');
-  ok(arrived.portals.length === 6, `expected 6 portals, saw ${arrived.portals.length}`);
+  // WORLD_SPEC step 7 appends the Verge's wild gates to city.portals; the
+  // town's own six are the non-wild ones.
+  ok(arrived.portals.filter((p) => !p.wild).length === 6,
+    `expected 6 town portals, saw ${arrived.portals.filter((p) => !p.wild).length}`);
   ok(!arrived.gateBuilt, 'a gate was built on entering the city — this is the bug the owner reported');
   ok(arrived.enemies === 0, `${arrived.enemies} enemies exist in the hub`);
   ok(arrived.worldObjects === 0, `dungeon World still holds ${arrived.worldObjects} objects in the city`);

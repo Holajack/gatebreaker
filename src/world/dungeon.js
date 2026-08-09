@@ -150,12 +150,64 @@ const TUNNEL_DARK = 0.35;
 const ENTRY_PORTAL_Z = 1.55;
 const ENTRY_PORTAL_W = 3.2;
 const TORCH_LIGHT_COLOR = 0xff9a4a;
-const TORCH_LIGHT_INTENSITY = 2.4;
-const TORCH_LIGHT_RANGE = 12;
+const TORCH_LIGHT_INTENSITY = 2.6;
+const TORCH_LIGHT_RANGE = 14;
 // Cavern light anchors are bioluminescent crystal clusters, not fire: cooler,
 // slightly dimmer, wider throw (STEP 8; spec generation.parameters.C).
-const CRYSTAL_LIGHT_INTENSITY = 2.1;
-const CRYSTAL_LIGHT_RANGE = 15;
+const CRYSTAL_LIGHT_INTENSITY = 2.3;
+const CRYSTAL_LIGHT_RANGE = 17;
+
+// --- INTERIOR READABILITY (art pass) -------------------------------------
+//
+// WHY THE SHIPPED 1.4 CRAWL RENDERED BLACK. The BIOMES rows are authored for
+// the OUTDOOR arena, where a sky dome and a sun carry the exposure. As indoor
+// ALBEDO the same hexes are 1-4% linear reflectance — warren ground 0x1a1f38
+// is (0.010, 0.014, 0.040) linear — and no amount of light rescues a surface
+// that reflects one percent of it once ACES at exposure 1.25 has had its say.
+// That is the "boss invisible against a near-black floor" and "one wall lit,
+// the opposite wall pure black" the reviewers photographed.
+//
+// So the fix is three things at once, and it has to be all three:
+//   1. LIFT THE ALBEDO (below): keep each biome's hue, raise the VALUE to what
+//      quarried stone actually reflects, ease the saturation so the fill does
+//      not read as a coloured wash. Shell geometry only — kit dressing keeps
+//      its own atlas.
+//   2. FILL FROM EVERY OTHER DIRECTION (hemisphere + interior IBL): the key is
+//      a SINGLE directional light and always will be, because light count is
+//      part of three's shader-program cache key. One face of every corridor
+//      looks at it and the opposite face looks at nothing; a hemisphere is the
+//      only free way to put a value on that second face.
+//   3. TORCHES FROM BOTH SIDES (_retargetLights): the pooled lights used to
+//      take the two nearest anchors, which in a corridor are usually the same
+//      wall. They now take the nearest on each side of the camera.
+// Deliberately NOT done: more lights (blows the spec's 2-3 pool and forces a
+// recompile), and a global exposure lift (that is the city's frame too).
+const FLOOR_VALUE = 0.28;    // min HSL lightness for floor stone
+const WALL_VALUE = 0.32;     // ... for wall slabs (a shade above the floor)
+const ROCK_DARKEN = 0.6;     // rock mass, as a fraction of the wall tone
+const WALL_TOP_FALLOFF = 0.5;   // wall vertex colour at the lid vs at the floor
+// Hemisphere fill. 0.35 was the spec's first guess, made against the
+// unlifted outdoor palette; measured on the boss-chamber and tunnel frames it
+// left both at ~0.05 mean luma with half the pixels effectively black.
+const HEMI_INTENSITY = 1.4;
+// Indirect exposure for the interior PMREM (env.js interior branch). Carries
+// the soft floor bounce that keeps a body from reading as a silhouette.
+const INTERIOR_ENV_INTENSITY = 1.5;
+// Per-kind fill scale. The cavern was never the dark complaint — it is an open
+// chamber under a 20 m dome with its own bioluminescent light sources, and it
+// measured 2x the crawl's frame luminance BEFORE any of this. Giving it the
+// crawl's full fill turns it into an overcast quarry; the crawl is a sealed
+// corridor lit by two torches and needs every bit of it.
+const FILL_SCALE = { crawl: 1.0, cavern: 0.6 };
+// The key stays the only shadow caster and the only directional. It goes UP a
+// little, not down: raising the ambient floor without it would flatten the
+// contrast that makes the interior moody rather than merely lit.
+const KEY_INTENSITY = 1.35;
+// The boss chamber's floor gets its own raised pool of paler stone: the fight
+// that most needs a readable silhouette and readable telegraphs was the one
+// staged on the darkest surface in the game.
+const BOSS_FLOOR_VALUE = 0.38;
+const BOSS_FLOOR_MIX = 0.34;
 // Cavern roof: coarse inverted dome y 16-22 (above the camera's 11 m, so the
 // standard rig never meets it) with a hanging stalactite fringe under it.
 const DOME_Y = [16, 22];
@@ -317,7 +369,9 @@ export class Dungeon {
     // open-sky HDRI branch would light an enclosed burrow like a meadow.
     this.envRT = buildBiomeEnvironment(this.renderer, biome, { interior: true });
     this.scene.environment = this.envRT.texture;
-    this.scene.environmentIntensity = 1.0;
+    // Interior IBL carries the soft floor bounce (env.js interior branch); it
+    // is a uniform, not a light, so raising it costs no shader recompile.
+    this.scene.environmentIntensity = INTERIOR_ENV_INTENSITY * (FILL_SCALE[layout.kind] ?? 1);
     this.scene.environmentRotation.set(0, 0.4, 0);
 
     // --- merged shell geometry -------------------------------------------
@@ -344,14 +398,30 @@ export class Dungeon {
     // rim baked into the floor's vertex colours, so heightAt() stays 0 and no
     // body ever clips a real step.
     const isCavern = layout.kind === 'cavern';
+    const bossRoom = layout.rooms[layout.bossRoom];
     let daisTint = null;
     if (isCavern) {
-      const bossC = layout.rooms[layout.bossRoom].centre;
+      const bossC = bossRoom.centre;
       const daisCol = new THREE.Color(biome.detail);
       daisTint = (c, x, z) => {
         const dd = Math.hypot(x - bossC.x, z - bossC.z);
         if (dd < 3.6) c.lerp(daisCol, 0.32);
         else if (dd < 4.5) c.multiplyScalar(0.78);
+      };
+    } else {
+      // Crawl boss chamber (art pass): a soft pool of paler stone across the
+      // fight floor. The reviewers could not find the boss's silhouette — a
+      // 2.5x-scale dark body standing on the darkest surface in the game —
+      // and a chamber floor a clear step brighter than its corridors is the
+      // cheapest read there is for both the body and its floor telegraphs.
+      // Vertex colour only, so heightAt() stays flat and nav is untouched.
+      const bc = bossRoom.centre;
+      const bossFloor = lift(new THREE.Color(biome.ground), BOSS_FLOOR_VALUE, 0.3);
+      const bossR = Math.min(bossRoom.w, bossRoom.d) * 0.5;
+      daisTint = (c, x, z) => {
+        const dd = Math.hypot(x - bc.x, z - bc.z);
+        if (dd > bossR) return;
+        c.lerp(bossFloor, BOSS_FLOOR_MIX * smoothstep(1, 0.35, dd / bossR));
       };
     }
     this._buildFloor(layout, biome, shellRnd, entryTint, daisTint);
@@ -416,13 +486,23 @@ export class Dungeon {
     });
 
     // --- lighting ---------------------------------------------------------
-    // Hemi at 0.35 (spec) — the env map supplies directional ambient.
-    const hemi = new THREE.HemisphereLight(biome.accent, biome.ground, 0.35);
+    // Hemisphere fill — the second of the three readability moves (see the
+    // INTERIOR READABILITY block). Sky colour is the biome accent pulled well
+    // back in saturation: at full chroma a hemi at this intensity paints every
+    // up-facing surface neon and the torches stop being the light source.
+    // Ground colour is a floor bounce, which is what lands on undersides and
+    // on the lower half of a body — the term that stops characters reading as
+    // flat silhouettes in a dark room. Vertical wall faces take roughly half
+    // of each, and those faces were the actual defect.
+    const fill = FILL_SCALE[layout.kind] ?? 1;
+    const hemiSky = lift(new THREE.Color(biome.accent), 0.62, 0.6);
+    const hemiGround = lift(new THREE.Color(biome.ground), 0.28, 0.35);
+    const hemi = new THREE.HemisphereLight(hemiSky, hemiGround, HEMI_INTENSITY * fill);
     this.group.add(hemi);
 
     // Key light + shadow stays indoors (spec "performance.lights"): it is the
     // only shadow caster and updateShadowCamera fits it to the player.
-    const key = new THREE.DirectionalLight(0xffffff, 1.15);
+    const key = new THREE.DirectionalLight(0xffffff, KEY_INTENSITY);
     key.position.set(18, 34, 12);
     key.castShadow = true;
     key.shadow.mapSize.set(1024, 1024);
@@ -461,13 +541,70 @@ export class Dungeon {
 
   // ------------------------------------------------------------- geometry
 
+  /**
+   * The floor: one merged vertex-coloured mesh.
+   *
+   * COLOUR (art pass). The first cut picked a colour per CELL from two rnd()
+   * rolls. On a perfectly regular 2 m grid that is a checkerboard, which is
+   * exactly what the C cavern was called — an architectural tiled hall where
+   * an organic cave was wanted. The replacement is the language city.js's
+   * ground uses:
+   *   - low-frequency tone fields over WORLD position (wavelengths ~32 m,
+   *     ~12 m and ~5.5 m — the shortest still nearly three cells) blend three
+   *     rock tones into patches with no grid to lock onto, each field's noise
+   *     domain rotated so the lattice cannot align with the floor;
+   *   - every field is sampled at the TRIANGLE CENTROID, not the cell centre.
+   *     This is the load-bearing one. Colour computed per cell quantises every
+   *     patch boundary to a 2 m rectangle, so the moment the patches have
+   *     enough contrast to see, they read as tiles again — the defect wearing
+   *     a different hat. Per-face sampling puts the boundaries on triangle
+   *     edges instead;
+   *   - the split diagonal FLIPS on a hash bit, so the tessellation those
+   *     boundaries follow is itself irregular rather than a herringbone;
+   *   - and a small per-face luminance jitter on top, for low-poly stone.
+   * All of it is integer-hash noise seeded off the shell stream: no rnd()
+   * state, no Math.random, identical on a context-loss rebuild.
+   */
   _buildFloor(layout, biome, rnd, entryTint, daisTint = null) {
     const { mask, w, h, cell, originX, originZ } = layout;
-    const ground = new THREE.Color(biome.ground);
+    const isCavern = layout.kind === 'cavern';
+    // Three tones: the lifted floor stone, a greyer/cooler rock drawn from the
+    // wall colour, and a damp darker one. Two fields pick between them.
+    const ground = lift(new THREE.Color(biome.ground), FLOOR_VALUE);
+    const rockTone = lift(new THREE.Color(biome.pillar), FLOOR_VALUE + 0.05, 0.34);
+    const dampTone = ground.clone().multiplyScalar(0.48);
     const detail = new THREE.Color(biome.detail);
-    const c0 = new THREE.Color();
+    // Patch amplitude: the cavern wants big blotchy mineral variation, the
+    // worked-stone crawl wants a quieter floor that still is not a grid. The
+    // per-triangle jitter stays SMALL on purpose — crank it and the eye starts
+    // reading the tessellation again, which is the failure mode this whole
+    // rewrite exists to avoid.
+    const patchMix = isCavern ? 1.0 : 0.6;
+    const detailMix = isCavern ? 0.09 : 0.12;
+    const jitAmp = 0.05;
+    // One roll off the shell stream seeds every hash below — determinism
+    // holds and retuning the floor cannot reshuffle anything upstream.
+    const ns = (rnd() * 0xffffffff) >>> 0;
+    const cA = new THREE.Color();
+    const cB = new THREE.Color();
     const positions = [];
     const colors = [];
+    // One triangle's flat colour, from its centroid. Three tone fields at
+    // descending wavelengths — ~32 m picks which rock a region is, ~12 m
+    // stains it damp, ~5.5 m roughens the boundaries so patches have ragged
+    // edges rather than soft blobs — then the biome's accent mineral in the
+    // brightest pockets, the shell's own tints, and a small per-face jitter.
+    const face = (out, x, z, jx, jz) => {
+      out.copy(ground);
+      out.lerp(rockTone, smoothstep(0.35, 0.68, fbm2(x * 0.031 + 13, z * 0.031 - 7, ns, 0)) * patchMix);
+      out.lerp(dampTone, smoothstep(0.42, 0.78, fbm2(x * 0.085 - 5, z * 0.085 + 21, ns + 77, 1)) * patchMix);
+      out.multiplyScalar(0.88 + 0.24 * fbm2(x * 0.18 + 41, z * 0.18 - 17, ns + 209, 2));
+      out.lerp(detail, smoothstep(0.72, 0.98, fbm2(x * 0.14 - 31, z * 0.14 + 3, ns + 401, 3)) * detailMix);
+      // Tunnel darkness ramp, then the boss-chamber / cavern-dais floor pool.
+      entryTint(out, z);
+      if (daisTint) daisTint(out, x, z);
+      out.multiplyScalar(1 + (hashi(jx, jz, ns) - 0.5) * 2 * jitAmp);
+    };
     const rock = (gx, gz) => gx < 0 || gz < 0 || gx >= w || gz >= h || !mask[gx + gz * w];
     // Corner AO: darken a floor corner by how much rock meets it — a cheap
     // baked contact shadow that sells "carved out of the mass" for free.
@@ -486,24 +623,37 @@ export class Dungeon {
         const z0 = originZ + gz * cell;
         const x1 = x0 + cell;
         const z1 = z0 + cell;
-        // Per-cell tint jitter, slightly pulled toward the biome detail
-        // colour, so the floor reads as cut stone rather than a paint fill.
-        c0.copy(ground).lerp(detail, rnd() * 0.12).multiplyScalar(0.9 + rnd() * 0.2);
-        // Tunnel darkness ramp — per-cell (2 m) resolution reads smoothly
-        // over the 16-20 m tunnel and costs nothing outside it.
-        entryTint(c0, z0 + cell / 2);
-        if (daisTint) daisTint(c0, x0 + cell / 2, z0 + cell / 2);
         const s00 = cornerShade(gx, gz);
         const s10 = cornerShade(gx + 1, gz);
         const s01 = cornerShade(gx, gz + 1);
         const s11 = cornerShade(gx + 1, gz + 1);
-        // Two triangles, CCW seen from above (+Y normal).
-        positions.push(
-          x0, 0, z0, x0, 0, z1, x1, 0, z1,
-          x0, 0, z0, x1, 0, z1, x1, 0, z0,
-        );
-        pushShaded(colors, c0, s00); pushShaded(colors, c0, s01); pushShaded(colors, c0, s11);
-        pushShaded(colors, c0, s00); pushShaded(colors, c0, s11); pushShaded(colors, c0, s10);
+        // Flip the split diagonal on a hash bit so the triangulation the patch
+        // boundaries follow has no repeating direction. Both windings stay CCW
+        // seen from above (+Y normal).
+        const flip = hashi(gx, gz, ns + 5077) < 0.5;
+        if (flip) {
+          positions.push(
+            x0, 0, z0, x0, 0, z1, x1, 0, z1,
+            x0, 0, z0, x1, 0, z1, x1, 0, z0,
+          );
+        } else {
+          positions.push(
+            x0, 0, z0, x0, 0, z1, x1, 0, z0,
+            x0, 0, z1, x1, 0, z1, x1, 0, z0,
+          );
+        }
+        // Face colour, sampled at each triangle's own centroid.
+        face(cA, (2 * x0 + x1) / 3,
+          flip ? (z0 + 2 * z1) / 3 : (2 * z0 + z1) / 3, gx * 2, gz * 2 + 911);
+        face(cB, (x0 + 2 * x1) / 3,
+          flip ? (2 * z0 + z1) / 3 : (z0 + 2 * z1) / 3, gx * 2 + 1, gz * 2 + 911);
+        if (flip) {
+          pushShaded(colors, cA, s00); pushShaded(colors, cA, s01); pushShaded(colors, cA, s11);
+          pushShaded(colors, cB, s00); pushShaded(colors, cB, s11); pushShaded(colors, cB, s10);
+        } else {
+          pushShaded(colors, cA, s00); pushShaded(colors, cA, s01); pushShaded(colors, cA, s10);
+          pushShaded(colors, cB, s01); pushShaded(colors, cB, s11); pushShaded(colors, cB, s10);
+        }
       }
     }
     const geo = bufferGeo(positions, colors);
@@ -523,8 +673,10 @@ export class Dungeon {
 
   _buildWalls(layout, biome, entryTint) {
     const { wallRuns, params } = layout;
-    const base = new THREE.Color(biome.pillar);
-    const top = new THREE.Color(biome.pillar).multiplyScalar(0.45);
+    const base = lift(new THREE.Color(biome.pillar), WALL_VALUE);
+    // Torchlit low, dark up high — but the old 0.45 put the top half of every
+    // wall below the black point once the albedo underneath it was this dark.
+    const top = base.clone().multiplyScalar(WALL_TOP_FALLOFF);
     const positions = [];
     const colors = [];
     for (const run of wallRuns) {
@@ -588,7 +740,11 @@ export class Dungeon {
       }
       return params.wallHeight;
     };
-    const rockNear = new THREE.Color(biome.pillar).multiplyScalar(0.5);
+    // Near rock is lifted with the rest of the shell; FAR rock deliberately is
+    // not — it fades into biome.sky because that IS the backdrop behind it,
+    // and that dissolve is what closes the world off.
+    const rockNear = lift(new THREE.Color(biome.pillar), WALL_VALUE, 0.3)
+      .multiplyScalar(ROCK_DARKEN);
     const rockFar = new THREE.Color(biome.sky);
     const c0 = new THREE.Color();
     const c1 = new THREE.Color();
@@ -1359,31 +1515,71 @@ export class Dungeon {
     }
   }
 
+  /**
+   * Reassign the pooled lights, 4 Hz.
+   *
+   * TWO-SIDED (art pass). Taking simply the N nearest anchors is what produced
+   * the reviewers' corridor frame: torch anchors alternate along the two
+   * parallel walls, the two nearest are usually on the SAME wall, and the
+   * opposite wall got nothing but the hemisphere. So the pool now claims the
+   * nearest anchor on each side of the camera's own right vector — one lamp
+   * per wall — and any third slot takes the nearest unclaimed anchor. Same
+   * light count, same 4 Hz, same crossfade; only which anchors win changes.
+   */
   _retargetLights() {
     const cam = this.camera;
-    _focus.set(cam.position.x, 0, cam.position.z - 9);
     const n = this._torchAnchors.length / 2;
     const lights = this._torchLights;
-    // Rank each pool slot to its k-th nearest anchor. Pool is 1-3 and anchors
-    // are tens, so a partial selection scan beats sorting and allocates
-    // nothing (module-scratch best arrays).
-    for (let li = 0; li < lights.length; li++) _bestIdx[li] = -1;
-    for (let li = 0; li < lights.length; li++) _bestD[li] = Infinity;
+    const np = lights.length;
+    // Camera basis on the ground plane, straight off its world matrix: column
+    // 0 is right, column 2 is backward. The old code assumed the camera always
+    // looked down -Z, which stopped being true when the orbit camera shipped.
+    const e = cam.matrixWorld.elements;
+    let fx = -e[8];
+    let fz = -e[10];
+    const flen = Math.hypot(fx, fz) || 1;
+    fx /= flen; fz /= flen;
+    const rx = e[0];
+    const rz = e[2];
+    // The camera rides ~11 m behind the player, so this lands around and
+    // slightly ahead of them without needing a player reference.
+    _focus.set(cam.position.x + fx * 9, 0, cam.position.z + fz * 9);
+
+    let leftI = -1; let leftD = Infinity;
+    let rightI = -1; let rightD = Infinity;
+    let nearI = -1; let nearD = Infinity;
     for (let i = 0; i < n; i++) {
       const dx = this._torchAnchors[i * 2] - _focus.x;
       const dz = this._torchAnchors[i * 2 + 1] - _focus.z;
       const d2 = dx * dx + dz * dz;
-      for (let li = 0; li < lights.length; li++) {
-        if (d2 < _bestD[li]) {
-          for (let sh = lights.length - 1; sh > li; sh--) {
-            _bestD[sh] = _bestD[sh - 1];
-            _bestIdx[sh] = _bestIdx[sh - 1];
-          }
-          _bestD[li] = d2;
-          _bestIdx[li] = i;
-          break;
-        }
+      if (d2 < nearD) { nearD = d2; nearI = i; }
+      if (dx * rx + dz * rz < 0) {
+        if (d2 < leftD) { leftD = d2; leftI = i; }
+      } else if (d2 < rightD) { rightD = d2; rightI = i; }
+    }
+    for (let li = 0; li < np; li++) _bestIdx[li] = -1;
+    if (np === 1) {
+      _bestIdx[0] = nearI;                       // one lamp: just the nearest
+    } else {
+      _bestIdx[0] = leftI >= 0 ? leftI : nearI;
+      if (rightI >= 0 && rightI !== _bestIdx[0]) _bestIdx[1] = rightI;
+    }
+    // Any slot the side pass could not fill (a corridor with anchors on one
+    // side only, or a 3-light pool) takes the nearest unclaimed anchor.
+    for (let li = 0; li < np; li++) {
+      if (_bestIdx[li] >= 0) continue;
+      let pick = -1;
+      let pd = Infinity;
+      for (let i = 0; i < n; i++) {
+        let taken = false;
+        for (let k = 0; k < np; k++) if (_bestIdx[k] === i) { taken = true; break; }
+        if (taken) continue;
+        const dx = this._torchAnchors[i * 2] - _focus.x;
+        const dz = this._torchAnchors[i * 2 + 1] - _focus.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 < pd) { pd = d2; pick = i; }
       }
+      _bestIdx[li] = pick;
     }
     // Keep lights that already sit on a chosen anchor; hand the rest the
     // leftovers so at most the changed ones crossfade.
@@ -1643,9 +1839,77 @@ export class Dungeon {
 
 // Retarget scratch (pool is at most 3).
 const _bestIdx = [-1, -1, -1];
-const _bestD = [Infinity, Infinity, Infinity];
 
 // --------------------------------------------------------------- geo helpers
+
+// Raise a biome colour to an indoor albedo, in place.
+//
+// The colour space argument is NOT optional and getting it wrong is a trap
+// worth naming: three's get/setHSL default to the WORKING (linear) space, so
+// `lift(warren.ground, 0.26)` without it takes linear lightness 0.025 to 0.26
+// — a twelvefold albedo gain that renders as a lit showroom, not a dungeon.
+// In sRGB the same call is the perceptual "make this dark navy a readable
+// stone" it reads as, and one threshold then behaves the same across six
+// biomes of wildly different hue.
+const _hsl = { h: 0, s: 0, l: 0 };
+function lift(color, minL, desat = 0.22) {
+  color.getHSL(_hsl, THREE.SRGBColorSpace);
+  color.setHSL(_hsl.h, _hsl.s * (1 - desat), Math.max(_hsl.l, minL), THREE.SRGBColorSpace);
+  return color;
+}
+
+// Deterministic value noise over WORLD position, for the floor's organic
+// variation. Self-contained (a dozen lines) rather than imported from
+// terrain.js on purpose: the overworld modules are being reworked in the same
+// wave, and the interior's look must not be hostage to that file's fate.
+function hashi(x, y, seed) {
+  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(seed | 0, 2246822519);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+const _smooth = (t) => t * t * (3 - 2 * t);
+function vnoise(x, y, seed) {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const u = _smooth(x - xi);
+  const v = _smooth(y - yi);
+  const a = hashi(xi, yi, seed);
+  const b = hashi(xi + 1, yi, seed);
+  const c = hashi(xi, yi + 1, seed);
+  const d = hashi(xi + 1, yi + 1, seed);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+// Two octaves is enough: this drives big soft patches, and the fine detail is
+// carried by the per-triangle jitter instead (where it reads as stone rather
+// than as mush — city.js's ground learned the same lesson).
+//
+// The domain is ROTATED per field. Value noise lives on an integer lattice, so
+// unrotated it hands back axis-aligned square blobs — which on an axis-aligned
+// floor grid is just a coarser version of the checkerboard this replaces. The
+// rotations are irrational-ish angles chosen so no two fields line up either.
+const NOISE_ROT = [
+  [0.8776, 0.4794],    // ~28.6 deg
+  [-0.4161, 0.9093],   // ~114.6 deg
+  [0.5403, -0.8415],   // ~-57.3 deg
+  [0.7539, 0.6570],    // ~41.1 deg
+];
+// Returned STRETCHED to fill 0..1. Raw fbm of smoothed value noise is a sum of
+// means: it lands in roughly 0.36..0.64 and almost never reaches either end, so
+// thresholds picked against a nominal 0..1 range produce patches with almost no
+// contrast — a floor that is technically varied and visibly uniform. The 3.2
+// gain about the midpoint is measured against that spread.
+function fbm2(x, y, seed, rot = 0) {
+  const [c, s] = NOISE_ROT[rot];
+  const rx = x * c - y * s;
+  const ry = x * s + y * c;
+  const raw = vnoise(rx, ry, seed) * 0.65
+    + vnoise(ry * 2.07 + 5.1, rx * -2.07 - 3.3, seed + 1013) * 0.35;
+  return Math.min(1, Math.max(0, (raw - 0.5) * 3.2 + 0.5));
+}
+const smoothstep = (a, b, t) => {
+  const k = Math.min(1, Math.max(0, (t - a) / (b - a)));
+  return k * k * (3 - 2 * k);
+};
 
 function pushShaded(colors, c, s) {
   colors.push(c.r * s, c.g * s, c.b * s);

@@ -167,7 +167,21 @@ export function setCharacterQuality(tier) {
   // Existing instances follow the shadow decision immediately; the budget only
   // applies to the next thing spawned, because yanking a mesh out from under a
   // live enemy mid-run is worse than one frame over budget.
-  for (const inst of _live) if (inst.mesh) inst.mesh.castShadow = _quality.castShadow;
+  //
+  // EXCEPT instances that pinned their shadow off. This loop used to write
+  // every live mesh unconditionally, which silently undid a caller's deliberate
+  // decision the first time the frame-rate governor stepped a tier. It is not a
+  // cosmetic difference: citizens.js turns castShadow off because a skinned
+  // caster lazily compiles a SKINNED depth-material program the first time it
+  // enters the shadow frustum, and that is a shader-compile hitch at an
+  // arbitrary moment of play. tools/city-test.mjs caught it in the act — the
+  // governor stepped ultra -> high mid-walk and renderer.info.programs grew by
+  // one in the same frame, with a citizen's 'skin' mesh drawn through
+  // MeshDepthMaterial as the culprit.
+  for (const inst of _live) {
+    if (!inst.mesh || inst.shadowPinned) continue;
+    inst.mesh.castShadow = _quality.castShadow;
+  }
 }
 
 /** True when another GLB-backed character fits inside the tier's budget. */
@@ -746,6 +760,9 @@ class CharacterInstance {
     this._atkState = 'attack'; // clip chosen at the START of the current swing
     this._atkOffset = 0;       // windup start offset for restart-with-variation
     this._unarmedSeq = 0;      // fallback chain position when no combo is given
+    // Set true by a caller that has decided this character never casts a
+    // shadow, whatever the quality tier does later. See setCharacterQuality.
+    this.shadowPinned = false;
     _live.add(this);
     _liveInstances++;
   }

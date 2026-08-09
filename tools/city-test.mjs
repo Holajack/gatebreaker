@@ -116,6 +116,7 @@ try {
         rank: p.rank,
         color: p.color,
         locked: p.locked,
+        wild: Boolean(p.wild),
         meshes: p.group.children.length,
         pos: { x: +p.pos.x.toFixed(2), y: +p.pos.y.toFixed(2), z: +p.pos.z.toFixed(2) },
       })),
@@ -139,7 +140,11 @@ try {
   ok(build.kitLoaded, 'citykit.glb failed to load — the city fell back to procedural pieces');
   ok(build.pointLights === 0,
     `found ${build.pointLights} PointLight(s) in the city scene; the shader-recompile rule says zero`);
-  ok(build.portals.length === 6, `expected 6 portals, got ${build.portals.length}`);
+  // WORLD_SPEC step 7: the Verge appends its wild gates to city.portals (that
+  // is what makes portalAt/nearestPortal/compass/prompt work on them without a
+  // line of change), so the town's own six are the non-wild ones.
+  const townPortals = build.portals.filter((p) => !p.wild);
+  ok(townPortals.length === 6, `expected 6 town portals, got ${townPortals.length}`);
   for (const p of build.portals) {
     ok(EXPECT_COLORS[p.rank] === p.color,
       `portal ${p.rank} colour is 0x${p.color.toString(16)}, spec says 0x${EXPECT_COLORS[p.rank]?.toString(16)}`);
@@ -149,6 +154,65 @@ try {
   ok(s && s.pos.z < -110, `the S portal must sit outside the north wall; z = ${s?.pos.z}`);
   for (const id of ['barracks', 'assay', 'trial', 'exchange', 'stash']) {
     ok(build.interactables.includes(id), `missing interactable "${id}"`);
+  }
+
+  // ------------------------------------------------- WORLD_SPEC step 8 layout
+  //
+  // The builder enforces layoutrules.js while it places; this asserts the SAME
+  // table off city.layoutMeta afterwards. Three extra seeds, because a layout
+  // rule that only holds for the shipped seed is not a rule — it is a
+  // coincidence, and the whole point of build(seed) is that other seeds exist.
+  const layout = await page.evaluate(async () => {
+    const { THREE, city, quality } = window.__city;
+    const cityMod = await import('/src/world/city.js');
+    const rules = await import('/src/world/layoutrules.js');
+    const run = (c) => {
+      const v = rules.validateLayout(c);
+      const floors = {}; const districts = {};
+      for (const b of c.layoutMeta) {
+        floors[b.floors] = (floors[b.floors] || 0) + 1;
+        districts[b.district] = (districts[b.district] || 0) + 1;
+      }
+      const spire = c.layoutMeta.find((b) => b.isSpire) || null;
+      return {
+        ok: v.ok,
+        violations: v.violations.slice(0, 12),
+        buildings: c.layoutMeta.length,
+        stats: c.layoutStats,
+        floors,
+        districts,
+        spire: spire ? { x: +spire.cx.toFixed(1), z: +spire.cz.toFixed(1), floors: spire.floors, topY: +spire.topY.toFixed(2) } : null,
+        tallestOther: +Math.max(...c.layoutMeta.filter((b) => !b.isSpire).map((b) => b.topY)).toFixed(2),
+        doors: c.layoutMeta.filter((b) => b.door).length,
+      };
+    };
+    const out = [{ seed: 20260806, ...run(city) }];
+    // Extra seeds get their own City so the shipped one is left mounted for
+    // every phase after this; dispose is called on each, which the leak check
+    // downstream relies on.
+    for (const seed of [4242, 99991]) {
+      const scratch = new cityMod.City(new THREE.Scene(), window.__city.renderer, window.__city.camera, quality);
+      scratch.build(seed, { level: 60 });
+      out.push({ seed, ...run(scratch) });
+      scratch.dispose();
+    }
+    return out;
+  });
+
+  phase('layout rules');
+  for (const L of layout) {
+    console.log(`layout seed ${L.seed}: ${L.buildings} buildings  floors ${JSON.stringify(L.floors)}`);
+    console.log(`   districts ${JSON.stringify(L.districts)}`);
+    console.log(`   spire ${JSON.stringify(L.spire)}  tallest other ${L.tallestOther} m   plots ${JSON.stringify(L.stats)}`);
+    ok(L.ok, `validateLayout failed on seed ${L.seed}: `
+      + L.violations.map((v) => `${v.rule}: ${v.detail}`).join(' | '));
+    ok(L.doors === L.buildings, `seed ${L.seed}: ${L.doors}/${L.buildings} buildings have a doorway`);
+    ok(L.spire && L.spire.floors === 5, `seed ${L.seed}: no 5-storey spire`);
+    // The owner asked for taller buildings; this is that ask as a number. The
+    // pre-step town was 1-3 storeys with 3 as a rarity.
+    const tall = Object.entries(L.floors).reduce((n, [f, c]) => n + (Number(f) >= 3 ? c : 0), 0);
+    ok(tall >= L.buildings * 0.2,
+      `seed ${L.seed}: only ${tall}/${L.buildings} buildings are 3+ storeys — the skyline is flat again`);
   }
 
   // -------------------------------------------- heightAt vs the real mesh
@@ -319,8 +383,14 @@ try {
       ring.push({ x: Math.cos(a) * R, z: -Math.sin(a) * R });
     }
     const route = [
-      // the five plaza portals, approached from their standing spots
-      ...city.portals.filter((p) => p.rank !== 'S').map(stand),
+      // The five PLAZA portals, approached from their standing spots. The
+      // Verge's wild gates are in city.portals too now (WORLD_SPEC step 7) and
+      // are excluded here on purpose: this route follows the street network and
+      // deliberately has no pathfinder, so a waypoint 200 m outside the wall
+      // steers the body straight into a wall corner and reports the town as
+      // unreachable. Walking out to the Verge is frontier-test's job, and it
+      // does it on the axes the gates actually open onto.
+      ...city.portals.filter((p) => p.rank !== 'S' && !p.wild).map(stand),
       { x: 0, z: 0 },
       // north avenue to the Assay Hall
       { x: 0, z: -18 }, { x: 0, z: -30 }, { x: 0, z: -48 }, { x: 0, z: -18 },
@@ -509,6 +579,74 @@ try {
     }
   }
 
+  // ------------------------------------------- runtime density (phone fence)
+  // WORLD_SPEC's PHONE BUDGET DRIFT risk names "the tier-scaled scatter counts"
+  // as the fence for this wave's ~2x geometry. It only IS a fence if it engages
+  // mid-session: instanceScale was read once at build, so a device the governor
+  // had just stepped down kept every triangle of the tier it was struggling at
+  // until the player next re-entered the city from a gate — and this wave's
+  // headline is a long city+frontier session that need never enter one.
+  const density = await page.evaluate(() => {
+    const { city } = window.__city;
+    const V = Object.getPrototypeOf(city.group.position).constructor;
+    const snap = () => {
+      const s = city.stats;
+      return {
+        density: s.density,
+        tris: s.triangles,
+        frontierTris: s.frontier ? s.frontier.triangles : 0,
+        instances: s.instances,
+        collidersOff: city.obstacles.filter((o) => o.off).length,
+      };
+    };
+    // Probe: does a solid still push a body out after its instance stopped
+    // drawing? An invisible wall is worse than the triangles it saved.
+    const push = (o) => {
+      const v = new V(o.pos.x, 0, o.pos.z);
+      city.resolve(v, 0.4);
+      return +Math.hypot(v.x - o.pos.x, v.z - o.pos.z).toFixed(3);
+    };
+    const built = snap();
+    city.setInstanceDensity(0.4);              // the `low` tier's instanceScale
+    const low = snap();
+    const thinned = city.obstacles.find((o) => o.off) || null;
+    const kept = city.obstacles.find((o) => !o.off && o.i != null) || null;
+    low.pushOutOfThinned = thinned ? push(thinned) : null;
+    low.pushOutOfKept = kept ? push(kept) : null;
+    city.setInstanceDensity(built.density);    // hand the world back
+    const restored = snap();
+    return { built, low, restored };
+  });
+  phase('runtime density');
+  console.log(`density lever: ${density.built.tris} tris at ${density.built.density}`
+    + ` -> ${density.low.tris} at 0.4 (${density.low.collidersOff} colliders off)`
+    + ` -> ${density.restored.tris} restored`);
+  // Bars, not targets. The lever only touches the random-placement scatter
+  // fields, so the merged ground, the walls, the buildings, the interiors and
+  // the street props it deliberately leaves alone put a ceiling on how much it
+  // can ever shed. Measured at build density 1.0: 971,794 -> 651,906 world
+  // (0.67) and 483,436 -> 200,378 frontier (0.41). The bars sit just outside
+  // those so a REGRESSION (the lever silently doing nothing, which is exactly
+  // what shipped) fails and ordinary tuning does not.
+  ok(density.low.tris <= density.built.tris * 0.75,
+    `a step to the low tier only shed ${density.built.tris - density.low.tris} of ${density.built.tris} triangles`);
+  ok(density.low.frontierTris <= density.built.frontierTris * 0.55,
+    `the Verge only shed ${density.built.frontierTris - density.low.frontierTris}`
+    + ` of ${density.built.frontierTris} triangles — its scatter is the largest single block in the world`);
+  ok(density.low.instances < density.built.instances,
+    'stepping down the tier did not reduce the drawn instance count');
+  ok(density.restored.tris === density.built.tris
+    && density.restored.instances === density.built.instances,
+    `stepping back up restored ${density.restored.tris}/${density.built.tris} triangles`);
+  ok(density.restored.collidersOff === 0,
+    `${density.restored.collidersOff} colliders stayed switched off after the tier came back up`);
+  ok(density.low.collidersOff > 0,
+    'no colliders were switched off — thinned bushes and trees are still solid');
+  ok(density.low.pushOutOfThinned === 0,
+    `a thinned instance still pushes a body ${density.low.pushOutOfThinned} m — invisible wall`);
+  ok(density.low.pushOutOfKept > 0,
+    'the probe found no live scatter collider at all — this phase is measuring nothing');
+
   // ---------------------------------------------------- the fallback path
   // Everything above ran with citykit.glb loaded. The procedural stand-ins are
   // what ships if the GLB ever fails to decode on a device, and a code path
@@ -548,7 +686,7 @@ try {
       blockBoxes: block.boxes.length,
       blockObstacles: block.obstacles.length,
       fieldIsInstanced: !!field.isInstancedMesh,
-      stats: (({ drawGroups, instances, triangles, portals }) => ({ drawGroups, instances, triangles, portals }))(plain.stats),
+      stats: (({ drawGroups, instances, triangles, portals, wildGates }) => ({ drawGroups, instances, triangles, portals, wildGates }))(plain.stats),
       calls: renderer.info.render.calls,
       heightMatches: (() => {
         const ray = new THREE.Raycaster(); ray.far = 400;
@@ -578,7 +716,10 @@ try {
   ok(fallback.facadeVerts > 0 && fallback.facadeHeight > 0, 'buildFacade produced nothing');
   ok(fallback.blockBoxes > 0 && fallback.blockObstacles > 0, 'buildBlock returned no collision');
   ok(fallback.fieldIsInstanced, 'makePropField did not return an InstancedMesh');
-  ok(fallback.stats.portals === 6, `the procedural city built ${fallback.stats.portals} portals`);
+  ok(fallback.stats.portals - fallback.stats.wildGates === 6,
+    `the procedural city built ${fallback.stats.portals - fallback.stats.wildGates} town portals`);
+  ok(fallback.stats.wildGates === 2,
+    `the procedural Verge built ${fallback.stats.wildGates} wild gates, spec says 2`);
   ok(fallback.calls > 10, `the procedural city only issued ${fallback.calls} draw calls — it is empty`);
   ok(fallback.heightMatches <= HEIGHT_TOLERANCE,
     `procedural city heightAt is off the mesh by ${fallback.heightMatches}`);

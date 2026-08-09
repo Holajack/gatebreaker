@@ -5,11 +5,20 @@ import { CityUI } from '../../ui/cityui.js';
 import { FLAT_GROUND } from '../physics.js';
 import { animateRig } from '../entities.js';
 import { GATES } from '../config.js';
+import { makeDayState } from '../../render/daynight.js';
 
 // How far past a portal's own radius the prompt still shows. Generous, because
 // a phone player steers with a thumb and "stand exactly here" is not a thing
 // you can ask of one.
 const PROMPT_SLACK = 2.2;
+
+// What is actually behind each service door, for the ones that lead somewhere.
+// Anything not listed falls through to 'NOT YET OPEN', which cityui.js softens
+// to 'CLOSED' — see its setPrompt.
+const INTERACT_SUB = {
+  assay: 'RIFT CONTRACTS',
+  exchange: 'WEAPONS FOR ASH',
+};
 
 // city.js drops the ground to y = -34 west of x = -88 so the world ends in a
 // view rather than a fence, and puts a parapet along the walled stretch of that
@@ -39,6 +48,24 @@ const CAM_MIN = 3.6;
 const CAM_PROBE_STEPS = 7;
 const EYE = 1.55;             // where the collision probe leaves the body
 
+// --- interiors -------------------------------------------------------------
+// WORLD_SPEC step 9: five service buildings are walked into, so the camera has
+// to come with you. Three numbers do all of it.
+//
+// The boom shortens to 5.0 m with the pitch preserved, which at the shipped 45
+// degrees puts the eye ~3.5 m above the floor and ~3.5 m back — above a 2 m
+// wall, inside a room 6-10 m across. Anything longer and the camera sits in the
+// street looking at a roofless box from outside.
+const CAM_INSIDE = 5.0;
+// Half of the spec's 0.5 m hysteresis band, applied either side of the
+// footprint edge. Without it the doorway threshold flickers the roof on and off
+// at walking pace, which is worse than either state.
+const INSIDE_HYST = 0.25;
+// The boom floor drops indoors: CAM_MIN 3.6 is most of CAM_INSIDE, so a blocked
+// probe would barely shorten the boom at all and the camera would stay wedged
+// in the wall it just hit.
+const CAM_MIN_INSIDE = 2.4;
+
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _want = new THREE.Vector3();
@@ -62,6 +89,16 @@ export class CityMode extends GameMode {
     this._camLook = new THREE.Vector3();
     this._camReady = false;
     this._compassT = 0;
+    // Which enterable the player is inside, as MODE state. It is deliberately
+    // not world state: the hysteresis band belongs to whoever is watching the
+    // player move, and two watchers with two thresholds flicker against each
+    // other at the doorway.
+    this._insideId = null;
+
+    // One DayState for the life of the mode. game.worldClock.sample() writes
+    // into it and allocates nothing, so the whole day/night system costs zero
+    // garbage per frame — the update loops in this repo are held to that.
+    this._day = makeDayState();
 
     // Bound once. physics.js calls these every step and an inline arrow here
     // would allocate two closures per entity per frame.
@@ -128,6 +165,12 @@ export class CityMode extends GameMode {
     g.state = 'playing';
     g.audio.music(false);
     this._prompt = null;
+    // A fresh City means fresh (visible) roofs; the stale id from the last visit
+    // would otherwise suppress the first _updateInside flip.
+    this._insideId = null;
+    // City.build assembles the town at its authored 15:00 look. Apply the real
+    // hour here so arriving at midnight does not flash one afternoon frame.
+    this._applyDay();
     this._syncHud();
   }
 
@@ -161,6 +204,22 @@ export class CityMode extends GameMode {
   exit() {
     const g = this.game;
     this.ui?.show(false);
+    // ...and then TAKE THE OVERLAY WITH US. registerMode('city') builds a NEW
+    // CityMode on every mount, so a CityUI that is only hidden here leaves its
+    // #cityUi div in the document forever: after one gate round trip the page
+    // has two #cityConfirm buttons, after ten it has eleven. Everything still
+    // *plays* — a real tap hits the live button's own listener — but the ids
+    // are duplicated, document.getElementById returns the dead one, and the
+    // node count grows without bound. Found by the step-12 sweep, which could
+    // not click the wild gate's confirm because it kept resolving the corpse.
+    this.ui?.dispose();
+    this.ui = null;
+    // Put every roof back BEFORE the City goes. Interiors.dispose() does it too
+    // and setInside is idempotent, but "roof-restore-on-exit races with
+    // dispose" is a named edge case in the spec and this is the one line that
+    // makes the race impossible rather than merely unlikely.
+    this.city?.interiors?.setInside(null);
+    this._insideId = null;
     this.city?.dispose();
     // Hand the body back to the arena environment so a gate does not start the
     // player standing on a heightfield that no longer exists.
@@ -170,12 +229,25 @@ export class CityMode extends GameMode {
     g.input.resetLook?.();
     this._prompt = null;
     this._camReady = false;
+    this._insideId = null;
   }
 
   // -------------------------------------------------------------- per frame
 
   updateAlways(dt) {
+    // Sample and apply BEFORE city.update: update() ends by snapping the shadow
+    // frustum along city._lightDir, and applying the day state afterwards would
+    // aim every frame's shadows along the previous frame's sun. The clock
+    // itself is ticked once, in game.update, for every mode.
+    this._applyDay();
     this.city?.update(dt, this.game.player.pos);
+  }
+
+  /** Push the current hour onto the city. Cheap enough to run behind a pause. */
+  _applyDay() {
+    const clock = this.game.worldClock;
+    if (!clock || !this.city) return;
+    this.city.applyDayState(clock.sample(this._day));
   }
 
   update(dt) {
@@ -221,6 +293,7 @@ export class CityMode extends GameMode {
     p.hp = Math.min(d.maxHp, p.hp + Math.max(d.hpRegen, d.maxHp * 0.05) * dt);
     p.mp = Math.min(d.maxMp, p.mp + Math.max(d.mpRegen, d.maxMp * 0.08) * dt);
 
+    this._updateInside();
     this._updatePrompt();
     this._updateDistrict();
     this._updateCompass(dt);
@@ -235,6 +308,27 @@ export class CityMode extends GameMode {
     g.player.yaw = Math.PI;
     g.ui.toast('THE OVERLOOK IS NOT A ROAD');
     this._camReady = false;
+  }
+
+  /**
+   * Am I indoors? Flip the roof, and remember it for the camera.
+   *
+   * The hysteresis is asymmetric on purpose: you have to get INSIDE_HYST inside
+   * the footprint before the roof lifts, and you have to get INSIDE_HYST clear
+   * of it before it drops back. The door cell is the only place the two
+   * thresholds are ever crossed in the same second, and 0.5 m of band is about
+   * a stride at hub walking speed.
+   */
+  _updateInside() {
+    const interiors = this.city?.interiors;
+    if (!interiors) { this._insideId = null; return; }
+    const p = this.game.player.pos;
+    const grow = this._insideId ? INSIDE_HYST : -INSIDE_HYST;
+    const hit = interiors.buildingAt(p, grow);
+    const id = hit ? hit.id : null;
+    if (id === this._insideId) return;
+    this._insideId = id;
+    interiors.setInside(id);
   }
 
   _updatePrompt() {
@@ -265,7 +359,10 @@ export class CityMode extends GameMode {
         id: it.id,
         locked: false,
         label: it.label,
-        sub: it.id === 'assay' ? 'RIFT CONTRACTS' : 'NOT YET OPEN',
+        // cityui.js rewrites 'NOT YET OPEN' to 'CLOSED' for the doors that
+        // still lead nowhere; the two that DO lead somewhere say what is
+        // behind them.
+        sub: INTERACT_SUB[it.id] || 'NOT YET OPEN',
       });
       return;
     }
@@ -324,16 +421,27 @@ export class CityMode extends GameMode {
     const p = g.player;
     const { yaw, pitch } = g.input.look;
 
+    // ONE scale factor for the whole rig indoors, and it has to be one: the
+    // first cut shortened only the boom and left the 3.4 m look-target bias
+    // alone, which at a 5 m boom put the camera 3.5 m straight up above the
+    // player's head looking at the floor. The bias exists to push the hero
+    // below centre on an 11.3 m boom; at 5 m it is two thirds of the rig.
+    // k = 1 outdoors, so the shipped camera is untouched bit for bit.
+    const inside = Boolean(this._insideId);
+    const boomLen = Math.hypot(CAM_OFFSET.y, CAM_OFFSET.z);
+    const k = inside ? CAM_INSIDE / boomLen : 1;
+    const bias = 3.4 * k;
+
     _v.copy(p.pos).addScaledVector(p.vel, 0.18);
     if (yaw === 0 && pitch === 0) {
       // Untouched orbit is the shipped camera, bit for bit — the branch every
       // scripted run exercises.
-      _v.z -= 3.4;
+      _v.z -= bias;
     } else {
       // Look-target bias slides along the camera's ground forward so the hero
       // sits below centre from every angle.
-      _v.x -= Math.sin(yaw) * 3.4;
-      _v.z -= Math.cos(yaw) * 3.4;
+      _v.x -= Math.sin(yaw) * bias;
+      _v.z -= Math.cos(yaw) * bias;
     }
     // A teleport (arrival, or a rescue off the cliff) must not be followed by a
     // 200 m camera sweep across the map. Snap instead.
@@ -341,13 +449,19 @@ export class CityMode extends GameMode {
     if (snap) { this._camLook.copy(_v); this._camReady = true; }
     this._camLook.lerp(_v, Math.min(1, dt * 6));
 
+    // Indoors the boom shortens but keeps its DIRECTION, so the pitch the
+    // player dragged survives walking through a door.
     if (yaw === 0 && pitch === 0) {
-      _want.copy(this._camLook).add(CAM_OFFSET);
+      _want.set(
+        this._camLook.x + CAM_OFFSET.x * k,
+        this._camLook.y + CAM_OFFSET.y * k,
+        this._camLook.z + CAM_OFFSET.z * k,
+      );
     } else {
       // CAM_OFFSET swung around Y by the drag; the boom probe below then
       // marches along this rotated boom, so buildings still push the camera
       // in no matter which side of the street it orbits to.
-      const boom = Math.hypot(CAM_OFFSET.y, CAM_OFFSET.z);
+      const boom = boomLen * k;
       const pa = Math.atan2(CAM_OFFSET.y, CAM_OFFSET.z) + pitch;
       _want.set(
         this._camLook.x + Math.sin(yaw) * boom * Math.cos(pa),
@@ -392,7 +506,8 @@ export class CityMode extends GameMode {
       const y = from.y + EYE + (_probe.y - EYE) * t;
       const z = from.z + _probe.z * t;
       if (this._boomBlocked(x, y, z)) {
-        return Math.max(CAM_MIN, full * ((i - 1) / CAM_PROBE_STEPS));
+        const floor = this._insideId ? CAM_MIN_INSIDE : CAM_MIN;
+        return Math.max(floor, full * ((i - 1) / CAM_PROBE_STEPS));
       }
     }
     return 0;
@@ -403,7 +518,18 @@ export class CityMode extends GameMode {
     if (y < city.heightAt(x, z) + 0.6) return true;
     // Buildings carry no height in `boxes`, and every one of them is taller
     // than the boom ever gets, so an XZ test is the correct test.
+    //
+    // EXCEPT the building you are standing in. Its walls are wall-RUN boxes
+    // (0.2 m slabs on the slab lines), the boom from a player inside crosses
+    // one of them on its way up and out, and the height-free test cannot know
+    // the camera is above a 2 m wall whose roof is currently hidden. So the
+    // occupied building's own boxes are skipped: without this the boom collapses
+    // to CAM_MIN the moment you cross the threshold and the camera sits in the
+    // doorway looking at the back of your head. Every OTHER building still
+    // blocks, including the other four enterables.
+    const inside = this._insideId;
     for (const b of city.boxes) {
+      if (inside && b.interiorId === inside) continue;
       if (Math.abs(x - b.x) < b.w / 2 + 0.4 && Math.abs(z - b.z) < b.d / 2 + 0.4) return true;
     }
     return false;
@@ -429,6 +555,14 @@ export class CityMode extends GameMode {
       }
       g.enterGate(prompt.rank);
       return { action: 'enterGate', rank: prompt.rank };
+    }
+
+    if (prompt.id === 'exchange') {
+      // The weapon shop. game.shopUI is constructed once in main.js and
+      // outlives this mode, so opening it neither builds DOM nor touches the
+      // scene — the city keeps ticking behind the panel, and the panel's own
+      // backdrop is what stops the thumbstick underneath it.
+      if (g.shopUI?.open()) return { action: 'open', id: 'exchange' };
     }
 
     if (prompt.id === 'assay') {

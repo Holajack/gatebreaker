@@ -37,7 +37,46 @@ export function freshSave() {
     deaths: 0,
     weapon: null,
     stash: [],
+    // The Exchange's memory: which rank band the shelf was rolled for, and
+    // which of that band's bases have already been bought. band -1 means "no
+    // shelf rolled yet", which is what every save written before the shop
+    // existed reads as — game/shop.js ensureShopSave() is the migration and it
+    // runs on first contact, so this field is a convenience, not a contract.
+    // Deliberately NOT a schema bump: an absent value is indistinguishable
+    // from this one.
+    shop: { band: -1, sold: [] },
+    // World clock, hours as a 0..24 float. 15.0 is the shipped afternoon look,
+    // so a save from before day/night existed resumes in the frame the game
+    // has always opened on. Deliberately NOT a schema bump: a missing field
+    // reads as 15.0 and that is the whole migration.
+    worldTime: 15.0,
   };
+}
+
+// The clock is written every save cadence and read back on boot, so a
+// hand-edited or corrupted value must not put the world at hour NaN.
+function sanitiseHours(v) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 15.0;
+  const w = v % 24;
+  return w < 0 ? w + 24 : w;
+}
+
+// Ash is real money now (game/shop.js gave the field its first income source),
+// so a corrupted or hand-edited wallet must not reach the shop as NaN — every
+// comparison against NaN is false, which would make everything unaffordable
+// AND make the balance render as "NaN ASH".
+function sanitiseAsh(v) {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return 0;
+  return Math.floor(v);
+}
+
+// Structural only. Whether a `sold` entry names a weapon that still exists is
+// game/shop.js's business — this module deliberately does not import weapons.js
+// (which pulls in THREE) merely to validate a string.
+function sanitiseShop(v) {
+  const band = (v && typeof v.band === 'number' && Number.isFinite(v.band)) ? Math.floor(v.band) : -1;
+  const sold = (v && Array.isArray(v.sold)) ? v.sold.filter((s) => typeof s === 'string') : [];
+  return { band, sold };
 }
 
 /**
@@ -58,6 +97,9 @@ export function migrate(raw) {
       ...raw,
       version: SCHEMA_VERSION,
       playerBody,
+      worldTime: sanitiseHours(raw.worldTime),
+      ash: sanitiseAsh(raw.ash),
+      shop: sanitiseShop(raw.shop),
       stats: { ...base.stats, ...(raw.stats || {}) },
       cleared: { ...(raw.cleared || {}) },
       daily: { ...base.daily, ...(raw.daily || {}) },
@@ -78,6 +120,9 @@ export function migrate(raw) {
     version: SCHEMA_VERSION,
     playerBody,
     level,
+    worldTime: sanitiseHours(raw.worldTime),
+    ash: sanitiseAsh(raw.ash),
+    shop: sanitiseShop(raw.shop),
     stats: { ...base.stats, ...(raw.stats || {}) },   // seeds per:0
     cleared: { ...(raw.cleared || {}) },
     daily: { ...base.daily },

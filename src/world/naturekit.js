@@ -235,6 +235,8 @@ export class NatureField {
     this.meshes = [];
     this.offsets = [];
     this._count = 0;
+    // How many of the placed instances are currently DRAWN. See setDensity.
+    this._live = 0;
     const parts = naturePieceParts(this.key);
     for (let i = 0; i < parts.length; i++) {
       this.offsets.push(parts[i].offset || _identity);
@@ -279,6 +281,7 @@ export class NatureField {
 
   /** Must run once after the last add(), or three renders zero instances. */
   finalize() {
+    this._live = this._count;
     for (const m of this.meshes) {
       m.count = this._count;
       m.instanceMatrix.needsUpdate = true;
@@ -287,7 +290,60 @@ export class NatureField {
     return this;
   }
 
+  /** How many instances are actually being drawn right now. */
+  get live() { return this._live; }
+
+  /**
+   * THE RUNTIME DENSITY LEVER.
+   *
+   * Instance counts used to be a BUILD-TIME choice only: the quality governor
+   * read instanceScale once, sized every field, and a device it later judged to
+   * be struggling kept every triangle it had until the player next re-entered
+   * the city from a gate. This wave's city+frontier session need never do that,
+   * so a stepped-down phone was stuck with ~half a million triangles it had
+   * already been told it could not afford.
+   *
+   * InstancedMesh.count is runtime-writable and costs nothing to change: no
+   * reallocation, no new geometry, no shader-program change (the program cache
+   * key does not include the instance count). So a tier step truncates the
+   * drawn prefix instead of rebuilding the world.
+   *
+   * A PREFIX IS ONLY HONEST WHERE PLACEMENT ORDER IS SPATIALLY RANDOM. It is,
+   * for every field this is used on: city._buildNature and Frontier._buildScatter
+   * both sample candidate points from the whole area with the seeded stream, so
+   * the tail is a uniform random subset (clumped species drop whole clumps,
+   * which reads better than thinning every clump). It is NOT true of street-
+   * ordered KitField props — thinning those from the tail would darken one
+   * quarter of town — which is why the lever lives here and the callers pass an
+   * explicit list rather than "every field".
+   *
+   * `d` is relative to what was BUILT, so 1 restores everything and values above
+   * 1 cannot invent instances that were never placed.
+   */
+  setDensity(d) {
+    const f = Number.isFinite(d) ? Math.max(0, Math.min(1, d)) : 1;
+    const live = Math.min(this._count, Math.round(this._count * f));
+    if (live === this._live) return this;
+    this._live = live;
+    for (const m of this.meshes) m.count = live;
+    return this;
+  }
+
   get triangles() {
+    let t = 0;
+    for (const m of this.meshes) {
+      const g = m.geometry;
+      const n = g.index ? g.index.count : (g.attributes.position?.count || 0);
+      // LIVE, not placed: this number feeds city.stats, and a triangle budget
+      // that ignores the density lever would report the cost of a frame the
+      // renderer is no longer drawing.
+      t += Math.floor(n / 3) * this._live;
+    }
+    return t;
+  }
+
+  /** What this field costs at full density — the denominator for a shed ratio. */
+  get trianglesFull() {
     let t = 0;
     for (const m of this.meshes) {
       const g = m.geometry;
@@ -307,6 +363,7 @@ export class NatureField {
     }
     this.meshes.length = 0;
     this._count = 0;
+    this._live = 0;
   }
 }
 

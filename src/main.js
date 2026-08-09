@@ -10,6 +10,7 @@ import { preloadCharacters, characterStats } from './game/entities.js';
 import { FrameClock } from './core/frameclock.js';
 import { AppState } from './core/appstate.js';
 import { preloadCity } from './world/city.js';
+import { ShopUI } from './ui/shopui.js';
 
 const canvas = document.getElementById('scene');
 const audio = new Audio();
@@ -81,6 +82,13 @@ const game = new Game({
 });
 ui.game = game;
 
+// The Exchange's counter. Constructed once, here, rather than by CityMode:
+// CityMode is torn down and rebuilt on every city entry, and a panel that
+// rebuilt its DOM on each of those would leak a #shop node per visit. It hangs
+// off the game so citymode.confirmPrompt can reach it without importing the UI
+// layer. Deliberately NOT an AppState screen — see the header of shopui.js.
+game.shopUI = new ShopUI({ game, audio });
+
 // ui.js still owns the gate-list DOM; main.js owns where its two entry points
 // lead. Both of them — the title's play button and the results panel's
 // CONTINUE — used to open that list, and both should now put you in the city.
@@ -115,6 +123,11 @@ function handleBack() {
     game.pause(false);
     return;
   }
+  // The shop rides with the other classList-toggled overlays: back / Escape
+  // closes the panel and leaves you standing in the doorway you opened it
+  // from, which is what walking out of a shop means. It closes through its own
+  // method rather than ui.hide so its isOpen flag cannot go stale.
+  if (game.shopUI?.isOpen) { game.shopUI.close(); return; }
   for (const id of ['how', 'levelup']) {
     const el = document.getElementById(id);
     if (el && !el.classList.contains('hidden')) { ui.hide(id); return; }

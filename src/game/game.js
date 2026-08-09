@@ -16,6 +16,7 @@ import {
   grantXp, shadowFieldCapacity, extractionChance,
   MAX_EXTRACT_ATTEMPTS, CORPSE_WINDOW,
 } from './progression.js';
+import { ashForXp, grantAsh } from './shop.js';
 import {
   autoDeploy, deployedRecords, addShadow, makeShadow, releaseWeakest,
   shadowCombat, rosterSummary,
@@ -28,6 +29,7 @@ import {
 // creature off the roster, which is a call shape makeHumanoid cannot express.
 import { makeCreature, creaturesReady, creatureFor } from '../render/creatures.js';
 import { Glow, GLOW_LAYER } from '../render/glow.js';
+import { WorldClock, bootBias } from '../render/daynight.js';
 import { Quality } from '../core/quality.js';
 import { attachBody, applyKnockback, FLAT_GROUND } from './physics.js';
 import { createMode } from './modes/mode.js';
@@ -75,7 +77,23 @@ export class Game {
     this.audio = audio;
     this.ui = ui;
     this.save = saveData;
-    this.onSave = onSave;
+    // The world clock is the ONE source of time of day. It lives here rather
+    // than on citymode so a gate run keeps advancing it: walking out of a
+    // cleared dungeon into a sunset you did not see arrive is the whole point,
+    // and it costs a single float. Gate modes tick it and apply nothing —
+    // a rift has no sun.
+    //
+    // bootBias turns a cold start in the small hours into a sunrise. A player
+    // who quit at midnight should not be handed a black screen for their
+    // trouble; a session resumed at any other hour resumes exactly there.
+    this.worldClock = new WorldClock({ hours: bootBias(saveData?.worldTime ?? 15) });
+    // Wrapped rather than chased through seven onSave() call sites: the clock
+    // has to reach the save on the EXISTING cadence, and adding an eighth
+    // place that must remember to write it is how that field goes stale.
+    this.onSave = () => {
+      this.save.worldTime = this.worldClock.hours;
+      onSave();
+    };
     // The screen router and the frame pacer. Both are optional so the headless
     // tools that construct a bare Game still work.
     this.appState = appState;
@@ -200,6 +218,16 @@ export class Game {
       }
     }
     this.fx?.setBudget(Math.round(420 * t.particleScale));
+    // THE FENCE THAT WAS NOT CONNECTED. Every lever above is a per-frame or
+    // per-material setting; the tier's instanceScale was read once at build and
+    // never again, so a device this governor had just judged to be struggling
+    // kept the scatter density of the tier it was struggling AT until the player
+    // next re-entered the city from a gate. City.setInstanceDensity truncates
+    // each sheddable field's drawn instance range in place — no rebuild, no
+    // reallocation, no shader recompile — and switches the matching colliders
+    // off with them. Optional-chained through the mode because only the city
+    // mode owns a City; gate modes have no scatter to thin.
+    this._mode?.city?.setInstanceDensity?.(t.instanceScale);
   }
 
   _restoreContext() {
@@ -448,6 +476,7 @@ export class Game {
     this.boss = null;
     this.runTime = 0;
     this.xpEarned = 0;
+    this.ashEarned = 0;
     this.spawnTimer = 0;
     this.levelsGained = 0;
     this.pointsGained = 0;
@@ -849,6 +878,13 @@ export class Game {
 
   gainXp(amount) {
     this.xpEarned += amount;
+    // Ash rides the same event as XP. save.ash has had two sinks (respec,
+    // shadow promotion) and no source since the v1 schema; the Exchange is the
+    // third sink and the reason it finally needs an income. Granting it HERE
+    // rather than at the kill site means every existing XP payer — trash,
+    // bosses, the daily — pays ash too, with no second bookkeeping path to
+    // fall out of sync.
+    this.ashEarned = (this.ashEarned || 0) + grantAsh(this.save, ashForXp(amount));
     const fromLevel = this.save.level;
     // progression.grantXp owns the level loop: it is the only place that also
     // increments save.autoStats, and the +1-to-every-stat grant silently never
@@ -1125,6 +1161,13 @@ export class Game {
     const dt = Math.min(rawDt, 0.05);
     this.time += dt;
     this._frameDt = dt;
+    // ONE tick site for every mode and for no mode at all. WORLD_SPEC describes
+    // each mode ticking its own clock; a single call here is the same behaviour
+    // with one fewer way to get it wrong — two modes mounted during a handover
+    // would otherwise double the day length, and nothing would report it.
+    // Deliberately outside the `state === 'playing'` gate: time passes while a
+    // menu is up, which is what makes the hub feel like a place.
+    this.worldClock.tick(dt);
     // Atmosphere runs behind a pause, exactly as `this.world.update(dt)` did
     // when it sat here unconditionally.
     this._mode?.updateAlways(dt);
@@ -1861,6 +1904,7 @@ export class Game {
         ['Time', `${Math.floor(t / 60)}m ${t % 60}s${isBest ? '  (BEST)' : ''}`],
         ['Kills', String(this.player.kills)],
         ['Essence gained', `${this.xpEarned} XP`],
+        ['Ash recovered', `${this.ashEarned || 0}`],
         ['Levels gained', this.levelsGained ? `+${this.levelsGained}` : 'none'],
         ['Stat points earned', this.pointsGained ? `+${this.pointsGained}` : 'none'],
         ['Breaker level', `${this.save.level}  (${rankOf(this.save.level)}-grade)`],
@@ -1904,6 +1948,7 @@ export class Game {
         ['Progress', `${this.killed} / ${this.gate.enemies} cleared`],
         ['Kills', String(this.player.kills)],
         ['Essence kept', `${this.xpEarned} XP`],
+        ['Ash recovered', `${this.ashEarned || 0}`],
         ['Levels gained', this.levelsGained ? `+${this.levelsGained}` : 'none'],
         ['Stat points earned', this.pointsGained ? `+${this.pointsGained}` : 'none'],
         ['Soldiers lost', lost.length ? `${lost.length} released` : 'none'],

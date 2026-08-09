@@ -21,12 +21,39 @@ import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 
 const W = 64, H = 32;   // PMREM blurs this heavily; more resolution is wasted.
 
-function makeEnvSource(biome) {
+// INTERIOR CONSTANTS — the dungeon branch only; the exterior/fallback path
+// below is byte-for-byte what it always was.
+//
+// A rift interior has no sky. The exterior source's job is "what does the dome
+// above this arena radiate"; the interior's job is "what bounces around this
+// stone box", and those are different images. The shipped 1.4 crawl fed the
+// dark sky/fog/ground hexes straight in, so the indirect term was effectively
+// zero and every surface the single key light missed rendered black — the
+// defect the reviewers photographed. Three deliberate differences:
+//
+//  1. AMBIENT FLOOR: no direction is ever pure black indoors. Real enclosed
+//     rock still returns a few percent from every direction, and this is the
+//     term that puts a readable value on the wall the key does not reach.
+//  2. FLOOR BOUNCE: the lower hemisphere is the BRIGHT one, lifted off the
+//     floor colour. Torchlight indoors bounces up, which is also what lands
+//     under a character's chin and stops bodies reading as silhouettes.
+//  3. A SMALLER HOT SOURCE: the exterior's 24x rift spike is a sun stand-in.
+//     Indoors that one blazing direction just blows out whichever facet
+//     happens to face it, so it drops to a torch-sized highlight.
+const INTERIOR_AMBIENT = 0.038;   // linear, added to every texel
+const INTERIOR_BOUNCE = 1.9;      // floor-colour gain for the lower hemisphere
+const INTERIOR_SPIKE = 7;         // vs 24 outdoors
+
+function makeEnvSource(biome, interior = false) {
   const data = new Uint16Array(W * H * 4);
   const zenith = new THREE.Color(biome.sky).convertSRGBToLinear();
   const horizon = new THREE.Color(biome.fog).convertSRGBToLinear();
   const ground = new THREE.Color(biome.ground).convertSRGBToLinear();
   const accent = new THREE.Color(biome.accent).convertSRGBToLinear();
+  const bounce = ground.clone().multiplyScalar(INTERIOR_BOUNCE)
+    .lerp(accent, 0.12);            // a little of the biome's own light in it
+  const spike = interior ? INTERIOR_SPIKE : 24;
+  const amb = interior ? INTERIOR_AMBIENT : 0;
   const c = new THREE.Color();
   const half = THREE.DataUtils.toHalfFloat;
 
@@ -36,7 +63,12 @@ function makeEnvSource(biome) {
     for (let x = 0; x < W; x++) {
       const u = (x + 0.5) / W;
 
-      if (t >= 0) c.copy(horizon).lerp(zenith, Math.pow(t, 0.55));
+      if (interior) {
+        // Ceiling (t>0) is the dim half — it is rock, not sky; the floor half
+        // carries the bounce.
+        if (t >= 0) c.copy(horizon).lerp(zenith, Math.pow(t, 0.8) * 0.75);
+        else c.copy(horizon).lerp(bounce, Math.pow(-t, 0.55));
+      } else if (t >= 0) c.copy(horizon).lerp(zenith, Math.pow(t, 0.55));
       else c.copy(horizon).lerp(ground, Math.pow(-t, 0.7));
 
       // One hot rift source. Pushing it far above 1.0 is what gives metal a
@@ -50,9 +82,9 @@ function makeEnvSource(biome) {
       const fill = Math.exp(-(dAz2 * dAz2) / 0.06) * Math.max(0, t) * 0.55;
 
       const i = (y * W + x) * 4;
-      data[i] = half(c.r * (1 + fill) + accent.r * gl * 24);
-      data[i + 1] = half(c.g * (1 + fill) + accent.g * gl * 24);
-      data[i + 2] = half(c.b * (1 + fill) + accent.b * gl * 24);
+      data[i] = half(c.r * (1 + fill) + accent.r * gl * spike + amb);
+      data[i + 1] = half(c.g * (1 + fill) + accent.g * gl * spike + amb);
+      data[i + 2] = half(c.b * (1 + fill) + accent.b * gl * spike + amb);
       data[i + 3] = half(1);
     }
   }
@@ -154,7 +186,7 @@ export function getHdriTexture() { return _hdriTexture; }
 export function buildBiomeEnvironment(renderer, biome, { interior = false } = {}) {
   const gen = pmrem(renderer);
   if (_hdriTexture && !interior) return gen.fromEquirectangular(_hdriTexture);
-  const src = makeEnvSource(biome);
+  const src = makeEnvSource(biome, interior);
   const rt = gen.fromEquirectangular(src);
   src.dispose();
   return rt;

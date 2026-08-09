@@ -156,6 +156,7 @@ export class UI {
       <div class="row"><span>Mana</span><b>${d.maxMp}</b></div>
       <div class="row"><span>Crit</span><b>${(d.crit * 100).toFixed(1)}%</b></div>
       <div class="row"><span>Unspent points</span><b>${s.points}</b></div>
+      <div class="row"><span>Ash</span><b>${Math.floor(s.ash || 0)}</b></div>
       <div class="row"><span>Cinderbound</span><b>${this.game.shadows.length} afield · ${roster.count}/${roster.capacity} bound</b></div>
       <div class="row"><span>Strongest</span><b>${roster.strongest ? roster.strongest.name : '—'}</b></div>
       <div class="row"><span>Total kills</span><b>${s.totalKills}</b></div>

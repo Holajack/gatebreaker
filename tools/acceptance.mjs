@@ -11,6 +11,16 @@
 //   3. Can I still walk through the rocks?
 //   4. Do the characters look like people, or like glowing outlines?
 //
+// Section 5 is WORLD_SPEC step 12, the wave-2 sweep, and it asks the same kind
+// of question about everything this wave added — not "does the module compute
+// the right number" (the per-step suites own that) but "can a person do the
+// thing, in the shipped build, in one continuous session":
+//
+//   5. Does the clock advance and survive a restart? Can he walk out of town
+//      onto the frontier without falling through a seam? Is a wild gate really
+//      enterable? Can he walk into a building and back out? Does the bound
+//      companion turn up? Does buying a weapon stick across a reload?
+//
 // Everything here is measured on the live scene graph, not inferred. The
 // screenshots at the end are the ones a human has to open and judge.
 
@@ -26,6 +36,38 @@ const ok = (name, pass, detail = '') => {
   return Boolean(pass);
 };
 const note = (s) => console.log(`  ${s}`);
+
+/**
+ * Drive the player with the exact vector the thumbstick writes, in real page
+ * time, until he is within `stopWithin` of the target or the clock runs out.
+ * Real frames, not a stepped loop: section 5 is about what a person can do.
+ */
+async function walkTo(page_, tx, tz, { timeoutMs = 25000, stopWithin = 1.0 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await page_.evaluate(([gx, gz]) => {
+      const g = window.__game;
+      const p = g.player.pos;
+      const dx = gx - p.x, dz = gz - p.z;
+      const d = Math.hypot(dx, dz);
+      g.input.move.x = d > 0.001 ? dx / d : 0;
+      g.input.move.y = d > 0.001 ? -dz / d : 0;
+      return { d: +d.toFixed(2), x: +p.x.toFixed(1), z: +p.z.toFixed(1) };
+    }, [tx, tz]);
+    if (last.d < stopWithin) break;
+    await page_.waitForTimeout(90);
+  }
+  await page_.evaluate(() => { window.__game.input.move.x = 0; window.__game.input.move.y = 0; });
+  return last;
+}
+
+/** Walk the title -> PLAY -> city path and wait until CityMode is live. */
+async function enterCityUi(page_, { waitMs = 900 } = {}) {
+  await page_.click('#btnPlay');
+  await page_.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 30000 });
+  await page_.waitForTimeout(waitMs);
+}
 
 const server = await ensureServer();
 const browser = await launchBrowser();
@@ -337,6 +379,28 @@ try {
     back.mode === 'city' && back.grounded && back.enemies === 0,
     JSON.stringify(back));
 
+  // --- and he was PAID for it -------------------------------------------
+  //
+  // save.ash has existed since the v1 schema with two sinks (respec, shadow
+  // promotion) and no source — nothing ever incremented it, so both sinks were
+  // unreachable. The Exchange is the third sink and the reason it finally has
+  // an income, granted alongside XP in game.gainXp. This is the end-to-end
+  // proof that clearing a gate actually pays: the shop section below funds the
+  // wallet directly so it can reach the expensive rows, which would otherwise
+  // hide a broken earner.
+  const wallet = await evalGame(page, (g) => ({
+    ash: g.save.ash,
+    ashEarned: g.ashEarned || 0,
+    xpEarned: g.xpEarned,
+    stored: (() => {
+      try { return JSON.parse(localStorage.getItem('gatebreaker.save.v2') || '{}').ash; } catch { return null; }
+    })(),
+  }));
+  report.wallet = wallet;
+  ok('clearing a gate pays ash, and the wallet is persisted',
+    wallet.ash > 0 && wallet.ashEarned > 0 && wallet.stored === wallet.ash,
+    `${wallet.ashEarned} ash for ${wallet.xpEarned} XP, wallet ${wallet.ash}, stored ${wallet.stored}`);
+
   // --- the shot that matters most: the city at eye level on arrival ---
   await page.evaluate(() => {
     const g = window.__game;
@@ -357,6 +421,575 @@ try {
   });
   await page.waitForTimeout(400);
   await page.screenshot({ path: shotPath('acc-05-city-eye-left.png') });
+
+  // ======================================= 5. WORLD_SPEC STEP 12 — THE SWEEP
+  console.log('\n5. THE WORLD: CLOCK, FRONTIER, DOORS, COMPANION, SHOP\n');
+
+  // ---- 5a. the clock advances, and it is the SAME light rig all day --------
+  //
+  // WORLD_SPEC decision 1 is the load-bearing one here: the sun and the moon
+  // are the same DirectionalLight, and the light COUNT plus the shadow-casting
+  // count are part of three's program cache key. So this measures the clock
+  // moving AND the rig not changing shape while it does.
+  //
+  // The rig is THREE lights, not two: one hemi, one directional (sun AND moon),
+  // and the shipped 'heroLight' PointLight that follows the player and has
+  // nothing to do with the clock. It is counted so that a fourth appearing
+  // would fail, not waved through.
+  //
+  // PROGRAM COUNT IS SAMPLED AT THE SAME HOUR, before and after — that is the
+  // spec's wording and it is the only version that means anything. Comparing
+  // 15:00 against 21:30 in a city that was rebuilt ten seconds ago measures
+  // three.js compiling materials as they first come into view, not the clock
+  // recompiling anything; the first cut of this check did exactly that and
+  // reported a false 96 -> 104.
+  const lightRigProbe = () => {
+    const g = window.__game;
+    let dir = 0, hemi = 0, other = 0, casters = 0;
+    g.scene.traverse((o) => {
+      if (!o.isLight) return;
+      if (o.isDirectionalLight) dir++;
+      else if (o.isHemisphereLight) hemi++;
+      else other++;
+      if (o.castShadow) casters++;
+    });
+    const k = g.mode.city?.key;
+    return {
+      hours: +g.worldClock.hours.toFixed(3),
+      intensity: k ? +k.intensity.toFixed(3) : null,
+      colour: k ? k.color.getHex() : null,
+      rig: { dir, hemi, other, casters },
+      programs: g.renderer.info.programs.length,
+    };
+  };
+
+  // Settle at the shipped 15:00 look and let the renderer finish compiling
+  // whatever the fresh city still owes before anything is counted.
+  await page.evaluate(() => {
+    const g = window.__game;
+    g.worldClock.setHours(15);
+    for (let i = 0; i < 60; i++) g.update(1 / 60);
+  });
+  await page.waitForTimeout(2500);
+  const noon = await page.evaluate(lightRigProbe);
+
+  // 24 real minutes is one 24 h day, so 60 s of game time is one hour. Ticked
+  // through game.update, because that is the ONLY thing that advances the
+  // clock in the shipped build — a bare setHours would prove nothing about the
+  // wiring. dt is game.update's own 0.05 clamp, so 1200 steps is exactly 60 s
+  // of game time and not 1200 frames of guesswork.
+  const advanced = await page.evaluate(() => {
+    const g = window.__game;
+    for (let i = 0; i < 1200; i++) g.update(0.05);
+    return +g.worldClock.hours.toFixed(3);
+  });
+
+  // Deep dusk for the LOOK sample, and the hour that gets persisted.
+  await page.evaluate(() => {
+    const g = window.__game;
+    g.worldClock.setHours(21.5);
+    for (let i = 0; i < 60; i++) g.update(1 / 60);
+  });
+  await page.waitForTimeout(2500);
+  const dusk = await page.evaluate(lightRigProbe);
+  const storedHour = await page.evaluate(() => {
+    window.__game.onSave();
+    try { return JSON.parse(localStorage.getItem('gatebreaker.save.v2') || '{}').worldTime; } catch { return null; }
+  });
+  await page.screenshot({ path: shotPath('acc-06-city-night.png'), timeout: 90000 });
+
+  // ...and back to 15:00, then round AGAIN.
+  //
+  // Two swings, because one cannot tell the two failure modes apart. Going
+  // 15:00 -> 21:30 for the first time in a session legitimately compiles a
+  // handful of programs: night materials and their depth variants enter the
+  // shadow frustum for the first time and three compiles them once, which is
+  // what a program cache is FOR. What must never happen is the same swing
+  // compiling them AGAIN — that is the light-count cache invalidation
+  // WORLD_SPEC decision 1 exists to prevent, and it shows up as the second
+  // lap costing programs too. So: lap one is reported, lap two is asserted.
+  const swing = async () => {
+    await page.evaluate(() => {
+      const g = window.__game;
+      g.worldClock.setHours(21.5);
+      for (let i = 0; i < 60; i++) g.update(1 / 60);
+    });
+    await page.waitForTimeout(1600);
+    await page.evaluate(() => {
+      const g = window.__game;
+      g.worldClock.setHours(15);
+      for (let i = 0; i < 60; i++) g.update(1 / 60);
+    });
+    await page.waitForTimeout(1600);
+    return page.evaluate(lightRigProbe);
+  };
+  const backToNoon = await swing();
+  const secondLap = await swing();
+
+  report.clock = { noon, advancedHours: advanced, dusk, backToNoon, secondLap, storedHour };
+  note(`clock ${noon.hours} h -> ${advanced} h -> ${dusk.hours} h · key ${noon.intensity} -> ${dusk.intensity}`
+    + ` · rig ${JSON.stringify(dusk.rig)} · programs ${noon.programs} -> ${dusk.programs} -> ${backToNoon.programs} -> ${secondLap.programs}`);
+  ok('the world clock advances while you stand in the city',
+    advanced - noon.hours > 0.8 && advanced - noon.hours < 1.2,
+    `${noon.hours} h -> ${advanced} h over 60 s of game time (expect ~1 h)`);
+  ok('the light actually re-tints with the hour',
+    dusk.intensity !== noon.intensity || dusk.colour !== noon.colour,
+    `intensity ${noon.intensity} -> ${dusk.intensity}, colour ${noon.colour} -> ${dusk.colour}`);
+  ok('the sun and the moon are the SAME light — count and casters never change',
+    JSON.stringify(noon.rig) === JSON.stringify(dusk.rig)
+      && JSON.stringify(noon.rig) === JSON.stringify(secondLap.rig)
+      && dusk.rig.dir === 1 && dusk.rig.casters === 1,
+    `${JSON.stringify(noon.rig)} -> ${JSON.stringify(dusk.rig)}`);
+  note(`first swing into the dark cost ${dusk.programs - noon.programs} one-time program compiles`);
+  ok('a SECOND day/night lap compiles nothing new — the shader cache is not being invalidated',
+    secondLap.programs <= backToNoon.programs,
+    `${noon.programs} at 15:00 -> ${dusk.programs} at 21.5 h -> ${backToNoon.programs} after lap 1 -> ${secondLap.programs} after lap 2`);
+  ok('the hour is written to the save',
+    typeof storedHour === 'number' && Math.abs(storedHour - dusk.hours) < 0.05,
+    `stored ${storedHour}`);
+
+  // ---- 5b. the frontier is walkable and the seam is not a ledge ------------
+  const seam = await evalGame(page, (g) => {
+    const city = g.mode.city;
+    let jump = 0, at = null;
+    // 120 radial sweeps outward across the blend band in 0.25 m steps — the
+    // step a walking body takes in one frame at hub speed. The west cliff
+    // (x < -88) is a real drop and is deliberately skipped.
+    for (let k = 0; k < 120; k++) {
+      const a = (k / 120) * Math.PI * 2;
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const m = Math.max(Math.abs(ca), Math.abs(sa));
+      let prev = null;
+      for (let r = 150; r <= 205; r += 0.25) {
+        const x = (r * ca) / m, z = (r * sa) / m;
+        if (x < -88) { prev = null; continue; }
+        const h = city.heightAt(x, z);
+        if (!Number.isFinite(h)) return { jump: Infinity, at: { x, z }, nan: true };
+        if (prev != null && Math.abs(h - prev) > jump) {
+          jump = Math.abs(h - prev);
+          at = { x: +x.toFixed(1), z: +z.toFixed(1) };
+        }
+        prev = h;
+      }
+    }
+    return { jump: +jump.toFixed(3), at, nan: false, hasFrontier: Boolean(city.frontier) };
+  });
+  report.seam = seam;
+  ok('the city has a frontier at all', seam.hasFrontier, String(seam.hasFrontier));
+  ok('heightAt is continuous across the wall seam — no ledge to fall off',
+    !seam.nan && seam.jump < 0.35, `worst step ${seam.jump} m at ${JSON.stringify(seam.at)}`);
+
+  // Now WALK it, on the thumbstick, out of the north gate and onto the Verge.
+  await page.evaluate(() => {
+    const g = window.__game;
+    g.player.body.reset(0, g.mode.city.heightAt(0, -40) + 0.2, -40);
+    g.mode._camReady = false;
+  });
+  await page.waitForTimeout(250);
+  const outward = await page.evaluate(async () => {
+    const g = window.__game;
+    let minY = Infinity, markX = 0, markZ = -40, strafe = 0, side = 1;
+    // Steer at a far target and strafe when wedged — a body driven dead-on
+    // into a round prop stalls forever with no lateral component to slide on,
+    // which is exactly what a player's thumb works around.
+    for (let i = 0; i < 60 * 60; i++) {
+      const p = g.player.pos;
+      let dx = 0 - p.x, dz = -320 - p.z;
+      const len = Math.hypot(dx, dz) || 1;
+      dx /= len; dz /= len;
+      if (strafe > 0) { const t = dx; dx = -dz * side; dz = t * side; strafe--; }
+      g.input.move.x = dx;
+      g.input.move.y = -dz;
+      g.mode.update(1 / 60);
+      if (p.y < minY) minY = p.y;
+      if (i > 0 && i % 120 === 0) {
+        if (Math.hypot(p.x - markX, p.z - markZ) < 0.5 && strafe === 0) { strafe = 45; side = -side; }
+        markX = p.x; markZ = p.z;
+      }
+    }
+    g.input.move.x = 0; g.input.move.y = 0;
+    const p = g.player.pos;
+    return {
+      x: +p.x.toFixed(1), z: +p.z.toFixed(1), y: +p.y.toFixed(2),
+      minY: +minY.toFixed(2),
+      grounded: g.player.body.grounded,
+      groundY: +g.mode.city.heightAt(p.x, p.z).toFixed(2),
+    };
+  });
+  report.frontierWalk = outward;
+  note(`walked north to (${outward.x}, ${outward.z}) y=${outward.y} ground=${outward.groundY} minY=${outward.minY}`);
+  ok('walking north out of town puts him on the frontier, on his feet',
+    outward.z < -160 && outward.grounded && Math.abs(outward.y - outward.groundY) < 0.6,
+    `ended z=${outward.z}, grounded=${outward.grounded}`);
+  ok('he never fell through the world on the way out',
+    outward.minY > -30, `lowest y was ${outward.minY}`);
+  await page.screenshot({ path: shotPath('acc-07-frontier.png'), timeout: 90000 });
+
+  // ---- 5c. a wild gate is enterable ---------------------------------------
+  const wild = await page.evaluate(async () => {
+    const g = window.__game;
+    // A wild gate is rank-locked like any other; the sweep is about whether it
+    // can be walked into, so unlock the ladder rather than grind to level 60.
+    g.save.level = 60;
+    g.refreshDerived(true);
+    g.mode.refreshPortalLocks();
+    const w = g.mode.city.portals.filter((p) => p.wild);
+    const target = w.find((p) => !p.locked) || w[0] || null;
+    return {
+      count: w.length,
+      target: target ? { rank: target.rank, x: target.pos.x, z: target.pos.z, locked: target.locked } : null,
+    };
+  });
+  ok('the frontier carries wild gates', wild.count === 2, `${wild.count} wild gates`);
+  ok('a wild gate unlocks with rank', wild.target && !wild.target.locked, JSON.stringify(wild.target));
+  if (wild.target) {
+    await page.evaluate((t) => {
+      const g = window.__game;
+      // Set down 14 m short of the dais and walk the rest, so the prompt is
+      // raised by approach, not by teleporting onto it.
+      const a = Math.atan2(t.z, t.x);
+      const x = t.x - Math.cos(a) * 14, z = t.z - Math.sin(a) * 14;
+      g.player.body.reset(x, g.mode.city.heightAt(x, z) + 0.2, z);
+      g.mode._camReady = false;
+    }, wild.target);
+    await page.waitForTimeout(250);
+    await walkTo(page, wild.target.x, wild.target.z, { stopWithin: 3.4, timeoutMs: 30000 });
+    const wildPrompt = await evalGame(page, (g) => ({
+      prompt: g.mode.prompt ? { kind: g.mode.prompt.kind, rank: g.mode.prompt.rank, locked: g.mode.prompt.locked, sub: g.mode.prompt.sub } : null,
+      confirmVisible: Boolean(document.getElementById('cityConfirm')?.offsetParent),
+      dist: (() => {
+        const w = g.mode.city.portals.find((p) => p.wild && !p.locked);
+        return w ? +Math.hypot(g.player.pos.x - w.pos.x, g.player.pos.z - w.pos.z).toFixed(2) : null;
+      })(),
+    }));
+    report.wild = { ...wild, prompt: wildPrompt };
+    note(`wild gate prompt at ${wildPrompt.dist} m: ${JSON.stringify(wildPrompt.prompt)}`);
+    await page.screenshot({ path: shotPath('acc-08-wild-gate.png'), timeout: 90000 });
+    ok('walking up to a wild gate raises an unlocked prompt',
+      wildPrompt.prompt?.kind === 'portal' && wildPrompt.prompt.locked === false && wildPrompt.confirmVisible,
+      JSON.stringify(wildPrompt.prompt));
+    await page.click('#cityConfirm');
+    await page.waitForFunction(() => window.__game?.mode?.name === 'dungeon', null, { timeout: 25000 })
+      .catch(() => {});
+    const inWild = await evalGame(page, (g) => ({ mode: g.mode?.name, rank: g.gate?.rank, enemies: g.enemies.length }));
+    report.wildEntered = inWild;
+    ok('confirming at a wild gate enters a gate',
+      inWild.mode === 'dungeon' && inWild.enemies > 0, JSON.stringify(inWild));
+    // Back to town the cheap way — the results path is already covered by 1b.
+    await page.evaluate(() => window.__app.go('city', {}));
+    await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 30000 });
+    await page.waitForTimeout(800);
+  }
+
+  // ---- 5d. the bound companion turns up -----------------------------------
+  //
+  // The companion is roster slot 0, so it only exists for a player who has
+  // bound somebody. Seed the roster the way shadows.js writes it, re-enter the
+  // city (which is what rebuilds the crowd), and look for it.
+  const companion = await page.evaluate(async () => {
+    const g = window.__game;
+    if (!g.save.shadows?.roster?.length) {
+      g.save.shadows = g.save.shadows || { roster: [], deployed: [], nextId: 1 };
+      g.save.shadows.roster.push({
+        id: 1, name: 'Cinderbound 1', grade: 1, type: 'grunt', level: g.save.level, kills: 0, bornAt: 0,
+      });
+      g.save.shadows.nextId = 2;
+      g.onSave();
+    }
+    g.enterCity({});
+    await new Promise((r) => setTimeout(r, 900));
+    const city = g.mode.city;
+    const node = g.scene.getObjectByName('city_companion');
+    // The no-glow rule for living characters, applied to the companion body:
+    // its ONE sanctioned accent is the wisp Points node, which is exempt.
+    let rimmed = 0, emissive = 0, meshes = 0;
+    node?.traverse((o) => {
+      if (o.name === 'companion_wisps' || o.isPoints) return;
+      if (!o.isMesh) return;
+      meshes++;
+      for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
+        if (!m) continue;
+        if (m.rimUniforms) rimmed++;
+        if (m.emissive && m.emissive.getHex() !== 0x000000) emissive++;
+      }
+    });
+    return {
+      stats: city.citizens ? city.citizens.stats : null,
+      node: Boolean(node),
+      meshes, rimmed, emissive,
+      dist: node ? +node.position.distanceTo(g.player.pos).toFixed(1) : null,
+    };
+  });
+  report.companion = companion;
+  note(`companion node=${companion.node} meshes=${companion.meshes} at ${companion.dist} m · crowd ${JSON.stringify(companion.stats)}`);
+  ok('a player with a bound shadow gets a companion in the city',
+    companion.node && companion.stats?.companion === true, JSON.stringify(companion.stats));
+  ok('the companion body carries no rim and no emissive',
+    companion.rimmed === 0 && companion.emissive === 0,
+    `rimmed=${companion.rimmed} emissive=${companion.emissive} over ${companion.meshes} meshes`);
+  // ---- 5d-bis. the frontier camps, and the phone-budget fence --------------
+  //
+  // Both need a city built at a HIGH tier, and this harness runs on a software
+  // rasteriser at ~150 ms a frame, so by now the live governor has honestly
+  // stepped itself down to `low` — where the camps are deliberately not built
+  // (WORLD_SPEC: "2 hunter NPCs AT HIGH TIER") and where the density lever has
+  // nothing to shed because the world was already sized small. Pin the tier and
+  // re-enter, which is the same path a phone takes when it re-enters the city.
+  const worldFence = await evalGame(page, async (g) => {
+    const tier0 = g.quality.current.name || null;
+    g.quality.lock('high');
+    g.enterCity({});
+    await new Promise((r) => setTimeout(r, 900));
+    const crowd = g.mode.city.citizens ? g.mode.city.citizens.stats : null;
+
+    const snap = () => {
+      const s = g.mode.city.stats;
+      return { density: s.density, tris: s.triangles, instances: s.instances };
+    };
+    const before = snap();
+    // The REAL governor path: setTier fires game._applyQuality, which is where
+    // the wiring was missing — every other lever in it fired and the world's
+    // instance density did not.
+    g.quality.setTier('low');
+    const low = snap();
+    g.quality.setTier('high');
+    const up = snap();
+    g.quality.lock(null);
+    if (tier0) g.quality.setTier(tier0);
+    return { tier0, crowd, before, low, up };
+  });
+  report.worldFence = worldFence;
+  note(`camps at high tier: ${JSON.stringify(worldFence.crowd?.campPois)}`);
+  note(`quality fence: ${worldFence.before.tris} tris at ${worldFence.before.density}`
+    + ` -> low ${worldFence.low.tris} -> back up ${worldFence.up.tris}`);
+  // WORLD_SPEC's frontier POI table puts PEOPLE in the two camps. They shipped
+  // empty once, with the npcs field sitting unread in frontier.js, so the camps
+  // get a count here rather than a screenshot someone has to look at.
+  ok('the frontier camps have people in them',
+    worldFence.crowd?.camp === 3
+    && worldFence.crowd.campPois?.camp_hunters_east === 2
+    && worldFence.crowd.campPois?.camp_farmstead === 1,
+    JSON.stringify(worldFence.crowd?.campPois));
+  ok('stepping the quality tier down sheds world triangles without a rebuild',
+    worldFence.low.tris < worldFence.before.tris * 0.8
+    && worldFence.low.instances < worldFence.before.instances,
+    JSON.stringify(worldFence));
+  ok('stepping the tier back up restores the world it shed',
+    worldFence.up.tris === worldFence.before.tris,
+    JSON.stringify({ low: worldFence.low.tris, up: worldFence.up.tris, before: worldFence.before.tris }));
+
+  // ---- 5e. an interior is enterable and exitable, and it sells weapons -----
+  const doorway = await evalGame(page, (g) => {
+    const d = g.mode.city.interiors.byId.get('exchange').door;
+    return { outX: d.outX + d.nx * 2.4, outZ: d.outZ + d.nz * 2.4, inX: d.inX, inZ: d.inZ };
+  });
+  await page.evaluate((d) => {
+    const g = window.__game;
+    g.player.body.reset(d.outX, g.mode.city.heightAt(d.outX, d.outZ) + 0.2, d.outZ);
+    g.mode._camReady = false;
+  }, doorway);
+  await page.waitForTimeout(250);
+  await walkTo(page, doorway.inX, doorway.inZ);
+  const counter = await evalGame(page, (g) => {
+    const it = g.mode.city.interactables.find((x) => x.id === 'exchange');
+    return { x: it.pos.x, z: it.pos.z };
+  });
+  await walkTo(page, counter.x, counter.z);
+  const insideNow = await evalGame(page, (g) => ({
+    inside: g.mode._insideId,
+    prompt: g.mode.prompt ? g.mode.prompt.id : null,
+    boom: +Math.hypot(g.camera.position.x - g.player.pos.x, g.camera.position.y - g.player.pos.y,
+      g.camera.position.z - g.player.pos.z).toFixed(2),
+    confirmVisible: Boolean(document.getElementById('cityConfirm')?.offsetParent),
+  }));
+  report.interior = insideNow;
+  note(`inside the Exchange: ${JSON.stringify(insideNow)}`);
+  ok('he can walk INTO a building through its door',
+    insideNow.inside === 'exchange', JSON.stringify(insideNow));
+  ok('the interactable inside the building prompts',
+    insideNow.prompt === 'exchange' && insideNow.confirmVisible, JSON.stringify(insideNow));
+  await page.screenshot({ path: shotPath('acc-09-interior.png'), timeout: 90000 });
+
+  // --- buy something ---
+  await page.evaluate(() => {
+    const g = window.__game;
+    g.save.ash = 4000;   // an S-rank hunter's walking-around money
+    g.onSave();
+  });
+  await page.click('#cityConfirm');
+  await page.waitForSelector('#shop:not(.hidden)', { timeout: 10000 });
+  await page.screenshot({ path: shotPath('acc-10-shop.png'), timeout: 90000 });
+  const bought = await page.evaluate(async () => {
+    const g = window.__game;
+    const before = { ash: g.save.ash, weapon: g.weapon.name, baseId: g.weapon.baseId };
+    const rows = [...document.querySelectorAll('#shopList .gate')]
+      .filter((r) => !r.classList.contains('locked') && !r.classList.contains('owned'));
+    let best = null, bestP = -1;
+    for (const r of rows) {
+      const p = Number(r.querySelector('.price b')?.textContent || 0);
+      if (p > bestP && p <= g.save.ash) { bestP = p; best = r; }
+    }
+    if (!best) return { before, ok: false };
+    best.click();
+    await new Promise((r) => setTimeout(r, 300));
+    return {
+      before,
+      ok: true,
+      price: bestP,
+      after: { ash: g.save.ash, weapon: g.weapon.name, baseId: g.weapon.baseId },
+      rows: rows.length,
+    };
+  });
+  report.shop = bought;
+  note(`shop: ${bought.rows} buyable rows; bought for ${bought.price}; "${bought.before.weapon}" -> "${bought.after?.weapon}"`);
+  ok('the Exchange sells a weapon and equips it',
+    bought.ok && bought.after.ash === bought.before.ash - bought.price
+      && bought.after.baseId !== bought.before.baseId,
+    JSON.stringify(bought.after || {}));
+  await page.evaluate(() => window.__game.shopUI.close());
+  await page.waitForTimeout(200);
+
+  // --- and back out through the same door ---
+  await walkTo(page, doorway.outX, doorway.outZ);
+  const outAgain = await evalGame(page, (g) => ({ inside: g.mode._insideId, mode: g.mode.name }));
+  ok('and he can walk back OUT of the building',
+    outAgain.inside === null && outAgain.mode === 'city', JSON.stringify(outAgain));
+
+  // ---- 5f. three city re-entries leak nothing -----------------------------
+  const leak = await page.evaluate(async () => {
+    const g = window.__game;
+    const snap = () => ({
+      geometries: g.renderer.info.memory.geometries,
+      textures: g.renderer.info.memory.textures,
+      programs: g.renderer.info.programs.length,
+    });
+    g.enterCity({});
+    await new Promise((r) => setTimeout(r, 700));
+    const before = snap();
+    for (let i = 0; i < 3; i++) {
+      g.enterCity({});
+      await new Promise((r) => setTimeout(r, 700));
+    }
+    return {
+      before,
+      after: snap(),
+      // The DOM leaks too if anyone forgets: CityMode is rebuilt on every
+      // entry and its overlay must leave with it, or the page ends up with N
+      // copies of #cityConfirm and getElementById starts returning corpses.
+      cityUiNodes: document.querySelectorAll('#cityUi').length,
+      shopNodes: document.querySelectorAll('#shop').length,
+    };
+  });
+  report.leak = leak;
+  note(`re-entry x3: geo ${leak.before.geometries} -> ${leak.after.geometries}, `
+    + `tex ${leak.before.textures} -> ${leak.after.textures}, prog ${leak.before.programs} -> ${leak.after.programs}`);
+  ok('three city re-entries leak no GPU resources',
+    leak.after.geometries <= leak.before.geometries
+      && leak.after.textures <= leak.before.textures
+      && leak.after.programs <= leak.before.programs,
+    JSON.stringify(leak));
+  ok('...and no duplicate overlay DOM either',
+    leak.cityUiNodes === 1 && leak.shopNodes === 1,
+    `${leak.cityUiNodes} x #cityUi, ${leak.shopNodes} x #shop`);
+
+  // ---- 5g. frame time in the city, at the 30 fps city target ---------------
+  //
+  // REPORTED, NOT ASSERTED. This is SwiftShader on a laptop; the number says
+  // nothing about a phone and pretending otherwise would be the kind of claim
+  // this file exists to stop.
+  const frames = await page.evaluate(() => new Promise((resolve) => {
+    const t = [];
+    let last = performance.now();
+    let n = 0;
+    const tick = (now) => {
+      t.push(now - last);
+      last = now;
+      if (++n < 180) requestAnimationFrame(tick);
+      else resolve(t.slice(10).sort((a, b) => a - b));
+    };
+    requestAnimationFrame(tick);
+  }));
+  const p95 = frames[Math.floor(frames.length * 0.95)] || 0;
+  const median = frames[Math.floor(frames.length * 0.5)] || 0;
+  report.frameTime = {
+    medianMs: +median.toFixed(1), p95Ms: +p95.toFixed(1),
+    samples: frames.length, rasteriser: 'swiftshader (software) — NOT a phone number',
+  };
+  note(`city frame time: median ${median.toFixed(1)} ms, p95 ${p95.toFixed(1)} ms `
+    + `(software rasteriser — reported, not asserted; 30 fps city target = 33.3 ms)`);
+
+  // ---- 5h. desktop keyboard, because the owner plays on a desktop too ------
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.waitForTimeout(400);
+  const keyboard = await (async () => {
+    const start = await evalGame(page, (g) => ({ x: g.player.pos.x, z: g.player.pos.z }));
+    await page.keyboard.down('w');
+    await page.waitForTimeout(1200);
+    await page.keyboard.up('w');
+    const afterW = await evalGame(page, (g) => ({ x: g.player.pos.x, z: g.player.pos.z }));
+    await page.keyboard.down('d');
+    await page.waitForTimeout(1200);
+    await page.keyboard.up('d');
+    const afterD = await evalGame(page, (g) => ({ x: g.player.pos.x, z: g.player.pos.z }));
+    return {
+      forward: +Math.hypot(afterW.x - start.x, afterW.z - start.z).toFixed(2),
+      strafe: +Math.hypot(afterD.x - afterW.x, afterD.z - afterW.z).toFixed(2),
+    };
+  })();
+  report.keyboard = keyboard;
+  ok('desktop keyboard: W and D walk him around the city',
+    keyboard.forward > 1.5 && keyboard.strafe > 1.5,
+    `W moved ${keyboard.forward} m, D moved ${keyboard.strafe} m`);
+  await page.screenshot({ path: shotPath('acc-11-desktop.png'), timeout: 90000 });
+
+  // ---- 5i. RELOAD: the clock, the wallet and the weapon all survive --------
+  const persisted = await page.evaluate(() => ({
+    ash: window.__game.save.ash,
+    weapon: window.__game.weapon.name,
+    baseId: window.__game.weapon.baseId,
+    hours: +window.__game.worldClock.hours.toFixed(2),
+    level: window.__game.save.level,
+  }));
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => Boolean(window.__game), null, { timeout: 30000 });
+  await page.waitForSelector('#title:not(.hidden)', { timeout: 30000 });
+  await page.waitForTimeout(1200);
+  const afterReload = await page.evaluate(async () => {
+    const { bootBias } = await import('/src/render/daynight.js');
+    const g = window.__game;
+    return {
+      ash: g.save.ash,
+      weapon: g.weapon.name,
+      baseId: g.weapon.baseId,
+      hours: +g.worldClock.hours.toFixed(2),
+      stored: +(g.save.worldTime ?? -1).toFixed(2),
+      expectedHours: +bootBias(g.save.worldTime).toFixed(2),
+      sold: (g.save.shop?.sold || []).length,
+      roster: g.save.shadows?.roster?.length || 0,
+    };
+  });
+  report.persisted = { before: persisted, after: afterReload };
+  note(`after reload: ash ${afterReload.ash}, wielding "${afterReload.weapon}", `
+    + `clock ${afterReload.hours} h (saved ${afterReload.stored} h)`);
+  ok('the weapon he bought is still in his hand after a restart',
+    afterReload.baseId === persisted.baseId && afterReload.ash === persisted.ash
+      && afterReload.sold > 0,
+    `${afterReload.weapon} / ${afterReload.ash} ash / ${afterReload.sold} sold`);
+  ok('the world clock resumes where he left it',
+    Math.abs(afterReload.hours - afterReload.expectedHours) < 0.05
+      && Math.abs(afterReload.stored - persisted.hours) < 0.2,
+    `saved ${afterReload.stored} h, resumed ${afterReload.hours} h (bootBias expects ${afterReload.expectedHours})`);
+
+  // ...and the companion is still at his heel on the next visit.
+  await enterCityUi(page);
+  const compAgain = await evalGame(page, (g) => ({
+    node: Boolean(g.scene.getObjectByName('city_companion')),
+    companion: g.mode.city?.citizens?.stats?.companion ?? null,
+  }));
+  report.companionAfterReload = compAgain;
+  ok('the companion is still there on the next session',
+    compAgain.node && compAgain.companion === true, JSON.stringify(compAgain));
+  await page.screenshot({ path: shotPath('acc-12-companion.png'), timeout: 90000 });
 
   ok('no uncaught page errors across the whole run', errors.length === 0,
     errors.slice(0, 2).join(' | ') || 'none');

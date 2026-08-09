@@ -398,6 +398,23 @@ function procWall(hex, kind) {
   return group(parts);
 }
 
+/**
+ * A wall with a REAL hole in it: two jambs and a lintel, no panel.
+ *
+ * WORLD_SPEC step 9's five enterable buildings are walked into, so their door
+ * cell has to be open in the no-GLB city too. procWall(_, 'door') paints a door
+ * ON a solid slab, which is right for the 87 sealed buildings and wrong here —
+ * without this the fallback town has five service buildings you bounce off.
+ * The 1.6 m clear opening matches town_wall_doorway_square_wide's own frame.
+ */
+function procDoorway(hex) {
+  return group([
+    slab(0.8, 1.0, 0, 2, -1, -0.8, hex),
+    slab(0.8, 1.0, 0, 2, 0.8, 1, hex),
+    slab(0.8, 1.0, 1.75, 2, -0.8, 0.8, hex),
+  ]);
+}
+
 const PROC = {
   // --- walls -------------------------------------------------------------
   town_wall:                      () => procWall(COL.plaster),
@@ -407,6 +424,15 @@ const PROC = {
   town_wall_wood_door:            () => procWall(COL.wood, 'door'),
   town_wall_window_glass:         () => procWall(COL.plaster, 'window'),
   town_wall_window_shutters:      () => procWall(COL.plaster, 'window'),
+  // Used by the `stone`/`brick` styles since the first city pass and never
+  // given a stand-in: the no-GLB town grew a one-metre grey block on roughly a
+  // quarter of its stone walls. Found while auditing step 9's own piece list.
+  town_wall_window_small:         () => procWall(COL.plaster, 'window'),
+  // The open doorways the enterable buildings are entered through.
+  town_wall_doorway_square_wide:      () => procDoorway(COL.plaster),
+  town_wall_wood_doorway_square_wide: () => procDoorway(COL.wood),
+  // The civic style's window (step 8's plaza-ring identity).
+  town_wall_window_stone:         () => procWall(COL.stone, 'window'),
   town_wall_wood_window_shutters: () => procWall(COL.wood, 'window'),
   town_wall_wood_window_round:    () => procWall(COL.wood, 'window'),
   town_wall_arch_top:             () => procWall(COL.stone),
@@ -416,8 +442,35 @@ const PROC = {
   town_overhang:                  () => slab(0.28, 0.85, 1.34, 2.0, -1, 1, COL.darkwood),
 
   // --- roof --------------------------------------------------------------
+  //
+  // WORLD_SPEC step 8 gave the districts different roof families, so the
+  // no-GLB city needs stand-ins for all of them or the Assay quarter falls
+  // through to procGeometry's one-metre "unmapped" block and the town grows
+  // grey cubes where its skyline should be. Bounds match citykit.json so the
+  // fallback sits exactly where the kit piece would.
   town_roof:      () => wedge(-1.134, 1, -0.045, 0.15, 1.252, -1, 1, COL.roof),
   town_roof_flat: () => slab(-1, 1, 0, 0.252, -1, 1, COL.slate),
+  town_roof_high: () => wedge(-1.141, 1, -0.071, 0.2, 2.281, -1, 1, COL.roof),
+  // left/right are the same pitch plus the closing gable face and bargeboard;
+  // the stand-in models that as the pitch with an end wall under it.
+  town_roof_left:  () => group([
+    wedge(-1.268, 1, -0.089, 0.16, 1.352, -1, 1, COL.roof),
+    slab(-1.1, 1, 0, 1.25, -1, -0.88, COL.plaster),
+  ]),
+  town_roof_right: () => group([
+    wedge(-1.268, 1, -0.089, 0.16, 1.352, -1, 1, COL.roof),
+    slab(-1.1, 1, 0, 1.25, 0.88, 1, COL.plaster),
+  ]),
+  town_roof_high_left: () => group([
+    wedge(-1.283, 1, -0.141, 0.2, 2.381, -1, 1, COL.roof),
+    slab(-1.14, 1, 0, 2.28, -1, -0.88, COL.plaster),
+  ]),
+  town_roof_high_right: () => group([
+    wedge(-1.283, 1, -0.141, 0.2, 2.381, -1, 1, COL.roof),
+    slab(-1.14, 1, 0, 2.28, 0.88, 1, COL.plaster),
+  ]),
+  town_roof_point:      () => pyramid(1.1, 1.0, COL.roof),
+  town_roof_high_point: () => pyramid(1.1, 2.0, COL.roof),
 
   // --- structure ---------------------------------------------------------
   town_pillar_stone: () => slab(-0.16, 0.16, 0, 2, -0.16, 0.16, COL.stone),
@@ -429,6 +482,16 @@ const PROC = {
     slab(0.6, 1, 1.5, 2.0, -0.5, 0.5, COL.stone),
   ]),
   town_chimney_top:  () => slab(0.426, 0.93, 0, 1.25, -0.34, 0.34, COL.stone),
+  // Interior floors and the one-storey stair, both step 9. Bounds from
+  // citykit.json so the stand-in occupies the same volume as the kit piece.
+  town_planks:       () => slab(-1, 1, 0, 0.12, -1, 1, COL.wood),
+  town_planks_half:  () => slab(-0.5, 0.5, 0, 0.12, -1, 1, COL.wood),
+  town_stairs_wood:  () => group([
+    slab(-1.04, 1, 0, 0.5, -0.5, 0.5, COL.wood),
+    slab(-0.5, 1, 0.5, 1.0, -0.5, 0.5, COL.wood),
+    slab(0.1, 1, 1.0, 1.5, -0.5, 0.5, COL.wood),
+    slab(0.6, 1, 1.5, 2.0, -0.5, 0.5, COL.wood),
+  ]),
 
   // --- street furniture --------------------------------------------------
   town_lantern: () => group([
@@ -525,6 +588,8 @@ const PROC = {
   ]),
   ruin_pot1:  () => cylGeo(0.36, 0.96, COL.clay),
   ruin_pot2:  () => cylGeo(0.22, 0.64, COL.clay),
+  ruin_pot3:  () => cylGeo(0.23, 0.84, COL.clay),
+  ruin_trapdoor: () => slab(-0.87, 0.87, 0, 0.21, -0.79, 0.79, COL.darkwood),
   ruin_crate: () => slab(-0.41, 0.41, 0, 0.81, -0.41, 0.41, COL.wood),
   ruin_barrel: () => cylGeo(0.4, 1.07, COL.darkwood),
   ruin_bookcase_empty: () => group([                 // 2.08 w x 2.63 h x 0.66 d
@@ -590,6 +655,18 @@ const PROC = {
 function coneGeo(r, h, y0, hex) {
   const g = new THREE.ConeGeometry(r, h, 7, 1);
   g.translate(0, y0 + h / 2, 0);
+  return paint(g, hex);
+}
+/**
+ * Four-sided pyramid centred on the cell, apex up. Stand-in for the
+ * town_roof_*_point family. CylinderGeometry's radius is the CIRCUMradius, so
+ * a square of half-width w needs w*sqrt2 and a 45-degree spin to put the flat
+ * faces on the axes rather than the corners.
+ */
+function pyramid(halfW, h, hex) {
+  const g = new THREE.CylinderGeometry(0, halfW * Math.SQRT2, h, 4, 1);
+  g.rotateY(Math.PI / 4);
+  g.translate(0, h / 2, 0);
   return paint(g, hex);
 }
 function cylGeo(r, h, hex) {
