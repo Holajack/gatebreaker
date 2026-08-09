@@ -40,11 +40,14 @@ const VOID_Y = -10;
 // in an empty plaza. 8,8 puts him at ~105 px, readable, while the streets keep
 // enough depth to navigate by. Buildings are handled by the boom probe below,
 // not by backing off.
-const CAM_OFFSET = new THREE.Vector3(0, 8, 8);
-// Boom floor when a building blocks the probe. Scaled with CAM_OFFSET (was 5.0
-// at 11,11) so a blocked boom retreats to the same fraction of its full length
-// instead of jumping to half of it.
-const CAM_MIN = 3.6;
+// 10,10 is the owner's call after playing 8,8: he wanted to see more around
+// him. The hero still projects to ~85 px on a 720 p frame (8,8 was ~105, the
+// old 11,11 ~75), so he stays readable while the street regains depth.
+const CAM_OFFSET = new THREE.Vector3(0, 10, 10);
+// Boom floor when a building blocks the probe. Scaled with CAM_OFFSET (5.0 at
+// 11,11, 3.6 at 8,8) so a blocked boom retreats to the same fraction of its
+// full length instead of jumping to half of it.
+const CAM_MIN = 4.5;
 const CAM_PROBE_STEPS = 7;
 const EYE = 1.55;             // where the collision probe leaves the body
 

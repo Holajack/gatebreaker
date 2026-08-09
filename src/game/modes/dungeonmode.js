@@ -47,7 +47,8 @@ const INTRO_DURATION = 2.4;
 const INTRO_WALK_THROTTLE = 0.7;   // auto-walk at 0.7x speed, per spec
 // Offsets are player-relative. The END values are chosen so the intro lands
 // exactly on the interior follow rig's steady state — camLook leads the player
-// by 3.4 m down -Z and camPos = camLook + camOffset (0,11,11), so the handoff
+// by 3.4 m down -Z and camPos = camLook + camOffset (game.js owns it; 0,13,13
+// since the owner's zoom-out pass — read it, never hardcode it), so the handoff
 // frame is bit-continuous with _updateInteriorCamera and nothing snaps.
 const INTRO_CAM_FROM = { x: 0, y: 3.2, z: 5.2 };   // spec's shoulder shot
 const INTRO_CAM_TO = { x: 0, y: 11, z: 7.6 };       // (0,0,-3.4) + (0,11,11)

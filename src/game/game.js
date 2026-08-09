@@ -128,7 +128,10 @@ export class Game {
     // inside the first metre, so a 4000:1 far/near ratio spent most of the
     // depth buffer's precision on empty space and z-fought the arena props.
     this.camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 1.0, 400);
-    this.camOffset = new THREE.Vector3(0, 11, 11);
+    // 13,13 rather than the long-shipped 11,11: the owner asked to pull back a
+    // little, and the city moved 8,8 -> 10,10 in the same pass. dungeonmode
+    // reads this same vector, so crawls and arenas stay in step.
+    this.camOffset = new THREE.Vector3(0, 13, 13);
     this.camLook = new THREE.Vector3();
     this.camPos = new THREE.Vector3();
 

@@ -3,12 +3,17 @@
 
 // Orbit feel, tuned by dragging on a 1280x720 window: a 300 px sweep is a
 // quarter turn, which crosses a phone screen in one thumb stroke without ever
-// spinning past what the eye can track. Pitch is a garnish, not a free-look —
-// a narrow band around the rig's authored 45° so the player can peek over a
-// wall or flatten toward the horizon, never stare at the sky or the floor.
+// spinning past what the eye can track.
+//
+// Pitch was originally a 12° garnish around the rig's authored 45°. The owner
+// played it and wanted real vertical control, so the band is now 35° either
+// side: 10° (a low chase angle down the street) to 80° (near top-down). Both
+// ends stay safe without new clamps — measured at full tilt-up the camera is
+// still 7.0 m above the player in the city and 9.4 m in the arena, and the
+// city's boom probe keeps its own terrain floor on top of that.
 const YAW_PER_PX = Math.PI / 600;
 const PITCH_PER_PX = 0.0015;
-const PITCH_MAX = (12 * Math.PI) / 180;
+const PITCH_MAX = (35 * Math.PI) / 180;
 
 export class Input {
   constructor() {
@@ -159,10 +164,18 @@ export class Input {
       const dy = t.clientY - this._orbitLast.y;
       this._orbitLast.x = t.clientX;
       this._orbitLast.y = t.clientY;
-      // Drag right = look right; drag up = camera climbs. Yaw is unclamped and
-      // unwrapped — sampleWorld only ever feeds it to sin/cos.
+      // Drag right = look right. Yaw is unclamped and unwrapped — sampleWorld
+      // only ever feeds it to sin/cos.
+      //
+      // Drag UP tilts the view up (the boom swings DOWN toward the horizon);
+      // drag DOWN tilts it toward top-down. Every rig computes its boom angle
+      // as `atan2(offset.y, offset.z) + pitch`, so a bigger pitch RAISES the
+      // camera and therefore looks further DOWN — which read as inverted to the
+      // owner. Screen dy is already positive-down, so `+ dy` is the
+      // non-inverted mapping and this one sign fixes city, arena and dungeon
+      // together.
       this.look.yaw -= dx * YAW_PER_PX;
-      this.look.pitch = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, this.look.pitch - dy * PITCH_PER_PX));
+      this.look.pitch = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, this.look.pitch + dy * PITCH_PER_PX));
       e.preventDefault();
     };
 
