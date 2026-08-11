@@ -5,7 +5,10 @@ import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { applyRim } from './rim.js';
 import { GLOW_LAYER } from './glow.js';
-import { Quality, TIERS } from '../core/quality.js';
+import {
+  Quality, TIERS,
+  skinnedBodyAvailable, acquireSkinnedBody, releaseSkinnedBody,
+} from '../core/quality.js';
 import { load as loadSave } from '../core/save.js';
 
 // Real skinned characters, from the two CC0 Quaternius modular packs merged
@@ -739,7 +742,7 @@ function eyeMaterial(glow) {
 // ------------------------------------------------------------- instances
 
 class CharacterInstance {
-  constructor(root, mesh, mixer, rig, appearance) {
+  constructor(root, mesh, mixer, rig, appearance, isShadow = false) {
     this.root = root;
     this.mesh = mesh;
     this.mixer = mixer;
@@ -763,8 +766,13 @@ class CharacterInstance {
     // Set true by a caller that has decided this character never casts a
     // shadow, whatever the quality tier does later. See setCharacterQuality.
     this.shadowPinned = false;
+    // Which side of quality.js's shared skinned-body ledger this instance sits
+    // on. `ghost` IS the shadow-army flag at this layer — nothing else in the
+    // game builds a ghost character.
+    this.isShadow = Boolean(isShadow);
     _live.add(this);
     _liveInstances++;
+    acquireSkinnedBody(this.isShadow);
   }
 
   /**
@@ -960,6 +968,7 @@ class CharacterInstance {
     this._disposed = true;
     _live.delete(this);
     _liveInstances = Math.max(0, _liveInstances - 1);
+    releaseSkinnedBody(this.isShadow);
     try {
       this.mixer.stopAllAction();
       this.mixer.uncacheRoot(this.root);
@@ -1004,7 +1013,13 @@ export function makeCharacter({
   ignoreBudget = false,
 } = {}) {
   if (!_loaded) return null;
+  // Two gates, and they mean different things. The per-module budget is this
+  // pack's own CPU ceiling (bone-matrix passes, see BUDGET). The shared ledger
+  // in quality.js is the ceiling on skinned bodies in the SCENE from every
+  // source at once — without it a full shadow company and a full enemy wave
+  // each fit inside their own budget and the frame pays for both.
   if (!ignoreBudget && _liveInstances >= _quality.budget) return null;
+  if (!ignoreBudget && !skinnedBodyAvailable(_quality.tier, ghost)) return null;
 
   const appearance = appearanceFor(seed, { archetype: ghost ? 'shadow' : archetype, rank });
   if (!appearance) return null;
@@ -1032,7 +1047,7 @@ export function makeCharacter({
   root.scale.setScalar(scale * MODEL_SCALE);
 
   const mixer = new THREE.AnimationMixer(inst3d);
-  const inst = new CharacterInstance(root, mesh, mixer, rig, appearance);
+  const inst = new CharacterInstance(root, mesh, mixer, rig, appearance, ghost);
 
   // sockets
   inst3d.updateMatrixWorld(true);
@@ -1045,6 +1060,22 @@ export function makeCharacter({
   if (wristR) inst.sockets.hand = makeSocket(wristR, hand);
   if (wristL) inst.sockets.handL = makeSocket(wristL, hand);
   if (head) inst.sockets.head = makeSocket(head, { lift: 0, scale: 1 });
+
+  // Stow anchors. weapons.js's STOW table is authored in metres on the
+  // 2.14-unit procedural humanoid, so these carry the same 1/MODEL_SCALE
+  // counter-scale the hands do — a sheathed sword must be the same sword it
+  // was a frame earlier, not a slightly smaller one. lift is 0 because a stow
+  // transform is authored relative to the BONE, not to a fist that sits
+  // 0.72 below one.
+  //
+  // Chest and Hips are both in the pack's 62-bone list for both rigs, and
+  // parenting to the bone (rather than to the root) is what makes a slung
+  // weapon swing with the torso during a run instead of floating.
+  const chest = inst3d.getObjectByName(`${p}Chest`);
+  const hips = inst3d.getObjectByName(`${p}Hips`);
+  const stow = { lift: 0, scale: 1 / MODEL_SCALE };
+  if (chest) inst.sockets.back = makeSocket(chest, stow);
+  if (hips) inst.sockets.hip = makeSocket(hips, stow);
 
   if (eyes && inst.sockets.head) {
     const eye = new THREE.Mesh(eyeGeometry(), eyeMaterial(glow));

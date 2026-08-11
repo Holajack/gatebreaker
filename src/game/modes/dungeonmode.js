@@ -51,9 +51,38 @@ const INTRO_WALK_THROTTLE = 0.7;   // auto-walk at 0.7x speed, per spec
 // since the owner's zoom-out pass — read it, never hardcode it), so the handoff
 // frame is bit-continuous with _updateInteriorCamera and nothing snaps.
 const INTRO_CAM_FROM = { x: 0, y: 3.2, z: 5.2 };   // spec's shoulder shot
-const INTRO_CAM_TO = { x: 0, y: 11, z: 7.6 };       // (0,0,-3.4) + (0,11,11)
+
+// THE INTERIOR CAMERA IS NOT THE ARENA CAMERA, and this wave is why. The crawl
+// rooms grew about 5.5x (a boss chamber is now 38x38 m) while the rig stayed on
+// the open arena's 0/13/13 boom with a 3.4 m forward lead. tools/camera-frame
+// measured what that costs at 892x412: 45.7 m of ground visible FORWARD, which
+// no room is deep enough to use, against 5.18 m toward the camera — less than
+// the 6.16 m of a single dash. Anything that circled to your near side left the
+// frame in one dodge, and a boss you are kiting can be a health bar over an
+// empty floor.
+//
+// So the interior spends that wasted forward reach on the near side instead: a
+// slightly longer boom at a slightly steeper pitch, and a much shorter lead so
+// the player sits nearer the middle of his own screen. Re-measured: 8.1 m near
+// (a dash plus a third), 34.6 m forward (still the full depth of the largest
+// room). The ARENA rig in game.js is untouched — open ranks have no walls to
+// hide behind and the owner just signed off on that framing.
+//
+// DUNGEON_SPEC sanctions this ("the mode owns the constant — tune, don't
+// fork") and the wall-occlusion rule it derives still holds with room to
+// spare: a wall h tall occludes the player within ~(d/h)*h on the camera side,
+// which the 45-degree arena boom made 1.0-1.1*h. At 13.2/15.7 that shrinks to
+// 0.84*h, so the south-low heighting is MORE than sufficient, not less. The
+// boom probe below is unchanged and still the backstop for dragged orbits.
+const INTERIOR_CAM = { y: 15.7, z: 13.2 };
+const INTERIOR_LEAD = 1.4;
 const INTRO_LOOK_FROM = 9;     // opening frame stares down the tunnel at the torchlight
-const INTRO_LOOK_TO = 3.4;     // the follow rig's standard forward lead
+const INTRO_LOOK_TO = INTERIOR_LEAD;   // the follow rig's forward lead
+// DERIVED, not typed: the END pose has to BE the follow rig's steady state
+// (camPos = camLook + boom, camLook = player - lead) or the handoff snaps. It
+// was a hardcoded 0,11,7.6 left over from the 0,11,11 boom two zoom passes ago,
+// which is exactly the drift this now cannot have.
+const INTRO_CAM_TO = { x: 0, y: INTERIOR_CAM.y, z: INTERIOR_CAM.z - INTERIOR_LEAD };
 // Boss reveal (spec bossChamberAndExit beat 1): a 1.2 s camera hold on the
 // rising boss, reusing the intro lerp machinery instead of a bespoke cutscene.
 const BOSS_HOLD = 1.2;
@@ -362,20 +391,20 @@ export class DungeonMode extends GameMode {
       this._bossHold -= dt;
       _v.set(g.boss.pos.x, 0, g.boss.pos.z);
       g.camLook.lerp(_v, Math.min(1, dt * 4));
-      g.camPos.copy(g.camLook).add(g.camOffset);
+      g.camPos.set(g.camLook.x, g.camLook.y + INTERIOR_CAM.y, g.camLook.z + INTERIOR_CAM.z);
     } else {
       // Lead the camera slightly toward movement so you can see what you're running into.
       _v.copy(p.pos).addScaledVector(p.vel, 0.22);
       if (yaw === 0 && pitch === 0) {
-        _v.z -= 3.4;
+        _v.z -= INTERIOR_LEAD;
         g.camLook.lerp(_v, Math.min(1, dt * 6));
-        g.camPos.copy(g.camLook).add(g.camOffset);
+        g.camPos.set(g.camLook.x, g.camLook.y + INTERIOR_CAM.y, g.camLook.z + INTERIOR_CAM.z);
       } else {
-        _v.x -= Math.sin(yaw) * 3.4;
-        _v.z -= Math.cos(yaw) * 3.4;
+        _v.x -= Math.sin(yaw) * INTERIOR_LEAD;
+        _v.z -= Math.cos(yaw) * INTERIOR_LEAD;
         g.camLook.lerp(_v, Math.min(1, dt * 6));
-        const boom = Math.hypot(g.camOffset.y, g.camOffset.z);
-        const pa = Math.atan2(g.camOffset.y, g.camOffset.z) + pitch;
+        const boom = Math.hypot(INTERIOR_CAM.y, INTERIOR_CAM.z);
+        const pa = Math.atan2(INTERIOR_CAM.y, INTERIOR_CAM.z) + pitch;
         g.camPos.set(
           g.camLook.x + Math.sin(yaw) * boom * Math.cos(pa),
           g.camLook.y + boom * Math.sin(pa),

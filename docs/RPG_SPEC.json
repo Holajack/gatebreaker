@@ -1,0 +1,1301 @@
+{
+  "doc": "docs/RPG_SPEC.json — items, equipment, inventory, weapon families and weapon physics for EMBERGATE (repo slug stays 'gatebreaker'). Design only. NOTHING in src/ was changed to produce this document; every claim about the code below was read out of the tree at commit 'Camera: un-invert the tilt, widen it, and pull back' (versionCode 7 / 1.6-camera).",
+  "generated": "2026-08-09",
+  "ownerBrief": "Verbatim: 'I want the characters to properly hold the swords and when they are in the plaza, the sword can be visible or placed in the inventory. allow an inventory button that display everything about the character, and where they can change the weapons and armor slots. each having different benefits and if they collect a set it will make the overall armor pieces more powerful. if we have different weapons, like bow and arrows, daggers, swords, great sword, axes and so on... the legendary ones should be harder to develop but more powerful... make sure the weapons follow the right physics in a magic world.'",
+  "summary": "Seven asks, one system. The spine of it is a finding, not a feature: src/game/weapons.js already contains a complete, per-archetype swing state machine — windup / active / recovery / lock / cancel / lunge / stagger / move-scale, hand-tuned per family — and NOTHING OUTSIDE THAT FILE IMPORTS ANY OF IT (verified by grep across src/ and tools/: zero external consumers of makeAttackState, startAttack, tickAttack, canAttack, consumeLunge, moveScale, isCommitted, attackPhase, attackAnim, hitDamage, hitRange, hitArc, hitKnockback, hitStagger, isRadial, weaponSummary or ARCHETYPES). game.js._applySwingDamage still runs the original hardcoded three-chop sword (p.comboIndex, p.swing = 0.34, ranges 2.9/3.6, arcs 0.62pi/0.85pi, knock 2.5/9) and merely multiplies the equipped weapon's dmgMul / reachMul / arcMul / knockMul on top. The consequence is exactly the thing the owner noticed: EVERY WEAPON CURRENTLY SWINGS LIKE A SWORD. A greataxe does bigger numbers on identical timing. So 'make sure the weapons follow the right physics' is roughly ninety percent a WIRING job against code that already exists and was already tuned, and only ten percent new content. That wiring is STEP 1 and it ships alone. On top of it this spec defines: an 8-slot equipment model (weapon, offhand, head, chest, hands, legs, feet, trinket) persisted with the same four-field (base, rarity, seed, level) trick weapons already use, so armor costs the save file almost nothing and re-tuning the tables re-derives everyone's gear; five armor sets with 2 / 4 / 5-piece thresholds where the partials are small flat numbers and the full-set bonus is a RULE rather than a multiplier (that asymmetry is the whole anti-power-creep argument, and it is backed by a hard 0.72 total damage-reduction clamp); seven weapon families mapped ONLY onto models that actually exist in the shipped packs (and an explicit, uncomfortable admission that items.glb contains no staff, no wand, no spear, no shield, no helmet and no boots); a mass-and-momentum law for weapon feel that magic is allowed to bend in exactly two named ways and no others; a legendary tier that is gated by WHERE you have been rather than by luck, and completed by an Ascension craft; a two-column inventory panel designed against the 412 px-tall landscape phone viewport that already forced the Exchange into a scroll box; and a stow/draw stance that re-parents the existing weapon group between a hand socket and a new chest socket without creating or disposing a single geometry — because weapons.js's own header documents that dropping a material costs an 8-60 ms shader recompile on a mid-range Android. Wave 3-A WAS steps 2-6 — step 1 was planned for it, was not built, and has moved to 3-B. Wave 3-B is step 1 first, then steps 7-14. See waveSplit and buildOrder[0].status; step 7 records the dependency.",
+  "auditFindings": {
+    "swingStateMachineIsDark": [
+      "src/game/weapons.js exports a full attack state machine — makeAttackState, currentStep, canAttack, startAttack, tickAttack, consumeBuffer, consumeLunge, cancelAttack, moveScale, isCommitted, attackPhase, attackAnim — plus the hit-maths helpers hitDamage/hitRange/hitArc/hitKnockback/hitStagger/isRadial and the presentation helper weaponSummary. `grep -rn` over src/ and tools/, excluding weapons.js itself, returns ZERO matches for all of them.",
+      "src/game/game.js:930-963 (_startSwing / _applySwingDamage) is still the pre-weapons.js implementation: p.comboIndex cycling 1..3, p.swing = 0.34, p.comboTimer = 0.95, finisher x1.85, range (finisher ? 3.6 : 2.9), arc (finisher ? PI*0.85 : PI*0.62), knockback (finisher ? 9 : 2.5), stagger finisher-only 0.45. The equipped weapon contributes ONLY w.dmgMul, w.reachMul, w.arcMul, w.knockMul.",
+      "Therefore: the GREATAXE_COMBO / MAUL_COMBO / DAGGER_COMBO / SPEAR_COMBO / GLAIVE_COMBO tables, the per-archetype lock and cancel windows, the per-step move multipliers, the lunge impulses, the multi-hit dagger finisher and the radial maul pound are all authored, tested-by-eye at authoring time, and UNREACHABLE. This is the single highest-value change in the whole document and it is a deletion-plus-rewiring, not new content.",
+      "The comment at weapons.js:218 states the intent plainly: 'The current hardcoded sword — windup 0.17, total 0.34, ranges 2.9/3.6, arcs 0.62pi/0.85pi, knockback 2.5/9, finisher x1.85 — is exactly `riftedge` below, so switching game.js over to this table is a no-op for existing feel.' That sentence is the acceptance criterion for STEP 1, and it should be asserted numerically rather than trusted."
+    ],
+    "shippedItemModels": [
+      "public/models/items.json DOES NOT EXIST. The brief named it; the tree has public/models/items.glb (736 KB) plus public/models/icons.json (108 icon keys) + icons.webp. The authoritative model inventory is the source pack folder 'Ultimate RPG Items Pack - Aug 2019/OBJ/' (106 .obj files, gitignored source per ASSETS.md:171) and the runtime index built by src/render/models.js (listItems()). All 106 names below were read off that folder, not guessed.",
+      "WEAPON-CAPABLE MODELS THAT ACTUALLY EXIST: Sword, Sword_Golden, Sword_big, Sword_big_Golden, Axe_small, Axe_small_Golden, Axe_Double, Axe_Double_Golden, Hammer_Double, Hammer_Double_Golden, Dagger, Dagger_Golden, Bow_Wooden, Bow_Golden, Arrow, Arrow_Golden, Dart, Dart_Golden.",
+      "ARMOR-ADJACENT MODELS THAT EXIST: Armor_Black, Armor_Golden, Armor_Leather, Armor_Metal, Armor_Metal2 (five standalone chest/cuirass props), Glove, Crown, Crown2, Necklace1, Necklace2, Necklace3, Ring1..Ring7.",
+      "MODELS THAT DO NOT EXIST ANYWHERE IN items.glb — say this out loud before designing around them: NO staff, NO wand, NO spear, NO glaive, NO polearm of any kind, NO shield, NO helmet, NO boots, NO greaves, NO gauntlets beyond the single Glove, NO quiver. weapons.js:weaponModelName() already documents the polearm hole ('the closest things are an arrow and a dart, which read as ammunition, not a weapon') and returns null so the procedural builder covers it.",
+      "OTHER 106-pack contents, listed so nobody re-derives them: Backpack, Bag, Bone, Book1..4 (Closed/Open), Chalice, Chest_Closed/Open/Ingots, ChickenLeg, Coin, Coin_Skull, Coin_Star, Crystal1..Crystal5 (+ _Damaged variants for 1,2,3,5), FishBone, Gold_Ingots, Heart, Heart_Broken, Heart_Half, Key1..4, Mineral, Padlock, Parchment, Potion1..Potion11 (Empty/Filled), Pouch, Scroll, Skull, Skull2, Snowflake1..3, Star.",
+      "public/models/adventurers.glb (789 KB, KayKit Adventurers, CC0) DOES contain adv_staff, adv_bow, adv_quiver, adv_arrow, adv_shield_badge, adv_sword_1h, adv_axe_2h, adv_dagger. BUT adventurers.json's own note reads 'Deliverable only this wave: no src/ consumer exists yet', every prop is namespaced under a specific character's handslot node (adv_staff lives under mage_handslot_r), and every clip is namespaced per character because GLTFLoader renames duplicate node names on load. Harvesting a staff from it is a new loader path, not a lookup. Recommended: do not put it on the critical path (see weaponFamilies.staff)."
+    ],
+    "iconAtlasIsAlreadyTheInventoryUI": [
+      "src/ui/icons.js is finished and unused by any panel: loadIconIndex(), hasIcon(), iconStyle(name, size), iconEl(name, size). 108 lowercase keys in a single 1408x1280 WebP (~310 KB), one image and one request for the whole inventory.",
+      "iconStyle() already returns a neutral grey square for an unknown name — so an EMPTY SLOT and a MISSING ICON render identically and correctly with zero extra code. Build the slot grid on top of that behaviour rather than writing placeholder markup.",
+      "Icon keys that matter here: sword, sword_golden, sword_big, sword_big_golden, axe_small, axe_small_golden, axe_double, axe_double_golden, hammer_double, hammer_double_golden, dagger, dagger_golden, bow_wooden, bow_golden, arrow, arrow_golden, armor_leather, armor_metal, armor_metal2, armor_black, armor_golden, glove, crown, crown2, necklace1..3, ring1..7, crystal1..5, mineral, chalice, scroll, book1_closed. Every one verified present in icons.json."
+    ],
+    "characterRigAndSockets": [
+      "src/render/characters.js:1037-1047 builds exactly THREE sockets: sockets.hand (m_Wrist_R / f_Wrist_R, lift 0.72, scale 1/MODEL_SCALE), sockets.handL (Wrist_L, same), sockets.head (Head, lift 0, scale 1). There is NO back socket and NO hip socket, so nothing can currently be stowed.",
+      "The 62-bone list in public/models/characters.json DOES contain m_Chest, m_Torso, m_Abdomen and m_Hips (and the f_ equivalents). makeSocket(bone, {lift, scale}) is generic and re-usable — a back socket is `makeSocket(getObjectByName(p + 'Chest'), { lift: 0, scale: 1 / MODEL_SCALE })` and a hip socket is the same off 'Hips'. No new asset, no new maths.",
+      "The procedural box-man (entities.js makeHumanoid) has rig.body / rig.torso / rig.armL / rig.armR / rig.legL / rig.legR. Its stow fallback is rig.torso for the back and rig.body for the hips. Both paths must work: the game is required to boot with public/models/ deleted.",
+      "CharacterInstance.setArmed(armed) already swaps the idle clip between Idle_Sword and the neutral arms-down idle, and invalidates the cached 'idle' action so the change takes effect immediately. Sheathing therefore gets the correct relaxed plaza walk FOR FREE — it is one setArmed(false) call.",
+      "There is exactly ONE armed idle clip in the pack (`*_Idle_Sword`). There is no armed-with-bow and no armed-with-staff idle. A bow user will stand in a sword idle. At play distance on a phone this is acceptable; a small additive left-arm offset is the cheap fix if it reads wrong, and a new clip is not on the table."
+    ],
+    "armorHasNoWearableGeometry": [
+      "Consequence of shippedItemModels: there is no helmet mesh, no boot mesh, no greave mesh and no wearable cuirass. items.glb's Armor_* are prop-scale standalone models (display armour), not rig-fitted garments. They cannot be parented to a bone and look like clothing.",
+      "The only honest 3D expression of armour in this tree is the MODULAR CHARACTER PART SWAP that characters.js already implements: public/models/characters.json declares slots ['head','body','legs','feet','backpack','pistol'] across 21 characters over 2 shared rigs, and characters.js:40 states 'PARTS ARE SWAPPABLE WITHIN A PACK. head/body/legs/feet from any character' — appearanceFor() already mixes them per-seed to stop enemies being one body in six colours.",
+      "COST WARNING, and it is a real one: characters.js merges the four chosen parts into ONE geometry keyed by `${rig}|${head}|${body}|${legs}|${feet}` and refcounts it via releaseGeometry(). Every DISTINCT armour look is one more merged geometry resident in the cache. Twenty-five set looks across a crowd would be twenty-five merges. Armour visuals must therefore be PLAYER-ONLY. Enemies and shadow soldiers keep their seeded appearance and gain nothing from armour."
+    ],
+    "saveAndLoadoutSeams": [
+      "src/core/save.js: SCHEMA_VERSION 2, key 'gatebreaker.save.v2', legacy 'gatebreaker.save.v1' deliberately left in place after upgrade so a rollback finds a profile. migrate() is pure and total.",
+      "The file states the bump rule explicitly, twice (save.shop and save.worldTime): 'Deliberately NOT a schema bump: an absent value is indistinguishable from this one.' A CHANGED FIELD TYPE is what forced v1 -> v2. save.equipment is a NEW field with an absent-reads-as-default meaning, so it follows the shop precedent — ensureEquipment(save) is the migration, idempotent, called first by every entry point, exactly like ensureShopSave(save).",
+      "Today: save.weapon is a single {b,r,s,l} record and save.stash is an array of the same. game.js:322-361 owns both — _restoreLoadout / _persistLoadout / equip. STASH_LIMIT is 12 (game.js:48).",
+      "BUG THAT BECOMES SERIOUS WITH EIGHT SLOTS: game.equip(w) unconditionally unshifts the outgoing weapon onto the stash. Equipping an item that CAME FROM the stash therefore leaves a duplicate — the stash entry is never removed. With one slot and a 12-entry cap this self-heals by eviction. With eight slots and a 40-entry cap it is a duplication exploit. equipSlot() must SWAP: remove the incoming instance from the stash, push the outgoing one.",
+      "STASH_LIMIT 12 is far too small once armour drops. One D-rank dungeon can produce five armour pieces. Raise to 40; the storage cost is 40 x 4 short fields."
+    ],
+    "projectileSystemIsNotReadyForBows": [
+      "game.js:1139 _spawnProjectile allocates PER SHOT: `new THREE.IcosahedronGeometry(0.3, 0)`, `new THREE.MeshBasicMaterial({color})`, and `new THREE.PointLight(color, 2.2, 7)` parented to the bolt. _removeProjectile disposes the geometry and material. At caster pace (attackCd 2.6) this is invisible. At bow pace (three shots a second, a dozen in flight) it is a per-shot material creation — which by weapons.js's own measured note costs a shader program lookup and, on a cold path, 8-60 ms — plus up to a dozen simultaneous dynamic point lights, which is a phone-GPU cliff, not a cost.",
+      "game.js:1667 _updateProjectiles integrates FLAT: `dir` is built with `.setY(0).normalize()` at spawn and the position is `pos.addScaledVector(dir, speed * dt)`. There is no vertical velocity and no gravity. Arrow flight is a genuine addition to this loop, not a parameter change.",
+      "Collision already does the right thing and must not be rewritten: the bolt dies on `this.world.obstacleField?.blocked(pr.pos.x, pr.pos.z, 0.25, 0, pr.pos.y)` — the projectile's own height is the feetY, so kerb-height crates (top 0.4) do not eat shots while walls (top Infinity) always block. The `hypot(x,z) > world.radius + 2` disc cull is the outer bound in both worlds.",
+      "src/world/obstacles.js:562 lineBlocked(x0,z0,x1,z1,{step=1.2,radius=0.2,feetY=1.2}) is the SEGMENT probe, and its header is explicit that it is for throttled use ('callers throttle (the AI probes on a 0.4 s cadence), never per-frame across the whole field'). Its internal sample spacing is clamped to 2*radius + 0.5 so a 0.6 m dungeon wall cannot leak a shot between samples. Use it ONCE at release for target validation / soft-lock, never per frame per arrow."
+    ],
+    "gpuAndDrawCallDiscipline": [
+      "weapons.js mergedItemGeometry(name) is the pattern that must be reused for anything new that gets held or fired: every items.glb weapon is 4-5 primitives split by flat colour, and handing one straight to an NPC cost 4-5 draw calls where the old procedural plank cost 1 — tools/character-test.mjs caught a 21-strong crowd going from 5 to 8.05 calls per character. The fix bakes each primitive's flat colour into a Uint8 vertex-colour attribute and merges to ONE geometry against ONE shared material, cached by item name for the life of the process.",
+      "That path has two non-obvious hard-won details that any new item must inherit: toFloatAttribute() must float the quantised POSITION/NORMAL before applyMatrix4 (items.glb is KHR_mesh_quantization; writing float results back into a Uint16 array truncated every vertex to almost-zero and rendered armed enemies EMPTY-HANDED in a shipped build), and heldMaterial() must be THREE.DoubleSide because several items.glb nodes carry mirrored (negative-determinant) transforms whose winding flips on bake — under FrontSide those weapons back-face-culled to nothing.",
+      "weapons.js's geometry and material caches are flagged `userData.shared = true` and are NEVER disposed mid-run, because entity teardown frees anything unflagged it can reach. Any new cache (armour part geometry, arrow geometry, stow transforms) must set the same flag or it will be freed out from under every other holder.",
+      "DUNGEON_SPEC budget is <= 24 draw calls and <= 130k tris. A stowed weapon plus a drawn weapon must be the SAME object re-parented, not two meshes with one hidden — a hidden mesh still costs a matrix update and a frustum test, and two meshes is how a stow feature turns into a permanent +1 draw call.",
+      "equipWeapon() deliberately never disposes on swap. Stow/draw must obey the same law: RE-PARENT ONLY."
+    ],
+    "uiLanguageAndViewport": [
+      "src/ui/shopui.js is the closest sibling and the pattern to copy exactly: an OVERLAY toggled by classList, NOT an AppState screen — because AppState.go('city') calls Game.enterCity -> _setMode, which DISPOSES AND REBUILDS the whole city and teleports the player back to spawn. Closing an inventory panel must never do that.",
+      "It builds its own DOM and injects its own <style> so it shares neither a file nor a merge conflict with ui.js or styles.css, and it re-uses the SHIPPED classes rather than reinventing a look: .panel / .panel.wide / .panel-sub / .btn / .btn.ghost / .gate / .gate-list / .gate .meta / .gate .rank / .readout / .readout .row / .rank-E..rank-S. Colour tokens: --ink #e8ecff, --dim #8a93b8, --accent #7c5cff, --accent2 #22d3ee, --danger #ff4d6d, --gold #ffc24b, --edge rgba(124,92,255,.35).",
+      "Every node is built with createElement/textContent — the repo's standing rule is 'a markup sink is a markup sink whatever you believe about its inputs today'. Item names are generated by rollWeapon's buildName; that does not buy an innerHTML exemption.",
+      "THE VIEWPORT LESSON IS ALREADY PAID FOR. shopui.js's CSS carries this comment: 'Tighter than a gate row on purpose: a gate list is six entries and the shelf is eight, on a 412 px-tall landscape phone, inside a scroll box. The gate row's 44 px swatch and 13 px padding fit two rows in the window; this fits nearly four.' It shrank .gate padding to 9px 12px, the tier pill to 36px, and added `.shop-list { max-height: min(52vh, 360px); overflow-y: auto; }`. The inventory has strictly more content than the shop, so it needs a two-column landscape layout with independent scroll, not a longer single list.",
+      "z-index: #shop is 60 and adds body.gb-shop which hides #cityUi, because .screen is 20 and #cityUi is 40 and the live OPEN button would otherwise render on top of the panel and eat taps. The inventory must do the same.",
+      "src/main.js:126-136 handleBack() is the Android hardware-back chain; it checks `game.shopUI?.isOpen` and closes it before falling through to app.back(). The inventory needs one more line there, in front of the shop check if it can be opened over the shop (recommendation: it cannot — only one overlay at a time)."
+    ],
+    "determinismContract": [
+      "src/core/rng.js mulberry32 carries a do-not-touch warning: context-loss recovery rebuilds a gate via world.build(gate, seed), so the same seed MUST replay the exact same stream, and any change silently invalidates every saved seed plus the byte-compare soak in tools/dungeon-gen-test.mjs.",
+      "rollWeapon() is already seed-addressable: it consumes the stream in a FIXED order, and rollRarity is drawn even when a rarity was forced, precisely so a stored (base, rarity, seed, level) rebuilds byte-identically. rollArmor MUST be written as its exact structural twin or armour will drift on the first balance patch.",
+      "shop.js seeds its shelf from the rank band alone with a fixed salt (SHOP_SALT 0x5ade0f, band mixed with 0x9e3779b1) and consumes the stream for EVERY row including locked ones, so unlocking a row cannot re-roll the rows above it. Any new vendor or craft surface must pick its own salt and document it here."
+    ]
+  },
+  "equipmentSlots": {
+    "recommendation": "EIGHT slots: weapon, offhand, head, chest, hands, legs, feet, trinket. Five of them (head/chest/hands/legs/feet) are the ARMOR slots and are the only ones a set counts — which is what makes 2/4/5 clean thresholds. offhand and trinket are deliberately outside the set maths so there is always a free choice that no set can claim.",
+    "whyNotSix": "Six slots (drop hands and trinket) gives 2/4/4 thresholds, which collapses the 4-piece and full-set tiers into the same decision. Ten slots (adding shoulders, belt, two rings) is more slots than the shipped icon set can distinguish at 40 px on a phone. Five armor slots is the smallest number that supports a real partial-set curve.",
+    "slots": [
+      {
+        "id": "weapon",
+        "name": "WEAPON",
+        "contributes": "Everything about how combat FEELS: the family, hence the combo table, windup, recovery, lock, reach, arc, knockback, stagger, movement penalty, draw time. Plus dmgMul, rate, critAdd, critMul, leech from the roll.",
+        "iconKeyExample": "sword",
+        "notes": "Already exists as save.weapon. Its instance shape is unchanged. Twin daggers (archetype 'daggers') intrinsically consume the offhand — buildDaggers puts the second blade on group.userData.offhand and equipWeapon reparents it to handL. The offhand slot therefore LOCKS while a twin-dagger family is equipped, and the panel must say so rather than silently dropping the offhand item."
+      },
+      {
+        "id": "offhand",
+        "name": "OFFHAND",
+        "contributes": "Defensive or ammunition. Quiver (required by bow: +max nocked arrows, +draw speed), focus (staff: +mana, +bolt turn rate), or a parry token. NOT a shield in Wave 3-B — see openQuestions; there is no shield mesh in items.glb and adv_shield_badge is locked inside adventurers.glb behind a loader that does not exist.",
+        "iconKeyExample": "arrow",
+        "notes": "Represent the quiver with the `arrow` / `arrow_golden` icon and the focus with `crystal2` / `mineral`. No 3D mesh in Wave 3-B: an offhand item is stats + icon only. The bow can be drawn with no quiver — the quiver is an upgrade, not a requirement, because a slot that can hard-disable your weapon is a trap."
+      },
+      {
+        "id": "head",
+        "name": "HEAD",
+        "contributes": "PERCEPTION-flavoured: +tellLeadMs (the enemy wind-up warning derive() already computes) and +critDmg. The 'I see it coming' slot.",
+        "iconKeyExample": "crown",
+        "notes": "Icons: crown, crown2, and for set-specific looks the pack has no helmets, so the head piece is expressed visually through the character part-swap head part, not through a worn mesh."
+      },
+      {
+        "id": "chest",
+        "name": "CHEST",
+        "contributes": "The slab. Largest single armorDR contribution (SLOT_WEIGHT 1.00) and +maxHp. This is the slot a player upgrades first and feels immediately.",
+        "iconKeyExample": "armor_metal",
+        "notes": "Icons: armor_leather, armor_metal, armor_metal2, armor_black, armor_golden — one per set, which is a lucky exact fit for the five sets below."
+      },
+      {
+        "id": "hands",
+        "name": "HANDS",
+        "contributes": "Weapon handling: +atkSpeed (folded into the EXISTING STAT_RATES.str.atkSpeedCap of 0.30, never past it) and a small recovery shave on the current combo step.",
+        "iconKeyExample": "glove",
+        "notes": "The pack has exactly one glove model and one glove icon. All five sets share the `glove` icon tinted by rarity colour; that is honest and reads fine at 40 px."
+      },
+      {
+        "id": "legs",
+        "name": "LEGS",
+        "contributes": "Mobility: +move speed and +dodgeWindow (the perfect-dodge window derive() computes from agility).",
+        "iconKeyExample": "armor_leather",
+        "notes": "No leg model or leg icon exists. Reuse the set's chest icon at a lower saturation, or the `bag`/`pouch` icons as a legible stand-in. Flagged in openQuestions — this is the weakest icon mapping in the document and the owner should see it before it ships."
+      },
+      {
+        "id": "feet",
+        "name": "FEET",
+        "contributes": "Footing: +staggerResist and −knockback taken. The slot that makes a heavy-weapon build survivable, because heavy weapons root you.",
+        "iconKeyExample": "bone",
+        "notes": "No boot model or boot icon. Same stand-in problem as legs. staggerResist is a NEW derived value (0..0.6) that game.js's stagger application must read; there is no existing field for it."
+      },
+      {
+        "id": "trinket",
+        "name": "TRINKET",
+        "contributes": "One exotic effect, no armorDR at all. Leech, ash-find, luck (feeds rollDrop's existing `luck` parameter), mana regen, or extraction chance (feeds progression.extractionChance's PER term).",
+        "iconKeyExample": "ring3",
+        "notes": "The single best-supported slot in the pack: Ring1..Ring7 and Necklace1..Necklace3 = ten distinct models and ten distinct icons. Explicitly OUTSIDE the set maths, so there is always one slot a set cannot dictate."
+      }
+    ],
+    "dataModel": {
+      "principle": "An item DEFINITION is static, shared and read-only. An item INSTANCE is four short fields. Nothing else is ever persisted. This is not a new idea — it is the rule weapons.js already enforces ('Weapons are fully described by (base, rarity, seed, level) because rollWeapon consumes the stream in a fixed order — so the save file stores four fields instead of a snapshot that would drift the next time the tables are tuned') and armour must obey it identically or the two halves of the inventory will age differently.",
+      "definition": {
+        "shape": "{ id, slot, family|setId, tier, minRank, reqLevel, icon, model|null, look, base<stat block>, blurb }",
+        "livesIn": "WEAPONS in src/game/weapons.js (unchanged) and a new ARMOR_BASES in src/game/armor.js",
+        "ids": "lowercase, no spaces, stable forever — an id in a save is a contract. Weapons already follow this (riftedge, dawnbrand, sunderaxe, gravemaul, whisperfangs, veinsplitters, vigil, voidglaive). Armour ids are `${setId}_${slot}`: issue_chest, ossuary_feet, vigil_head, and so on."
+      },
+      "instance": {
+        "shape": "{ k, b, r, s, l }",
+        "fields": {
+          "k": "kind. 'w' weapon, 'a' armor, 't' trinket. ABSENT MEANS 'w' — that absence IS the migration for every stash entry ever written.",
+          "b": "base id",
+          "r": "rarity key ('common'..'legendary')",
+          "s": "uint32 seed",
+          "l": "level the item was rolled at"
+        },
+        "note": "Byte-compatible with today's serializeWeapon output, which emits {b,r,s,l} and no k. deserializeItem reads k ?? 'w'."
+      },
+      "savePersistence": {
+        "newField": "save.equipment = { weapon: null, offhand: null, head: null, chest: null, hands: null, legs: null, feet: null, trinket: null } — each null or an instance record.",
+        "schemaBump": "NONE. Follow the save.shop / save.worldTime precedent verbatim: an absent value is indistinguishable from the default, so ensureEquipment(save) is the migration and it runs on first contact from every entry point. SCHEMA_VERSION stays 2.",
+        "migrationPath": [
+          "ensureEquipment(save): if save.equipment is missing or not an object, create the eight-key object with all nulls.",
+          "If save.equipment.weapon is null AND save.weapon is a valid record, COPY save.weapon into save.equipment.weapon. That is the entire v-old -> v-new upgrade for the one slot that already existed.",
+          "Sanitise structurally only (does b look like a string, is s a finite number) and NEVER import weapons.js from save.js — save.js deliberately does not pull THREE in to validate a string, and sanitiseShop() is the precedent.",
+          "Filter save.stash: entries lacking k get k:'w'; entries whose k is unknown are dropped, not thrown on."
+        ],
+        "dualWrite": "_persistLoadout MUST keep writing save.weapon as a mirror of save.equipment.weapon. A build rolled back to the shipped version reads save.weapon and finds the right sword. Dropping the mirror is how a rollback loses a player's weapon, and save.js's own comment about leaving the v1 key in place is the precedent for caring about this.",
+        "stashLimit": "12 -> 40. Armour fills 12 in a single D-rank dungeon. 40 records x 5 short fields is nothing in localStorage."
+      },
+      "invariants": [
+        "An instance never appears in two places at once. equipSlot(save, slot, instance) removes it from the stash and pushes the outgoing one — SWAP, never push-only. This closes the duplication hole described in auditFindings.saveAndLoadoutSeams.",
+        "Equipping is refused, with a reason string in the shop's language ('REQUIRES LEVEL 14', 'B-GRADE HUNTERS ONLY'), when base.reqLevel > save.level or base.minRank > shopBand(save). Reuse shop.js's shopBand and its exact wording so two panels do not disagree about the same rule.",
+        "Every derived number is recomputed from (save, equipment) on equip. Nothing caches a stat line, because a stat line is exactly the thing that drifts when tables are tuned.",
+        "armor.js and equipment.js are THREE-free and DOM-free, like config.js / progression.js / shop.js, so they can be driven headless by node."
+      ]
+    }
+  },
+  "armorSets": {
+    "identification": "Each armour base carries setId. A set is counted over the FIVE armour slots only (head, chest, hands, legs, feet). Offhand and trinket never count. setProgress(equipment) returns a Map of setId -> count, which is all the UI and the bonus resolver need.",
+    "perPieceStats": {
+      "armorPoints": {
+        "formula": "AP = SLOT_WEIGHT[slot] * TIER_AP[tier] * RARITIES[rarity].mul",
+        "TIER_AP": {
+          "1": 12,
+          "2": 22,
+          "3": 36,
+          "4": 55,
+          "5": 80
+        },
+        "SLOT_WEIGHT": {
+          "chest": 1.0,
+          "legs": 0.75,
+          "head": 0.6,
+          "feet": 0.5,
+          "hands": 0.45
+        },
+        "slotWeightSum": 3.3,
+        "rarityMultiplier": "Reuse the SHIPPED RARITIES table (common 1.00, uncommon 1.09, rare 1.20, epic 1.36, legendary 1.58). Do not invent a second rarity ladder; two ladders is how a weapon rare and an armour rare stop meaning the same thing."
+      },
+      "damageReduction": {
+        "formula": "armorDR = AP_total / (AP_total + 90 + 26 * level)",
+        "why": "A soft curve that asymptotes below 1 and whose denominator grows with level, so a tier-1 set decays into irrelevance without any explicit expiry rule. No clamp is needed on the term itself; the clamp lives on the TOTAL.",
+        "workedExamples": [
+          "Full tier-1 common set at L5: AP = 12 * 3.30 = 39.6; denominator 39.6 + 90 + 130 = 259.6; armorDR = 15.3%.",
+          "Full tier-3 common set at L20: AP = 36 * 3.30 = 118.8; denominator 118.8 + 90 + 520 = 728.8; armorDR = 16.3%.",
+          "Full tier-3 EPIC set at L20: AP = 118.8 * 1.36 = 161.6; denominator 161.6 + 610 = 771.6; armorDR = 20.9%.",
+          "Full tier-5 legendary set at L60: AP = 80 * 3.30 * 1.58 = 417.1; denominator 417.1 + 90 + 1560 = 2067.1; armorDR = 20.2%.",
+          "Read the shape: armorDR sits in a 15-21% band across the WHOLE game. Armour is a steady, legible, never-runaway layer. The excitement comes from the set RULES and the affixes, not from the slab."
+        ],
+        "stacking": "MULTIPLICATIVE with the existing vitality DR: taken = raw * (1 - derive().dr) * (1 - armorDR). Then a HARD CLAMP: total reduction may never exceed 0.72, i.e. taken >= raw * 0.28. derive().dr already caps at 0.45; 0.45 and 0.21 multiply to 0.565, so the clamp is headroom for affixes and set rules rather than a wall the honest builds hit."
+      },
+      "secondaryBySlot": {
+        "head": "tellLeadMs +6 * tier (on top of derive().tellLeadMs, still clamped by STAT_RATES.per.tellCapMs 520); critDmg +0.02 * tier",
+        "chest": "maxHp +9 * tier; carries the largest SLOT_WEIGHT so it is also the DR slot",
+        "hands": "atkSpeed +0.012 * tier, folded into the EXISTING STAT_RATES.str.atkSpeedCap of 0.30",
+        "legs": "speed +0.045 * tier, with a HARD armour-speed cap of +0.6 u/s across all sources; dodgeWindow +0.008 * tier s, clamped by the existing dodgeCapMs 260",
+        "feet": "staggerResist +0.06 * tier (NEW derived value, clamp 0.60); knockback taken -0.05 * tier (clamp 0.50)",
+        "trinket": "no AP, no secondary — one rolled exotic affix only"
+      },
+      "affixes": {
+        "count": "Reuse RARITIES[r].affixes exactly: common 0, uncommon 1, rare 2, epic 3, legendary 4.",
+        "pool": "A SEPARATE ARMOR_AFFIXES table, because the shipped AFFIXES all mutate weapon fields (dmgMul, rate, critAdd, knockMul, reachMul, leech) and would be meaningless on a boot.",
+        "ARMOR_AFFIXES": [
+          {
+            "key": "guarded",
+            "name": "Guarded",
+            "lo": 0.05,
+            "hi": 0.14,
+            "apply": "a.apMul *= 1 + m"
+          },
+          {
+            "key": "vital",
+            "name": "Vital",
+            "lo": 0.02,
+            "hi": 0.07,
+            "apply": "a.hpMul *= 1 + m"
+          },
+          {
+            "key": "fleet",
+            "name": "Fleet",
+            "lo": 0.02,
+            "hi": 0.08,
+            "apply": "a.speedAdd += m * 0.9"
+          },
+          {
+            "key": "rooted",
+            "name": "Rooted",
+            "lo": 0.04,
+            "hi": 0.12,
+            "apply": "a.staggerResist += m"
+          },
+          {
+            "key": "deft",
+            "name": "Deft",
+            "lo": 0.01,
+            "hi": 0.035,
+            "apply": "a.atkSpeedAdd += m"
+          },
+          {
+            "key": "thirsting",
+            "name": "Thirsting",
+            "lo": 0.005,
+            "hi": 0.02,
+            "apply": "a.leech += m"
+          },
+          {
+            "key": "ashen",
+            "name": "Ashen",
+            "lo": 0.04,
+            "hi": 0.16,
+            "apply": "a.ashFind += m"
+          }
+        ],
+        "note": "Same lo/hi/apply(target, magnitude) contract the weapon affixes use, drawn without replacement from a pool copy, so rollArmor is a structural clone of rollWeapon and the two stay in step forever."
+      }
+    },
+    "setBonusLaw": "PARTIAL BONUSES ARE SMALL FLAT NUMBERS. THE FULL-SET BONUS IS A RULE, NOT A NUMBER. This asymmetry is the entire anti-trivialisation argument and it should be stated in the armor.js header. A number can be stacked, multiplied, and compared against a bigger number; a rule cannot be stacked with itself, and you only have five armour slots so exactly one full-set rule can ever be live. Meanwhile two 2-piece partials (from two different sets) are deliberately allowed and deliberately competitive — 6% + 6% is a real choice against one 5-piece rule, and that tension is the interesting part of the system. Set bonuses do NOT scale with rarity or with level. A legendary set piece is better than a common one through AP and affixes only.",
+    "thresholds": [
+      2,
+      4,
+      5
+    ],
+    "sets": [
+      {
+        "setId": "issue",
+        "name": "HUNTER'S ISSUE",
+        "tier": 1,
+        "minRank": 0,
+        "reqLevel": 1,
+        "chestIcon": "armor_leather",
+        "flavour": "What the Association hands you at the door. It is not good. It is yours.",
+        "bonus2": "+8% ash from kills (multiplies shop.ashForXp at the payout site).",
+        "bonus4": "Dash cooldown -0.25 s (SKILLS.dash.cd 1.60 -> 1.35).",
+        "bonus5": "RULE — The first hit you take in each dungeon room is reduced by 40%. Resets on room entry, which the dungeon layer already knows about; it does not reset on a wipe of the current room."
+      },
+      {
+        "setId": "ossuary",
+        "name": "OSSUARY PLATE",
+        "tier": 2,
+        "minRank": 1,
+        "reqLevel": 6,
+        "chestIcon": "armor_metal",
+        "flavour": "Bone laid into steel. The Gravelord's tithe, worn outward.",
+        "bonus2": "+10% armorDR (multiplies the armorDR term, before the 0.72 total clamp).",
+        "bonus4": "+18% staggerResist, knockback taken -25%.",
+        "bonus5": "RULE — Below 35% HP you take 20% less damage and cannot be staggered by trash-tier enemies (ENEMY_TYPES grunt/stalker). Elites and bosses still stagger you."
+      },
+      {
+        "setId": "deepglass",
+        "name": "DEEPGLASS WEAVE",
+        "tier": 3,
+        "minRank": 2,
+        "reqLevel": 14,
+        "chestIcon": "armor_metal2",
+        "flavour": "Cold enough to keep. Light enough to run in.",
+        "bonus2": "+0.35 move speed (counts against the +0.6 armour speed cap).",
+        "bonus4": "Perfect-dodge window +40 ms (on top of derive().dodgeWindow, still clamped by dodgeCapMs 260).",
+        "bonus5": "RULE — A perfect dodge refunds 25% of the dodged hit's damage as mana and makes your next attack a guaranteed crit. One charge, consumed by the next connecting hit, no stacking."
+      },
+      {
+        "setId": "emberfall",
+        "name": "EMBERFALL HARNESS",
+        "tier": 4,
+        "minRank": 3,
+        "reqLevel": 22,
+        "chestIcon": "armor_black",
+        "flavour": "It was already burning when they pulled it out.",
+        "bonus2": "+6% attack speed (folded into the existing 0.30 atkSpeed cap).",
+        "bonus4": "Combo finishers leech 3% of damage dealt.",
+        "bonus5": "RULE — Every third combo finisher detonates for 60% weapon damage in a 4 m ring. Uses the existing fx.ring + fx.addShake, so it costs no new VFX asset. The counter is per-run, not per-encounter."
+      },
+      {
+        "setId": "vigil",
+        "name": "ARCHON'S VIGIL",
+        "tier": 5,
+        "minRank": 4,
+        "reqLevel": 34,
+        "chestIcon": "armor_golden",
+        "flavour": "Made for someone who commands more soldiers than he has hands.",
+        "bonus2": "+12% shadow damage (multiplies derive().shadowDmgMul).",
+        "bonus4": "+2 shadow field capacity — STILL clamped by progression.shadowFieldCapacity's quality-tier ceiling and its hard Math.min(12). On a low tier this bonus does nothing, and the panel must say '+2 (capped by graphics tier)' rather than lying.",
+        "bonus5": "RULE — Bound shadows inherit 15% of your armorDR and your active 2-piece bonus. They do not inherit the 4- or 5-piece."
+      }
+    ],
+    "guardrails": [
+      "Total damage reduction from every source is hard-clamped at 0.72. Assert it in tools/armor-test.mjs with a deliberately absurd loadout.",
+      "Total armour-sourced move speed is hard-clamped at +0.6 u/s. Base speed is 6.0 and agility's own bonus caps at +4.2, so armour must never become the dominant speed source.",
+      "Armour atkSpeed folds into STAT_RATES.str.atkSpeedCap (0.30). It does not get its own budget.",
+      "Set bonuses are flat and level-independent. There is no scaling term to accidentally exponentiate.",
+      "Balance envelope, asserted in the test at L20 / L50 / L80: a full best-in-slot set for the level may not exceed +35% effective survivability (measured as 1/(1-totalDR) times the hp multiplier) or +12% offense (dps proxy) versus naked. If a set exceeds it, the test fails and the table is wrong — not the test."
+    ]
+  },
+  "weaponFamilies": {
+    "law": "A family is a FEEL, not a stat line. weapons.js already says this in its header and it is right: 'the greataxe is not a slower sword with bigger numbers — it locks you in place for a second and hits everything in front of you.' Every new family below must earn its existence with a verb, not a multiplier.",
+    "modelMappingRule": "Only names verified present in the shipped pack appear below. Where the pack has nothing honest, the family is PROCEDURAL and says so. weapons.js's weaponModelName() already refuses to give the polearm an arrow-shaped silhouette; that refusal is the standard.",
+    "families": [
+      {
+        "id": "sword",
+        "name": "Sword",
+        "status": "SHIPPED (ARCHETYPES.sword, WEAPONS.riftedge + WEAPONS.dawnbrand)",
+        "models": {
+          "common": "Sword",
+          "epicPlus": "Sword_Golden",
+          "icon": "sword"
+        },
+        "grip": "SHIPPED: ARCHETYPES.sword.grip { y: 0, z: 0.08, rx: -0.45, rz: 0 }; MODEL_SCALE.sword 0.60; MODEL_TILT.sword -0.30. Do not retune without a screenshot — the note in weapons.js records that these were authored against the box-man, then re-measured against the SKINNED rig, and that anything shallower than ~25 degrees leaves the blade inside the arm silhouette.",
+        "identity": "The reference weapon. Three chops, moderate reach, cancels cleanly out of every step, no penalty severe enough to punish a beginner. Everything else in the game is described relative to this.",
+        "mass": 1.4
+      },
+      {
+        "id": "greatsword",
+        "name": "Greatsword",
+        "status": "NEW (Wave 3-B). The model is already in items.glb AND already in HELD_MODELS as `bigsword` (used by lancer and boss enemies) — no player archetype uses it.",
+        "models": {
+          "common": "Sword_big",
+          "epicPlus": "Sword_big_Golden",
+          "icon": "sword_big"
+        },
+        "grip": "HELD_MODELS.bigsword already carries scale 0.52, tilt -0.32, grip { y: -0.02, z: 0.08, rx: -0.55 } and those were measured on a spawned lancer. Lift them verbatim into a new ARCHETYPES.greatsword.grip; add MODEL_SCALE.greatsword 0.52 and MODEL_TILT.greatsword -0.32 and a `case 'greatsword'` in weaponModelName.",
+        "identity": "NOT a slow sword and NOT a straight axe. The greatsword is LINEAR where the greataxe is WIDE: a narrow overhead that reaches 4.6 m, then a horizontal sweep, then a THIRD step you can hold to charge. Lower knockback than an axe, much higher stagger — it does not launch enemies, it stops them. Best reach of any melee family except the spear.",
+        "mass": 3.6,
+        "combo": "GREATSWORD_COMBO, three steps, third chargeable — see weaponPhysics.familyTable."
+      },
+      {
+        "id": "dagger",
+        "name": "Twin Daggers",
+        "status": "SHIPPED (ARCHETYPES.daggers, WEAPONS.whisperfangs + WEAPONS.veinsplitters)",
+        "models": {
+          "common": "Dagger",
+          "epicPlus": "Dagger_Golden",
+          "icon": "dagger"
+        },
+        "grip": "SHIPPED: grip { y: 0.02, z: 0.10, rx: -0.65, rz: 0 }, MODEL_SCALE 0.50, MODEL_TILT -0.20. The offhand blade is built by buildDaggers/buildPackMesh with rotation (PI*0.92, 0, 0.18) and offset (0, 0.04, -0.02) — a real reverse grip, so the silhouette does not lie — and equipWeapon layers the archetype grip on top of that authored rotation rather than replacing it.",
+        "identity": "Five hits, 2.0 m reach, a real forward step on every light so a full combo closes about 4 m of ground. Crits constantly, staggers nothing, and never stops moving (move 0.62 vs the sword's 0.35). The archetype hunts you into the enemy's face.",
+        "mass": 0.9,
+        "note": "Occupies BOTH hands. The offhand equipment slot locks while daggers are equipped."
+      },
+      {
+        "id": "axe",
+        "name": "Hand Axe",
+        "status": "NEW (Wave 3-B). Model already in items.glb and already in HELD_MODELS as `axe` (carried by grunts).",
+        "models": {
+          "common": "Axe_small",
+          "epicPlus": "Axe_small_Golden",
+          "icon": "axe_small"
+        },
+        "grip": "HELD_MODELS.axe: scale 0.62, tilt -0.34, grip { y: -0.02, z: 0.08, rx: -0.55 }. Lift verbatim.",
+        "identity": "The HOOK. Mid speed, mid reach, and the verb nothing else has: every connecting hit applies a 3 s bleed (a small damage-over-time that does not stack past 3 applications), and the finisher HOOKS — it pulls the target 1.2 m toward you instead of knocking it away. That inversion of knockback is the whole reason this family exists between sword and greataxe: it is the weapon that refuses to let anything leave.",
+        "mass": 2.1
+      },
+      {
+        "id": "greataxe",
+        "name": "Greataxe / Maul",
+        "status": "SHIPPED (ARCHETYPES.greataxe, WEAPONS.sunderaxe + WEAPONS.gravemaul)",
+        "models": {
+          "axeCommon": "Axe_Double",
+          "axeEpicPlus": "Axe_Double_Golden",
+          "maulCommon": "Hammer_Double",
+          "maulEpicPlus": "Hammer_Double_Golden",
+          "icons": [
+            "axe_double",
+            "hammer_double"
+          ]
+        },
+        "grip": "SHIPPED: grip { y: -0.02, z: 0.10, rx: -0.35, rz: 0.10 }, MODEL_SCALE 0.62, MODEL_TILT -0.26. weaponModelName already branches on base.look.head === 'maul' to pick the hammer, with a good reason recorded: the maul's finisher is a ground pound and giving it an axe would misread the one archetype whose finisher does not swing at anything.",
+        "identity": "Commitment. lock EQUALS the total step duration, so the swing owns you from the moment you press. Two steps, huge arcs (1.15pi and 1.35pi; the maul's finisher is a full 2pi radial), move 0.10 and 0.06. The maul finisher is the only radial attack in the game (isRadial(step) checks arc >= 1.99pi).",
+        "mass": {
+          "greataxe": 4.8,
+          "maul": 6.2
+        }
+      },
+      {
+        "id": "bow",
+        "name": "Bow",
+        "status": "NEW (Wave 3-B). Model in items.glb and in HELD_MODELS as `bow` — nothing in the game uses it. Ammunition models exist too.",
+        "models": {
+          "common": "Bow_Wooden",
+          "epicPlus": "Bow_Golden",
+          "projectileCommon": "Arrow",
+          "projectileEpicPlus": "Arrow_Golden",
+          "icons": [
+            "bow_wooden",
+            "arrow"
+          ]
+        },
+        "grip": "HELD_MODELS.bow already carries scale 0.62, tilt -0.10 and grip { y: 0, z: 0.04, rx: -0.35 } — note the much shallower tilt, correct because a bow is held across the body, not raised. IMPORTANT: a bow belongs in the LEFT hand. HELD_MODELS assumes the right (weapons.js parents `main` to handSocket(rig,'R')). The bow family must set a `mainHand: 'L'` flag on the archetype and let equipWeapon honour it; adventurers.json independently confirms the convention (adv_bow attaches to handslot_l, adv_arrow to handslot_r).",
+        "identity": "No melee arc AT ALL. Hold to draw, release to fire; both damage and arrow speed scale with draw. Reach is 34 m, movement while drawing is 0.45, and the moment an enemy is inside 3 m the bow is nearly useless — that is the trade, and it must be felt rather than written in a tooltip.",
+        "mass": 1.1,
+        "requires": "projectiles.js (buildOrder step 8). Gravity and a vertical velocity component do not exist in the current projectile loop."
+      },
+      {
+        "id": "staff",
+        "name": "Staff",
+        "status": "NEW (Wave 3-B). PROCEDURAL — and this is a hard finding, not a preference.",
+        "models": {
+          "itemsGlb": "NONE. items.glb contains no staff, no wand and no rod. Any spec claiming otherwise is wrong.",
+          "recommended": "Procedural haft (weapons.js already has cyl/haftMat/darkMat/edgeMat building blocks, and entities.js already has a staffMesh(glow) used for caster enemies) topped with a pack CRYSTAL — Crystal2 for the base, Crystal4 and Mineral as tier variants, Chalice for an exotic. Crystals are 1-3 primitives each, they go through the same mergedItemGeometry path, and the silhouette reads unambiguously as a magic implement at play distance.",
+          "rejectedAlternative": "adventurers.glb's adv_staff is real, CC0 and already on disk — but adventurers.json says no src/ consumer exists yet and every prop is namespaced under a specific character's handslot node. Harvesting it means a second loader, a second index and a second disposal path on the critical wave. Do it later if the procedural staff reads badly; do not do it to save one model.",
+          "icons": [
+            "crystal2",
+            "mineral",
+            "chalice"
+          ]
+        },
+        "grip": "New: { y: 0.02, z: 0.10, rx: -0.28, rz: 0 }, two-handed anim (twoHand: true), MODEL_SCALE n/a (procedural is authored at rig scale 1 like every other procedural builder).",
+        "identity": "Costs mana where every other family costs only time. Light attack fires a slow, heavy bolt (18 m/s, arcs under the same gravity as an arrow); the finisher is a short channelled beam that ticks while you hold it and roots you at move 0.20. The offhand focus increases the bolt's turn rate.",
+        "mass": 1.6
+      },
+      {
+        "id": "polearm",
+        "name": "Spear / Glaive",
+        "status": "SHIPPED but PROCEDURAL FOREVER, unless a new pack is licensed",
+        "models": {
+          "itemsGlb": "NONE — weaponModelName returns null for polearm on purpose, with the reasoning recorded in the file. buildPolearm covers spear and glaive procedurally.",
+          "icon": "no honest icon exists; use `dart` or ship a procedural canvas icon"
+        },
+        "identity": "SHIPPED: spear pokes from outside their swing (arc 0.20-0.26pi, range 4.6-6.0, move 0.70); glaive alternates thrust and sweep so one weapon covers single-target and crowd.",
+        "mass": 2.2,
+        "note": "The missing icon is the real problem for the inventory panel, not the missing model. Flagged in openQuestions."
+      }
+    ],
+    "gripWorkThatIsGenuinelyNew": [
+      "weaponModelName() currently handles exactly three archetypes (sword, greataxe, daggers) and returns null for everything else. It needs cases for greatsword, axe, bow, and a deliberate null for staff.",
+      "MODEL_SCALE and MODEL_TILT are three-entry and four-entry maps respectively. Both need the new families, and every value must be VERIFIED BY SCREENSHOT against the skinned rig, not derived — the file's own comment says plainly that measuring against the actual rig 'is the only way to get this right'.",
+      "equipWeapon() hardcodes the main weapon to the RIGHT hand. The bow needs a left-hand main. Add `mainHand: 'R' | 'L'` to the archetype and read it in equipWeapon; the offhand path already handles the other hand.",
+      "The arm animation table (ARCHETYPES[x].anim { lo, hi, twist, twoHand, thrust, alternate }) needs entries for the new families. Bow and staff are neither swing nor thrust — they want a new `anim.kind: 'swing' | 'thrust' | 'draw' | 'cast'` so animateRig can hold a draw pose instead of interpolating a chop. This is the one genuinely new animation work in the whole spec."
+    ]
+  },
+  "weaponPhysics": {
+    "law": "MASS IS REAL. ENCHANTMENT IS NOT MASS. Every weapon has a mass and a moment of inertia. Mass sets windup, recovery, lock, movement penalty, stagger, knockback and draw time — and NOTHING in the game may push any of those below the family's floor. Enchantment changes what the damage IS (fire, void, bleed, void-rend), adds effects (leech, chain, hook, detonation), and may bend a TRAJECTORY (a bolt that steers, a blade that curves) — but it never makes a greataxe light. A legendary greataxe hits harder, burns, and cracks the floor. It still swings like a greataxe. This is the rule because weight is the only thing the player's hands can learn; if magic were allowed to void it, the hands would stop learning and every weapon would collapse back into the same weapon with different numbers — which, as auditFindings records, is EXACTLY the state the game is in today.",
+    "magicMayBendExactlyTwoThings": [
+      "1. DAMAGE TYPE AND EFFECT. An enchantment may change what a hit does after it lands. It may never change how long the hit took to arrive or how long you are stuck afterwards.",
+      "2. TRAJECTORY CURVATURE, BOUNDED. A magic projectile may steer, up to a stated maximum turn rate (90 deg/s for the staff bolt, 0 for arrows). It may not teleport, it may not ignore gravity, and it may not exceed its family's launch speed. A fast-moving target can therefore still outrun a homing bolt, which is what keeps 'homing' a property rather than a guarantee."
+    ],
+    "authoringFormulaForNewFamiliesOnly": {
+      "windup": "0.115 * sqrt(mass) * lengthFactor, lengthFactor = reach / 3.0",
+      "recovery": "0.72 * windup for one-handed, 0.85 * windup for two-handed",
+      "lock": "windup + active + recovery for mass >= 4.0 (full commitment); windup + 0.55 * recovery below that",
+      "stagger": "0.09 * mass on an opener, 0.19 * mass on a finisher",
+      "knockback": "2.1 * mass on an opener, 4.0 * mass on a finisher",
+      "moveMultiplierDuringStep": "clamp(0.72 - 0.11 * mass, 0.06, 0.70)",
+      "hitStop": "0.019 * mass on a connecting finisher, 0 on openers below mass 2.0",
+      "DO_NOT_APPLY_RETROACTIVELY": "These formulas are an AUTHORING GUIDE for the families that do not exist yet. The SHIPPED tables (SWORD_COMBO, GREATAXE_COMBO, MAUL_COMBO, DAGGER_COMBO, SPEAR_COMBO, GLAIVE_COMBO) must be left byte-identical. They were hand-tuned, and regenerating them from a formula would drift the one thing the owner has already approved. If a formula disagrees with a shipped number, the formula is wrong."
+    },
+    "familyTable": [
+      {
+        "family": "dagger",
+        "massKg": 0.9,
+        "steps": 5,
+        "arcPi": 0.5,
+        "windup": 0.075,
+        "active": 0.05,
+        "recovery": 0.055,
+        "lock": 0.075,
+        "cancel": 0.05,
+        "reachM": 2.0,
+        "staggerOpener": 0.0,
+        "staggerFinisher": 0.2,
+        "knockOpener": 0.7,
+        "knockFinisher": 4.0,
+        "moveMul": 0.62,
+        "hitStop": 0.0,
+        "shake": 0.0,
+        "source": "SHIPPED — DAGGER_COMBO, unchanged"
+      },
+      {
+        "family": "sword",
+        "massKg": 1.4,
+        "steps": 3,
+        "arcPi": 0.62,
+        "windup": 0.17,
+        "active": 0.09,
+        "recovery": 0.08,
+        "lock": 0.26,
+        "cancel": 0.09,
+        "reachM": 2.9,
+        "staggerOpener": 0.0,
+        "staggerFinisher": 0.45,
+        "knockOpener": 2.5,
+        "knockFinisher": 9.0,
+        "moveMul": 0.35,
+        "hitStop": 0.05,
+        "shake": 0.3,
+        "source": "SHIPPED — SWORD_COMBO, unchanged, and byte-identical to the hardcoded swing in game.js"
+      },
+      {
+        "family": "axe",
+        "massKg": 2.1,
+        "steps": 3,
+        "arcPi": 0.7,
+        "windup": 0.21,
+        "active": 0.1,
+        "recovery": 0.14,
+        "lock": 0.38,
+        "cancel": 0.09,
+        "reachM": 3.0,
+        "staggerOpener": 0.15,
+        "staggerFinisher": 0.55,
+        "knockOpener": 5.0,
+        "knockFinisher": -12.0,
+        "moveMul": 0.3,
+        "hitStop": 0.05,
+        "shake": 0.28,
+        "source": "NEW — note the NEGATIVE finisher knockback: that is the hook, and it needs game.js's knockback application to accept a negative impulse as a pull toward the attacker rather than clamping it to zero"
+      },
+      {
+        "family": "greatsword",
+        "massKg": 3.6,
+        "steps": 3,
+        "arcPi": 0.95,
+        "windup": 0.34,
+        "active": 0.13,
+        "recovery": 0.26,
+        "lock": 0.72,
+        "cancel": 0.12,
+        "reachM": 4.6,
+        "staggerOpener": 0.45,
+        "staggerFinisher": 0.95,
+        "knockOpener": 8.0,
+        "knockFinisher": 16.0,
+        "moveMul": 0.16,
+        "hitStop": 0.08,
+        "shake": 0.55,
+        "source": "NEW — third step chargeable: holding the attack input extends windup up to +0.45 s and scales dmg 1.0 -> 2.1 linearly over that hold"
+      },
+      {
+        "family": "greataxe",
+        "massKg": 4.8,
+        "steps": 2,
+        "arcPi": 1.15,
+        "windup": 0.42,
+        "active": 0.14,
+        "recovery": 0.34,
+        "lock": 0.9,
+        "cancel": 0.14,
+        "reachM": 4.0,
+        "staggerOpener": 0.55,
+        "staggerFinisher": 0.9,
+        "knockOpener": 13.0,
+        "knockFinisher": 20.0,
+        "moveMul": 0.1,
+        "hitStop": 0.1,
+        "shake": 0.9,
+        "source": "SHIPPED — GREATAXE_COMBO, unchanged. lock EQUALS total duration on purpose"
+      },
+      {
+        "family": "maul",
+        "massKg": 6.2,
+        "steps": 2,
+        "arcPi": 1.2,
+        "windup": 0.48,
+        "active": 0.15,
+        "recovery": 0.4,
+        "lock": 1.03,
+        "cancel": 0.15,
+        "reachM": 4.0,
+        "staggerOpener": 0.65,
+        "staggerFinisher": 1.1,
+        "knockOpener": 15.0,
+        "knockFinisher": 24.0,
+        "moveMul": 0.08,
+        "hitStop": 0.12,
+        "shake": 1.1,
+        "source": "SHIPPED — MAUL_COMBO, unchanged. Finisher arc is 2.00pi (radial) because a ground pound has no front"
+      },
+      {
+        "family": "spear",
+        "massKg": 2.2,
+        "steps": 3,
+        "arcPi": 0.22,
+        "windup": 0.2,
+        "active": 0.09,
+        "recovery": 0.13,
+        "lock": 0.29,
+        "cancel": 0.1,
+        "reachM": 4.6,
+        "staggerOpener": 0.0,
+        "staggerFinisher": 0.5,
+        "knockOpener": 3.5,
+        "knockFinisher": 11.0,
+        "moveMul": 0.7,
+        "hitStop": 0.06,
+        "shake": 0.35,
+        "source": "SHIPPED — SPEAR_COMBO, unchanged"
+      },
+      {
+        "family": "bow",
+        "massKg": 1.1,
+        "steps": 1,
+        "arcPi": 0.0,
+        "windup": "draw 0.22 min / 0.55 full",
+        "active": 0.02,
+        "recovery": 0.22,
+        "lock": 0.3,
+        "cancel": 0.06,
+        "reachM": 34.0,
+        "staggerOpener": 0.1,
+        "staggerFinisher": 0.1,
+        "knockOpener": 1.5,
+        "knockFinisher": 1.5,
+        "moveMul": "0.45 while drawing, 0.85 otherwise",
+        "hitStop": 0.0,
+        "shake": 0.1,
+        "source": "NEW — no melee arc; the whole family is the projectile"
+      },
+      {
+        "family": "staff",
+        "massKg": 1.6,
+        "steps": 2,
+        "arcPi": 0.0,
+        "windup": 0.28,
+        "active": 0.06,
+        "recovery": 0.18,
+        "lock": 0.34,
+        "cancel": 0.1,
+        "reachM": 18.0,
+        "staggerOpener": 0.2,
+        "staggerFinisher": 0.35,
+        "knockOpener": 2.0,
+        "knockFinisher": 5.0,
+        "moveMul": 0.55,
+        "hitStop": 0.0,
+        "shake": 0.15,
+        "source": "NEW — finisher is a channelled beam that roots to move 0.20 while held, up to 1.6 s, costing mana per tick"
+      }
+    ],
+    "whatThePlayerActuallyFEELS": {
+      "commitment": "isCommitted(state, w) already returns true while state.t < step.lock, and the intent is that dash and every other escape is REFUSED while it holds. Wiring that is what makes a greataxe swing frightening: you press, and for 0.90 s you are a statue with an axe in the air. A dagger's lock equals its windup (0.075 s), so you are effectively never trapped. This one boolean is the largest single contributor to 'weight' in the entire game and it currently does nothing because nothing calls it.",
+      "recoveryIsThePunishment": "Recovery is tuned against enemy attack cooldowns, and the relationship is deliberate: grunt attackCd is 1.5 s and stalker is 1.2 s (config.ENEMY_TYPES). A whiffed greataxe finisher costs 0.55 windup + 0.16 active + 0.52 recovery = 1.23 s, which is almost exactly one free enemy attack. A whiffed dagger light costs 0.18 s, which is nothing. State this relationship in the code so a future tuner does not break it by accident.",
+      "momentumCarry": "Today `state.lunge = step.lunge` is set once at step start and consumed as a single impulse (startAttack + consumeLunge). Heavy weapons should CARRY: the impulse spread across windup into active, so the body visibly leans into the swing and arrives with the blade instead of teleporting first. Add `lungeCurve: 'impulse' | 'carry'` to the step; 'carry' distributes lunge over (windup + active) with an ease-in. Cheap — one field, one lerp in consumeLunge — and it is the difference between a big swing and a big swing that has weight behind it.",
+      "reachIsGeometryNotAStat": "A family's `range` must be within 0.5 m of its model's ACTUAL tip distance: itemBounds(name).y * MODEL_SCALE[family] + 0.72 * rigScale. models.js exports itemBounds() specifically for 'reach/socket tuning' and nothing uses it. Make it an assertion in the items test: a weapon whose stated reach disagrees with its mesh by more than 0.5 m is a lie the player can see and will learn to distrust. This is the single most checkable invariant in the whole physics section.",
+      "hitStopAndShakeAreMass": "Both fields already exist on every combo step and both already follow the mass ordering (dagger 0.00 / sword finisher 0.05 / greataxe finisher 0.10 / maul finisher 0.12; shake 0.00 / 0.30 / 0.90 / 1.10). Keep the ordering monotonic in mass forever; assert it in the test so a tuning pass cannot invert it silently.",
+      "drawTimeIsMassToo": "See stowDraw.drawTime — sheathing and drawing obey the same law as swinging, which is what stops stow/draw being a free cosmetic toggle."
+    },
+    "projectilePhysics": {
+      "currentState": "game.js:1139 _spawnProjectile stores { mesh, pos, dir, speed, damage, life, color } with dir flattened by .setY(0).normalize(). game.js:1667 _updateProjectiles does pos.addScaledVector(dir, speed * dt), kills on life <= 0, on hypot(x,z) > world.radius + 2, and on obstacleField.blocked(x, z, 0.25, 0, pos.y). Player collision is a 1.1 m sphere test against the player at y 1.2.",
+      "requiredChange": "Add optional `vy` (vertical velocity, m/s) and `g` (gravity, m/s^2) to the projectile record. Integration becomes: pos.x += dir.x * speed * dt; pos.z += dir.z * speed * dt; pos.y += vy * dt; vy -= g * dt. EVERY EXISTING CALLER PASSES g = 0 AND vy = 0, which reproduces today's flat integration EXACTLY — assert that byte-equality in the test rather than assuming it. Enemy caster bolts and boss spread shots must not change by a single float.",
+      "arrowNumbers": {
+        "gravity": "g = 9.0 m/s^2 — slightly under real gravity so aim stays forgiving on a phone without reading as floaty.",
+        "launchSpeed": "22 m/s at minimum draw, 46 m/s at full draw, linear in draw fraction.",
+        "launchElevation": "The aim solver picks vy for a flat-ish arc to the soft-locked target; without a target, vy = speed * 0.12 (a gentle rise).",
+        "dropExample": "At 46 m/s over 20 m the flight time is 0.435 s and the drop is 0.5 * 9.0 * 0.435^2 = 0.85 m. Visible, aimable, not annoying. At 22 m/s over the same distance the drop is 3.7 m, which is why a snapped-off shot misses and a drawn one does not — the player learns the draw from the arc, not from a number.",
+        "lifetime": "2.5 s (arrows outrun the 4 s bolt lifetime and would otherwise leave the disc cull first anyway).",
+        "damage": "0.55x weapon damage at minimum draw, 1.35x at full."
+      },
+      "staffBoltNumbers": {
+        "gravity": "g = 9.0 — the SAME constant as arrows. That shared constant is the whole 'internally consistent magic' argument made visible: a bolt is slower, so it arcs more, so magic looks heavier than an arrow rather than looking like it broke a rule.",
+        "launchSpeed": "18 m/s, no charge.",
+        "turnRate": "90 deg/s maximum, applied to the horizontal direction only. A stalker at 5.3 m/s can outrun a bolt at range; a brute at 2.3 m/s cannot."
+      },
+      "performanceRequirements": [
+        "POOL. 16 preallocated projectile records with 16 preallocated meshes, reused. The shipped code allocates an IcosahedronGeometry + a MeshBasicMaterial per shot and disposes them on removal; at bow cadence that is per-shot material creation, and weapons.js's own header measures a material-driven shader recompile at 8-60 ms on a mid-range Android.",
+        "NO PointLight per arrow. The shipped bolt parents `new THREE.PointLight(color, 2.2, 7)` to every projectile. Twelve arrows in flight is twelve dynamic lights, which is a cliff and not a cost. Arrows get a glow-layer material instead — the bloom pass already renders emissive-only geometry unlit, which is why edgeMat is MeshBasic.",
+        "Arrow geometry comes from mergedItemGeometry('Arrow') — the same bake-vertex-colour-and-merge path held weapons use, so an arrow is ONE draw call against the shared heldMaterial, not the 2-3 a naive getItemMesh clone would cost. Cache and flag userData.shared = true.",
+        "Cap live player projectiles at 12. Enemy projectiles keep their own budget."
+      ],
+      "lineOfSightUsage": "Call obstacleField.lineBlocked(px, pz, tx, tz, { radius: 0.2, feetY: 1.4 }) ONCE at release, to validate the soft-lock target. Per-frame collision stays the existing obstacleField.blocked() at the arrow's own pos.y. The lineBlocked header is explicit that it is a throttled probe ('callers throttle (the AI probes on a 0.4 s cadence), never per-frame across the whole field') and firing three arrows a second, each probing every frame, is exactly the misuse it warns about."
+    }
+  },
+  "rarityAndLegendary": {
+    "ladder": "UNCHANGED, and deliberately so. RARITIES in weapons.js: common (mul 1.00, 0 affixes, weight 100), uncommon (1.09, 1, 46), rare (1.20, 2, 18), epic (1.36, 3, 6), legendary (1.58, 4, 1.2). Do not add a sixth tier. Every UI colour, every price multiplier and every existing save already speaks this ladder.",
+    "whyLegendaryIsHarder": {
+      "gate1_dropFloor": "A legendary may not drop below rank band B (rankIndex >= 3). Implemented inside rollDrop / the loot path as a downgrade, not a re-roll: if the drawn rarity is legendary and rankIndex < 3, it becomes epic. A downgrade preserves determinism (the stream is consumed identically either way, exactly the trick rollWeapon already uses when a rarity is forced) where a re-roll would not. Effect: 'legendary' becomes a statement about where you have been, not about how lucky you were on your third E-gate.",
+      "gate2_shopCeiling": "The Exchange NEVER sells legendary. shopStock() currently rolls rarity with luck = band * 0.75, which at high bands makes legendaries genuinely likely on the shelf; clamp shop rarity to epic. Ash is a real currency with real sinks (respec, shadow promotion, and now the shelf) and letting it buy the top rung is how a shop turns into a slot machine you grind rather than a ladder you climb.",
+      "gate3_ascension": "A legendary is CRAFTED, not found. This is the direct answer to 'the legendary ones should be harder to develop'."
+    },
+    "ascension": {
+      "recipe": [
+        "An EPIC instance of the family you want. It is consumed, and its seed becomes the legendary's seed — so the item you loved becomes the item you keep, and the save cost is still four fields.",
+        "9 EMBERDUST. A new consumable that only B-rank-and-above gates and Verge wild gates yield: 1 guaranteed per boss, plus a SEED-DERIVED chance per elite (derived from the gate's forked mulberry32 stream — never Date.now(), never Math.random(); this is the exact rule the randomised-enemy-count work is also bound by).",
+        "1 FAMILY SIGIL. One per weapon family, a guaranteed drop from a SPECIFIC boss: sword from the Hollow Warden, axe/greataxe from the Gravelord, dagger from the Frostcaller, greatsword from Infernus, bow from the Voidweaver, staff from the Rift Archon. Six families, six named bosses, no ambiguity about where to go.",
+        "8000 ash (TIER_PRICE[5] 2400 x RARITY_PRICE.legendary 3.4 = 8160, rounded to a price-shaped number)."
+      ],
+      "result": "rollWeapon(baseId, seedOfTheConsumedEpic, { rarity: 'legendary', level: save.level }). No new persistence, no new serialisation, no new migration.",
+      "whereItHappens": "See openQuestions — the Exchange counter is the zero-new-content answer; a Forge NPC is the evocative one."
+    },
+    "whatMakesLegendaryMeaningfullyStronger": {
+      "rawStep": "Only +16% (1.36 -> 1.58). That is LESS than one tier step, which is roughly +53% in AP terms and comes with a genuinely different combo table. Stated plainly so nobody 'fixes' it upward: the raw multiplier is deliberately a small part of the prize.",
+      "fourthAffix": "Legendary is the only rarity with four affixes, drawn without replacement from a six/seven-entry pool — so a legendary is close to a full house of the good modifiers, which is a real and legible jump without being a bigger number.",
+      "legendaryRule": "The actual prize. One named clause per legendary base that changes a VERB. Hard law: A LEGENDARY RULE MAY NEVER MULTIPLY DAMAGE. Every one changes tempo, positioning or resource flow. That single constraint is what lets legendaries be exciting without being a balance event.",
+      "examples": [
+        "RIFTEDGE ASCENDANT — your combo counter does not reset on a whiff, only when you take a hit.",
+        "DAWNBRAND ASCENDANT — the third chop's cancel window doubles, so the sword can loop its finisher into itself once.",
+        "SUNDERAXE ASCENDANT — the finisher's stagger applies to everything in the arc even on a miss (the wind alone staggers).",
+        "GRAVEMAUL ASCENDANT — the ground pound leaves a 3 s crater that halves enemy move speed inside it.",
+        "WHISPERFANGS ASCENDANT — a crit refunds 0.05 s of the current step's recovery, at most 3 times per combo.",
+        "VEINSPLITTERS ASCENDANT — bleeds applied by the offhand blade stack to 6 instead of 3.",
+        "VIGIL ASCENDANT — the thrust finisher passes THROUGH the first target and keeps its full damage on the second.",
+        "VOIDGLAIVE ASCENDANT — the sweep step also pulls every target 0.8 m toward the centre of the arc.",
+        "(greatsword) — a fully charged third step cannot be interrupted by anything below boss tier.",
+        "(bow) — a full-draw arrow that kills its target immediately refunds the draw.",
+        "(staff) — the channelled beam's mana cost stops rising after 0.8 s, so a long channel is cheaper per second than a short one."
+      ]
+    },
+    "namingCheck": "weapons.js's TITLES array already contains 'the Archon' and 'Nine Gates'. 'Archon' is the sanctioned replacement for the banned word and is safe. Nothing in this document introduces a banned proper noun; the legendary names above are all built from existing base names plus 'Ascendant'."
+  },
+  "inventoryUI": {
+    "module": "src/ui/inventoryui.js (NEW). Structural clone of src/ui/shopui.js.",
+    "architecture": [
+      "An OVERLAY toggled by classList, NOT an AppState screen. Reason, copied verbatim from shopui.js's header because it applies identically: AppState.go('city') calls Game.enterCity -> _setMode, which DISPOSES AND REBUILDS the entire city and teleports the player back to spawn. Routing an inventory panel through the router would tear down 200-odd draw calls of town every time the player closed a menu.",
+      "Constructed ONCE in main.js beside `game.shopUI = new ShopUI({ game, audio })` and hung off the game object as `game.invUI`. Rebuilding its DOM per open would leak a #inv node per visit — main.js:87 already records that lesson.",
+      "Builds its own DOM and injects its own <style id='invUiStyle'>, so it shares neither a file nor a merge conflict with ui.js or styles.css.",
+      "Re-uses the SHIPPED classes and adds only what genuinely does not exist: .panel.wide, .panel-sub, .btn, .btn.ghost, .gate, .gate-list, .gate .meta, .readout, .readout .row, .rank-E..rank-S. New classes are limited to the slot grid, the column split and the delta strip.",
+      "z-index 60 and `body.gb-inv { #cityUi { display: none !important } }`, exactly as #shop does — otherwise the city's live OPEN button renders on top of the panel and eats taps.",
+      "Every node via createElement/textContent. No innerHTML anywhere, including for generated item names."
+    ],
+    "layout": {
+      "targetViewport": "915 x 412 CSS px — Samsung S25 Ultra in landscape, which is the viewport that already forced the Exchange into a scroll box. Design here, then check portrait and desktop.",
+      "budget": "Panel padding + h2 + wallet strip consume roughly 120 px of the 412. That leaves ~290 px for content, which is why a single vertical list cannot work and two side-by-side scrolling columns is the only layout that fits.",
+      "wireframe": [
+        "+-------------------------------------------------------------+",
+        "| THE HUNTER                                                  |",
+        "| LV 24  ·  B-GRADE  ·  1,240 ASH            (wallet strip)   |",
+        "+---------------------+---------------------------------------+",
+        "| SLOTS (2 x 4 grid)  | [ GEAR ] [ STATS ] [ SETS ]           |",
+        "|  head    chest      |  ...scrolling column...               |",
+        "|  hands   legs       |                                       |",
+        "|  feet    trinket    |                                       |",
+        "|  weapon  offhand    |                                       |",
+        "+---------------------+---------------------------------------+",
+        "| [ CLOSE ]                                                   |",
+        "+-------------------------------------------------------------+"
+      ],
+      "css": {
+        "columns": "#inv .cols { display: flex; gap: 12px; align-items: flex-start; }",
+        "slotGrid": "#inv .slots { display: grid; grid-template-columns: repeat(2, 52px); gap: 6px; flex: 0 0 auto; }",
+        "slotCell": "44 px minimum tap target (the repo's own floor; cityui's confirm button is 74 px and documents a 56 px minimum for the primary thumb control, but a grid cell is a secondary target). Render as a 44x44 icon box with a 2 px border in rarityColor(), plus a 10 px slot label underneath.",
+        "scroll": "#inv .col { max-height: min(56vh, 300px); overflow-y: auto; } and #inv .panel { max-height: 92vh; }",
+        "rowDensity": "Copy shopui's tightened row: #inv .gate { padding: 9px 12px; } and a 36 px icon rather than the 44 px gate swatch. shopui's comment records that this is the difference between 'a list' and 'a peephole'.",
+        "stackOnRoomy": "@media (min-width: 700px) and (min-height: 600px) { #inv .cols { display: block } #inv .col { max-height: 46vh } } — desktop Chrome and portrait get a stacked layout. No container queries; the repo does not use them."
+      }
+    },
+    "tabs": {
+      "GEAR": "The stash, FILTERED by the currently selected slot (tapping a slot cell selects it). Rows are .gate. Tap equips. A second control on the row opens the compare strip. Locked reasons use shop.js's exact wording ('REQUIRES LEVEL 14', 'B-GRADE HUNTERS ONLY') so two panels never disagree about the same rule.",
+      "STATS": "'Everything about the character', which is what the owner literally asked for. Sections, all as .readout .row: (1) IDENTITY — level, rank via config.rankOf, XP to next via config.xpForLevel, total kills, deaths, gates cleared. (2) STATS — all five from config.STATS in their fixed order, showing progression.effectiveStat (spent + autoStats) and the spent/auto split, plus unspent points. (3) DERIVED — every field config.derive returns: maxHp, maxMp, atk, speed, crit, critDmg, atkSpeed, skillMul, cdr, dr, hpRegen, mpRegen, dmgFloor, tellLeadMs, dodgeWindow, shadowDmgMul. (4) ARMOR — armorDR, total DR, and the 0.72 cap shown explicitly so the player can see the ceiling rather than discovering it. (5) ARMY — roster size / capacity via progression.shadowRosterCapacity, field capacity via shadowFieldCapacity with the quality-tier clamp named.",
+      "SETS": "One row per set: name, n/5, and the three bonus lines with earned ones in --ink and unearned in --dim. This tab IS the 'collect a set' reward loop — if it is not legible the feature does not exist for the player."
+    },
+    "compare": {
+      "source": "weapons.weaponSummary(w) already returns formatted [label, value] pairs (Class, Power, Combo, Reach, Cooldown, Crit, Leech) and has no consumer. This panel is its first. Write armor.armorSummary(a) as its exact twin.",
+      "presentation": "Three columns — label, equipped value, candidate value — with a delta glyph coloured #54e08a (the shipped uncommon green) for better and var(--danger) for worse. Never a bare number: '3.6m (+0.7)' reads, '3.6' does not."
+    },
+    "entryPoints": [
+      "A #btnInventory .icon-btn in .hud-top beside #btnPause, present in BOTH the city and gates — the owner asked for 'an inventory button' and a button that only exists in menus is not that.",
+      "An INVENTORY button in the #pause panel beside 'STATS & SKILLS'.",
+      "Keyboard 'I' for desktop Chrome; 'Escape' closes.",
+      "main.js handleBack(): add `if (game.invUI?.isOpen) { game.invUI.close(); return; }` in the same chain as the shop check. Only one overlay at a time — the inventory cannot be opened over the shop."
+    ],
+    "pauseBehaviour": "Opening the inventory IN A GATE pauses the sim (it is a loadout decision under threat and the player should not be eaten while making it). Opening it IN THE CITY does NOT pause — the shop does not pause either, and the city is safe. State the difference in the code, because the asymmetry looks like a bug otherwise.",
+    "persistence": "Equipping goes through equipment.equipSlot -> game._persistLoadout -> onSave, which writes the WHOLE save in one go. Nothing in the panel persists separately. shopui.js's comment is the standing rule and it applies verbatim: 'two writers is how a wallet and an inventory drift apart.'"
+  },
+  "stowDraw": {
+    "ownerAsk": "'when they are in the plaza, the sword can be visible or placed in the inventory'",
+    "model": "A transient STANCE on the character: 'drawn' | 'sheathed'. It lives on the player, not on the item, and it is NOT PERSISTED — a resumed save re-derives it from 'am I in the city and is anything near me'. Persisting it would create a third source of truth about what is in the hand, alongside save.equipment.weapon and root.userData.weapon.",
+    "policy": {
+      "autoSheath": "In the city or the Verge, with no hostile within 14 m and no attack input for 3.0 s, sheath.",
+      "autoDraw": "Any attack input, any hostile inside 14 m, or entering a gate. Draw is immediate in intent and takes drawTime to complete; an attack pressed during the draw is BUFFERED using the EXISTING state.buffered / consumeBuffer mechanism in weapons.js — do not invent a second input buffer.",
+      "manualToggle": "Long-press the attack button, and 'X' on desktop. This is the plaza show-off control the owner asked for, and it is the reason the auto policy needs a manual override at all.",
+      "neverStowMidSwing": "Refused while state.active or isCommitted(state, w). Both already exist."
+    },
+    "drawTime": {
+      "formula": "0.18 + 0.035 * massKg, clamped to 0.45",
+      "values": {
+        "dagger": 0.21,
+        "sword": 0.23,
+        "axe": 0.25,
+        "staff": 0.24,
+        "bow": 0.22,
+        "greatsword": 0.31,
+        "greataxe": 0.35,
+        "maul": 0.4
+      },
+      "why": "The mass law applied to one more verb. A greataxe player who lets the weapon sheath while wandering the Verge pays 0.35 s the moment something jumps him; a dagger player pays almost nothing. Without this, stow/draw is a free cosmetic toggle and mass stops being a consistent property of the world."
+    },
+    "implementation": {
+      "newSockets": "characters.js gains sockets.back = makeSocket(getObjectByName(p + 'Chest'), { lift: 0, scale: 1 / MODEL_SCALE }) and sockets.hip = makeSocket(getObjectByName(p + 'Hips'), same). Both bones are confirmed present in the 62-bone list for both rigs. makeSocket is already generic — the only new thing is two calls.",
+      "proceduralFallback": "entities.js rig gains back: rig.torso and hip: rig.body on the box-man path. The game must still boot with public/models/ deleted.",
+      "stowTable": "weapons.js gains STOW[family] = { socket: 'back' | 'hip', x, y, z, rx, ry, rz }. A sword rides diagonally across the back (socket 'back', rz ~ 0.55, z ~ -0.16); a greatsword and greataxe ride the same way, larger; a bow rides flat and vertical on the back; TWIN DAGGERS RIDE AT THE HIPS (socket 'hip', one per side) — which is precisely why the entry carries a socket NAME and not just a transform.",
+      "api": "export function setStance(root, stance) — resolves the current weapon group from root.userData.weapon, re-parents main (and offhand) between the hand socket and the stow socket, applies the corresponding transform, and calls root.userData.character?.setArmed?.(stance === 'drawn'). Returns the stance actually applied.",
+      "hardRule": "RE-PARENT ONLY. No geometry is created, no material is created, nothing is disposed. weapons.js's asset-cache header measures a material dispose at 8-60 ms of shader recompile on a mid-range Android — 'a visible hitch on every weapon swap' — and a stow that rebuilt the mesh would pay that every time the player walked into the plaza.",
+      "freeWin": "CharacterInstance.setArmed(false) already swaps the idle clip from Idle_Sword back to the neutral arms-down idle and invalidates the cached action so it takes effect immediately. Sheathing therefore produces the correct relaxed plaza walk with zero additional animation work.",
+      "npcs": "Enemies, shadow soldiers, citizens and the city companion NEVER stow. They spawn drawn and stay drawn. One less state to test and zero risk to the crowd budget."
+    },
+    "interactionWithEquipment": "Stance is orthogonal to the equipment model. equipSlot('weapon', item) changes WHAT is held; setStance changes WHERE it is. Equipping while sheathed keeps the new weapon sheathed (and the panel shows it on the back, which is the honest read). The equipment model never stores stance."
+  },
+  "modules": [
+    {
+      "path": "src/game/game.js",
+      "status": "edit",
+      "purpose": "Wire the shipped swing state machine, add stance policy, apply armour to damage, own the projectile pool handoff.",
+      "exports": [
+        "(internal) p.attack = makeAttackState() replacing p.swing / p.comboIndex / p.comboTimer / p.swingHitApplied",
+        "(internal) _applySwingDamage rewritten over currentStep + hitDamage/hitRange/hitArc/hitKnockback/hitStagger/isRadial",
+        "equip(w) -> replaced by equipSlot(slot, instance) delegating to equipment.js"
+      ],
+      "dependsOn": [
+        "src/game/weapons.js",
+        "src/game/equipment.js",
+        "src/game/armor.js",
+        "src/game/projectiles.js"
+      ],
+      "notes": "STEP 1 is the highest-risk edit in the document because it touches the exact feel the owner just approved. It must ship alone, and the acceptance criterion is numeric: a common Riftedge's three steps must produce identical windup/active/recovery/range/arc/knock/stagger to the pre-change constants."
+    },
+    {
+      "path": "src/game/weapons.js",
+      "status": "edit",
+      "purpose": "New families (greatsword, axe, bow, staff), mainHand flag, STOW table + setStance, anim.kind for draw/cast poses, lungeCurve.",
+      "exports": [
+        "export const STOW = { sword: { socket:'back', ... }, daggers: { socket:'hip', ... }, ... }",
+        "export function setStance(root, stance) -> 'drawn' | 'sheathed'",
+        "export function drawTime(weapon) -> seconds",
+        "ARCHETYPES gains greatsword, axe, bow, staff (each with grip, anim, mainHand)",
+        "WEAPONS gains 2 bases per new family so the Exchange ladder picks them up with no shop edit"
+      ],
+      "dependsOn": [
+        "src/render/models.js (injected)",
+        "three"
+      ],
+      "notes": "Zero-dependency shape must survive: this file is importable by a headless node test with no GLB, no renderer and no fetch, and setModelSource is injection rather than an import precisely to keep that true. Nothing added here may import models.js directly."
+    },
+    {
+      "path": "src/game/equipment.js",
+      "status": "new",
+      "purpose": "The eight slots, the instance codec, the swap semantics, and the save migration. THREE-free and DOM-free so node drives it directly, exactly like config.js / progression.js / shop.js.",
+      "exports": [
+        "export const SLOTS = ['weapon','offhand','head','chest','hands','legs','feet','trinket'];",
+        "export const ARMOR_SLOTS = ['head','chest','hands','legs','feet'];",
+        "export function ensureEquipment(save) -> save.equipment   // idempotent, total, no schema bump",
+        "export function serializeItem(inst) -> {k,b,r,s,l} | null",
+        "export function deserializeItem(rec) -> instance | null   // k defaults to 'w'",
+        "export function equipSlot(save, slot, inst) -> { ok, reason, replaced }",
+        "export function unequipSlot(save, slot) -> instance | null",
+        "export function canEquip(save, inst) -> { ok, reason }    // reuses shop.shopBand wording",
+        "export const STASH_LIMIT = 40;"
+      ],
+      "dependsOn": [
+        "src/game/weapons.js",
+        "src/game/armor.js",
+        "src/game/config.js"
+      ],
+      "notes": "equipSlot MUST swap (remove incoming from the stash, push outgoing) — see auditFindings.saveAndLoadoutSeams for the duplication hole this closes."
+    },
+    {
+      "path": "src/game/armor.js",
+      "status": "new",
+      "purpose": "Armour definitions, rolling, set progress, and the derived contribution. THREE-free.",
+      "exports": [
+        "export const ARMOR_BASES = { issue_head: {...}, ... };   // 5 sets x 5 slots + 6 trinkets",
+        "export const SETS = { issue: {...}, ossuary: {...}, deepglass: {...}, emberfall: {...}, vigil: {...} };",
+        "export const TIER_AP, SLOT_WEIGHT, ARMOR_AFFIXES;",
+        "export function rollArmor(baseId, rndOrSeed, { rarity, level, luck }) -> instance   // structural twin of rollWeapon",
+        "export function armorSummary(a) -> [[label, value], ...]                            // twin of weaponSummary",
+        "export function setProgress(equipment) -> Map<setId, count>",
+        "export function armorDerive(equipment, level) -> { armorDR, hpAdd, speedAdd, atkSpeedAdd, staggerResist, knockTakenMul, leech, ashFind, tellAdd, critDmgAdd, dodgeAdd, rules:[...] }",
+        "export const TOTAL_DR_CAP = 0.72;",
+        "export const ARMOR_SPEED_CAP = 0.6;"
+      ],
+      "dependsOn": [
+        "src/core/rng.js",
+        "src/game/weapons.js (RARITIES only)",
+        "src/game/config.js"
+      ],
+      "notes": "rollArmor must consume its stream in a FIXED order and must draw rarity even when one is forced, exactly as rollWeapon does — that is the only reason a four-field record can rebuild an item byte-identically."
+    },
+    {
+      "path": "src/game/projectiles.js",
+      "status": "new",
+      "purpose": "A pooled projectile system with optional gravity, replacing the per-shot allocation in game.js. Owns the arrow and bolt meshes.",
+      "exports": [
+        "export class ProjectilePool { constructor(scene, { max = 16 }) }",
+        "ProjectilePool.spawn({ from, dir, vy = 0, g = 0, speed, damage, color, life, kind }) -> id | -1",
+        "ProjectilePool.update(dt, { obstacleField, worldRadius, onHitPlayer, onHitEnemy }) -> void",
+        "ProjectilePool.clear() -> void        // gate transition / context loss",
+        "ProjectilePool.dispose() -> void      // every mesh registered here"
+      ],
+      "dependsOn": [
+        "three",
+        "src/game/weapons.js (mergedItemGeometry via a small exported accessor)",
+        "src/world/obstacles.js"
+      ],
+      "notes": "g = 0 and vy = 0 must reproduce the current flat integration EXACTLY so enemy caster bolts and boss spread shots do not change by a float. Assert that, do not assume it. No PointLight per projectile."
+    },
+    {
+      "path": "src/ui/inventoryui.js",
+      "status": "new",
+      "purpose": "The character panel: slot grid, gear/stats/sets tabs, compare strip, equip/unequip.",
+      "exports": [
+        "export class InventoryUI { constructor({ game, audio, root }) }",
+        "InventoryUI.open() / .close() / .render() / get isOpen"
+      ],
+      "dependsOn": [
+        "src/game/equipment.js",
+        "src/game/armor.js",
+        "src/game/weapons.js",
+        "src/game/progression.js",
+        "src/game/config.js",
+        "src/ui/icons.js"
+      ],
+      "notes": "Structural clone of shopui.js down to the injected stylesheet and the classList overlay. First consumer of src/ui/icons.js and of weaponSummary()."
+    },
+    {
+      "path": "src/render/characters.js",
+      "status": "edit",
+      "purpose": "Two new sockets (back off *_Chest, hip off *_Hips) and, in Wave 3-B, a parts override so the player's armour changes the silhouette.",
+      "exports": [
+        "(additive) inst.sockets.back, inst.sockets.hip",
+        "export function appearanceFor(seed, { archetype, rank, partsOverride })"
+      ],
+      "dependsOn": [],
+      "notes": "partsOverride is PLAYER-ONLY. Every distinct override is one more merged geometry in the refcounted cache; letting enemies use it would multiply that by the crowd size."
+    },
+    {
+      "path": "src/game/entities.js",
+      "status": "edit",
+      "purpose": "Expose the new sockets on the rig object and give the procedural box-man its fallbacks.",
+      "exports": [
+        "(additive) rig.back, rig.hip"
+      ],
+      "dependsOn": [
+        "src/render/characters.js"
+      ],
+      "notes": "buildOpts already carries everything rebuildHumanoid needs; the armour parts override threads through it so an M/F flip or a pack upgrade re-applies the armour look for free."
+    },
+    {
+      "path": "src/core/save.js",
+      "status": "edit",
+      "purpose": "freshSave gains an empty equipment object; migrate stays structural.",
+      "exports": [
+        "(additive) freshSave().equipment"
+      ],
+      "dependsOn": [],
+      "notes": "NO SCHEMA_VERSION bump. save.js must NOT import equipment.js or weapons.js to validate an id — sanitiseShop() is the precedent for structural-only validation, and it exists specifically so save.js never pulls THREE in."
+    },
+    {
+      "path": "src/game/shop.js",
+      "status": "edit",
+      "purpose": "Clamp shelf rarity to epic; leave everything else alone.",
+      "exports": [],
+      "dependsOn": [],
+      "notes": "The clamp must not change how much of the stream a row consumes, or every existing shelf re-rolls and `sold` stops meaning anything for the current band."
+    },
+    {
+      "path": "src/game/ascension.js",
+      "status": "new",
+      "purpose": "The legendary craft: cost check, ingredient check, consume, produce.",
+      "exports": [
+        "export const EMBERDUST_COST = 9; export const ASH_COST = 8000;",
+        "export const FAMILY_SIGIL = { sword: 'warden', axe: 'gravelord', greataxe: 'gravelord', daggers: 'frostcaller', greatsword: 'infernus', bow: 'weaver', staff: 'archon' };",
+        "export function canAscend(save, inst) -> { ok, reason }",
+        "export function ascend(save, inst) -> { ok, reason, weapon }"
+      ],
+      "dependsOn": [
+        "src/game/weapons.js",
+        "src/game/equipment.js"
+      ],
+      "notes": "save.materials = { emberdust: 0, sigils: [] } is another absent-reads-as-default field. Same precedent, same ensure* pattern, still no schema bump."
+    },
+    {
+      "path": "index.html + src/ui/ui.js + src/main.js",
+      "status": "edit",
+      "purpose": "#btnInventory in .hud-top, an INVENTORY button in #pause, the InventoryUI construction beside ShopUI, and one more line in handleBack().",
+      "exports": [],
+      "dependsOn": [],
+      "notes": "main.js:87 already records why the panel is constructed once rather than per open."
+    },
+    {
+      "path": "tools/equipment-test.mjs",
+      "status": "new",
+      "purpose": "Headless: migration, swap semantics, dual-write, stash cap.",
+      "exports": [],
+      "dependsOn": [],
+      "notes": "npm script test:equipment"
+    },
+    {
+      "path": "tools/armor-test.mjs",
+      "status": "new",
+      "purpose": "Headless: roll determinism, DR clamp, speed clamp, set thresholds, and the +35%/+12% balance envelope at L20/L50/L80.",
+      "exports": [],
+      "dependsOn": [],
+      "notes": "npm script test:armor. The envelope assert is the one that stops a future tuning pass from quietly trivialising the game."
+    },
+    {
+      "path": "tools/weapon-feel-test.mjs",
+      "status": "new",
+      "purpose": "Headless: the shipped sword numbers are byte-identical after STEP 1; hitStop and shake are monotonic in mass; every family's stated reach is within 0.5 m of its model's measured tip; every model name referenced by weaponModelName exists in items.glb.",
+      "exports": [],
+      "dependsOn": [],
+      "notes": "npm script test:weapons. The reach-vs-mesh assert needs models.itemBounds(), which is exported and currently unused."
+    }
+  ],
+  "buildOrder": [
+    {
+      "step": 1,
+      "wave": "3-B",
+      "title": "WIRE THE SWING STATE MACHINE",
+      "files": [
+        "src/game/game.js"
+      ],
+      "work": "Replace p.swing / p.comboIndex / p.comboTimer / p.swingHitApplied with makeAttackState(). Route input through canAttack/startAttack, tick with tickAttack(state, w, dt, onHit), take movement from moveScale(state, w), refuse dash while isCommitted(state, w), feed animateRig from attackAnim(state, w), and compute damage/range/arc/knock/stagger from hitDamage/hitRange/hitArc/hitKnockback/hitStagger with isRadial for the maul pound. Wire consumeBuffer and consumeLunge.",
+      "verify": "node assert in tools/weapon-feel-test.mjs (NEW — this file does not exist yet): a common Riftedge's three steps produce windup 0.17/0.16/0.22, active 0.09/0.09/0.11, recovery 0.08/0.09/0.19, range 2.9/2.9/3.6, arc 0.62pi/0.62pi/0.85pi, knock 2.5/3.0/9.0, finisher stagger 0.45 — the exact pre-change constants. Then npm run test:acceptance, test:flow, test:entities, test:dungeon.",
+      "agent": "one",
+      "risk": "HIGHEST in the document — it touches the feel the owner just approved. Ships alone, nothing else in the commit. STILL THE HIGHEST-VALUE CHANGE IN THE DOCUMENT, and now the first thing 3-B does: steps 7-9 author combo tables that only this step can reach.",
+      "status": "NOT BUILT IN 3-A — DEFERRED TO 3-B. It carried wave 3-A and the wave split listed it as delivered; neither was true. Verified against the shipped tree at the 3-A commit: game.js still declares p.comboIndex / p.comboTimer / p.swing / p.swingHitApplied, _tryAttack still sets a single p.swing = 0.34 for every archetype and cycles comboIndex over three steps (so the 2-step greataxe and the 5-step daggers both get three), and _applySwingDamage still hardcodes range 2.9 / 3.6 with only the instance multipliers on top. grep -rlE 'makeAttackState|tickAttack|isCommitted' src/ tools/ still returns weapons.js alone. The state machine is exactly as dark as auditFindings describes, and tools/weapon-feel-test.mjs was never created. Nothing else in 3-A depended on it, which is why the wave shipped clean without it.",
+      "blocks": [
+        7,
+        8,
+        9
+      ]
+    },
+    {
+      "step": 2,
+      "wave": "3-A",
+      "title": "BACK AND HIP SOCKETS",
+      "files": [
+        "src/render/characters.js",
+        "src/game/entities.js"
+      ],
+      "work": "sockets.back off `${p}Chest` and sockets.hip off `${p}Hips` via the existing makeSocket(bone, { lift, scale }); expose them as rig.back / rig.hip; procedural fallbacks rig.back = rig.torso and rig.hip = rig.body.",
+      "verify": "npm run test:characters extended: both sockets exist on both rigs, and a child placed at the socket origin lands within 0.35 m of the chest / hip in world space on a posed instance. Plus the procedural path with characters.glb absent.",
+      "agent": "one",
+      "risk": "low"
+    },
+    {
+      "step": 3,
+      "wave": "3-A",
+      "title": "STOW / DRAW MECHANISM",
+      "files": [
+        "src/game/weapons.js"
+      ],
+      "work": "The STOW table (socket name + transform per family), setStance(root, stance), drawTime(weapon), the re-parent-only guarantee, offhand handling, and the setArmed handoff.",
+      "verify": "npm run test:entities extended: (a) weaponCacheStats() is IDENTICAL before and after 100 stance flips — nothing created, nothing disposed; (b) the weapon's parent is rig.back when sheathed and rig.hand when drawn; (c) daggers land on rig.hip, one per side; (d) setArmed tracks stance.",
+      "agent": "one",
+      "risk": "medium — the re-parent-only rule is easy to violate by accident"
+    },
+    {
+      "step": 4,
+      "wave": "3-A",
+      "title": "STANCE POLICY AND AUTO-SHEATH",
+      "files": [
+        "src/game/game.js",
+        "src/game/modes/citymode.js"
+      ],
+      "work": "14 m threat radius, 3.0 s idle timer, draw on attack input with the press buffered through the EXISTING state.buffered, refusal while state.active or isCommitted, long-press and 'X' manual toggle, forced draw on gate entry.",
+      "verify": "npm run test:city and test:flow: walking into the plaza with no hostiles sheaths within 3.2 s; pressing attack draws and the buffered swing fires within drawTime + one step; entering a gate arrives drawn; a stow requested mid-swing is refused.",
+      "agent": "one",
+      "risk": "low"
+    },
+    {
+      "step": 5,
+      "wave": "3-A",
+      "title": "EQUIPMENT DATA MODEL AND SAVE MIGRATION",
+      "files": [
+        "src/game/equipment.js (new)",
+        "src/core/save.js",
+        "src/game/game.js"
+      ],
+      "work": "SLOTS, ARMOR_SLOTS, ensureEquipment, serializeItem/deserializeItem with the k field, equipSlot with SWAP semantics, unequipSlot, canEquip reusing shop.shopBand's wording, STASH_LIMIT 12 -> 40, dual-write of save.weapon.",
+      "verify": "tools/equipment-test.mjs (new, npm run test:equipment): a v1 save loads; a v2 save with only save.weapon lands in equipment.weapon; a save written by the NEW build still yields the right weapon when read by the OLD reader (save.weapon mirror present); ensureEquipment is idempotent over 100 calls; equipping from the stash never duplicates; the stash never exceeds 40. Plus npm run test:progression and test:shop.",
+      "agent": "one",
+      "risk": "medium — save compatibility is a shipped-bug category in this repo",
+      "delivered": {
+        "summary": "Shipped in Wave 3-A, but not in the shape written above. The divergence is recorded here rather than quietly rewritten, because 3-B reads this file to know where the equipment code lives.",
+        "equipmentModuleActual": "src/core/save.js — EQUIP_SLOTS and ensureEquipment live beside migrate() instead of in a new src/game/equipment.js. ensureEquipment IS the migration and migrate() funnels every load through it, which is why splitting it into its own module would have put the migration in two files.",
+        "suiteActual": "tools/inventory-test.mjs, run as `npm run test:inventory`. There is no tools/equipment-test.mjs and no npm run test:equipment; the equipment assertions the step listed are checks inside the inventory suite.",
+        "stashLimit": "STASH_LIMIT is STILL 12 (src/game/game.js). The 12 -> 40 raise was deferred, and defensibly so: the panel that would make 40 rows navigable is step 13, and 40 rows in the v1 panel is a scroll box nobody can use. It is now 3-B work — raise it in the same step as INVENTORY PANEL v2, not before."
+      }
+    },
+    {
+      "step": 6,
+      "wave": "3-A",
+      "title": "INVENTORY PANEL v1 (weapon slots only)",
+      "files": [
+        "src/ui/inventoryui.js (new)",
+        "index.html",
+        "src/ui/ui.js",
+        "src/main.js"
+      ],
+      "work": "The overlay, the 2x4 slot grid, the GEAR and STATS tabs, the compare strip over weaponSummary(), equip/unequip for weapon and offhand. The five armour slots and the SETS tab are PRESENT but rendered locked with 'WAVE 3-B', so the layout is final and 3-B is a fill-in rather than a re-layout. Entry points: #btnInventory, the pause button, 'I', and the handleBack line.",
+      "verify": "tools/visual-test.mjs shot at 915x412 landscape: no vertical body overflow, both columns scroll independently, every tap target >= 44 px, the panel fits inside 92vh. Plus npm run test:acceptance.",
+      "agent": "one",
+      "risk": "medium — the 412 px viewport is unforgiving and the shop already had to be rebuilt for it once"
+    },
+    {
+      "step": 7,
+      "wave": "3-B",
+      "title": "WEAPON FAMILIES: GREATSWORD AND HAND AXE",
+      "files": [
+        "src/game/weapons.js"
+      ],
+      "work": "ARCHETYPES.greatsword and ARCHETYPES.axe with grips lifted verbatim from the already-measured HELD_MODELS.bigsword and HELD_MODELS.axe; GREATSWORD_COMBO (three steps, third chargeable) and AXE_COMBO (three steps, bleed, negative-knockback hook finisher) from weaponPhysics.familyTable; MODEL_SCALE / MODEL_TILT entries; weaponModelName cases; two WEAPONS bases per family so the Exchange ladder absorbs them with no shop edit. game.js must accept a negative knockback as a pull. HARD DEPENDENCY ON STEP 1: GREATSWORD_COMBO and AXE_COMBO are read ONLY by the weapons.js state machine, and that machine still has no caller. Authoring these tables before step 1 lands adds two more unreachable tables to the four that already exist — the exact defect auditFindings diagnoses. Step 1 first, in its own commit, or this step buys nothing you can feel.",
+      "verify": "npm run test:shop (ladder still ordered by minRank/reqLevel/tier, prices sane, stream consumption unchanged for existing rows), test:items, and the new reach-vs-mesh assert in test:weapons.",
+      "agent": "one",
+      "risk": "low-medium — the negative-knockback pull is the only novel mechanic",
+      "dependsOn": [
+        1
+      ]
+    },
+    {
+      "step": 8,
+      "wave": "3-B",
+      "title": "PROJECTILE POOL AND THE BOW",
+      "files": [
+        "src/game/projectiles.js (new)",
+        "src/game/game.js",
+        "src/game/weapons.js"
+      ],
+      "work": "The pool (16 records, 16 reused meshes, registered for disposal), vy + g fields, the Arrow mesh through mergedItemGeometry, removal of the per-projectile PointLight, the bow archetype with mainHand 'L', draw-charge input on the attack button, and the soft-lock aim solver using lineBlocked ONCE at release.",
+      "verify": "node assert: a g=0, vy=0 projectile's position sequence is float-identical to the current integration over 240 steps. GPU assert: firing 200 arrows creates zero new geometries and zero new materials. npm run test:collision (arrows still die on walls at their own height and still clear kerb-height crates), test:dungeon (draw-call budget still <= 24), test:acceptance.",
+      "agent": "one",
+      "risk": "high — this is the one step that touches a hot per-frame loop shared with enemy casters and bosses"
+    },
+    {
+      "step": 9,
+      "wave": "3-B",
+      "title": "THE MAGIC IMPLEMENT",
+      "files": [
+        "src/game/weapons.js"
+      ],
+      "work": "buildStaff(look, tint, ghost) — procedural haft from the existing cyl/haftMat/darkMat/edgeMat blocks, topped with a Crystal2 / Crystal4 / Mineral head from items.glb when the pack is present and a procedural octahedron when it is not. The staff archetype, the mana-costing bolt (18 m/s, g 9.0, 90 deg/s turn rate), and the channelled beam finisher.",
+      "verify": "npm run test:items with the pack ABSENT — the staff must still build and still read as a staff. Plus test:loot, test:loot-fallback, test:acceptance.",
+      "agent": "one",
+      "risk": "medium — the 'looks like a staff' bar is a judgement call and needs a screenshot"
+    },
+    {
+      "step": 10,
+      "wave": "3-B",
+      "title": "ARMOUR TABLES",
+      "files": [
+        "src/game/armor.js (new)"
+      ],
+      "work": "ARMOR_BASES (5 sets x 5 slots = 25, plus 6 trinkets), SETS with the 2/4/5 bonuses, TIER_AP, SLOT_WEIGHT, ARMOR_AFFIXES, rollArmor as rollWeapon's structural twin, armorSummary, setProgress, armorDerive, TOTAL_DR_CAP, ARMOR_SPEED_CAP.",
+      "verify": "tools/armor-test.mjs (new, npm run test:armor): same seed produces a byte-identical instance across 10k rolls; the 0.72 DR clamp holds against a deliberately absurd loadout; the +0.6 speed clamp holds; the 2/4/5 thresholds fire at exactly 2, 4 and 5; and a full best-in-slot set at L20 / L50 / L80 stays inside the +35% survivability / +12% offense envelope.",
+      "agent": "one",
+      "risk": "medium — the envelope assert will probably fail first time, and that means the table is wrong, not the test"
+    },
+    {
+      "step": 11,
+      "wave": "3-B",
+      "title": "SET BONUSES AND DAMAGE INTEGRATION",
+      "files": [
+        "src/game/game.js",
+        "src/game/config.js"
+      ],
+      "work": "Multiplicative armorDR in _damagePlayer with the hard total clamp, staggerResist and knockTakenMul applied where stagger and knockback land, the five set rules, and refreshDerived folding armorDerive into the derived block.",
+      "verify": "node assert: with NOTHING equipped in any armour slot, every value config.derive returns and every damage number is byte-identical to today. Plus npm run test:progression, test:acceptance, test:dungeon.",
+      "agent": "one",
+      "risk": "medium-high — this changes the damage formula for every player"
+    },
+    {
+      "step": 12,
+      "wave": "3-B",
+      "title": "ARMOUR VISUALS VIA PART SWAP",
+      "files": [
+        "src/render/characters.js",
+        "src/game/entities.js"
+      ],
+      "work": "A per-set parts override (head/body/legs/feet chosen from the 21 shipped modular characters within the player's rig), threaded through buildOpts so rebuildHumanoid re-applies it after an M/F flip or a pack upgrade. PLAYER ONLY.",
+      "verify": "npm run test:characters extended: the merged-geometry cache never exceeds baseline + 2 entries across 20 armour swaps, and releaseGeometry refcounts return to zero after the last swap. Plus a visual-test contact sheet of the five set looks on both rigs.",
+      "agent": "one",
+      "risk": "medium — the geometry cache is the leak surface"
+    },
+    {
+      "step": 13,
+      "wave": "3-B",
+      "title": "INVENTORY PANEL v2",
+      "files": [
+        "src/ui/inventoryui.js"
+      ],
+      "work": "Unlock the five armour slots, build the SETS tab, add armour compare over armorSummary(), and surface armorDR / total DR / the 0.72 cap in the STATS tab.",
+      "verify": "tools/visual-test.mjs landscape shot at 915x412 with a full loadout — still no overflow, still 44 px targets. Plus npm run test:acceptance.",
+      "agent": "one",
+      "risk": "low — the layout was finalised in step 6 precisely so this step is a fill-in"
+    },
+    {
+      "step": 14,
+      "wave": "3-B",
+      "title": "LEGENDARY GATING AND ASCENSION",
+      "files": [
+        "src/game/ascension.js (new)",
+        "src/game/shop.js",
+        "src/game/game.js",
+        "src/ui/inventoryui.js"
+      ],
+      "work": "The rankIndex < 3 legendary downgrade in the loot path (downgrade, never re-roll — the stream must be consumed identically), the shop's epic ceiling, save.materials with its ensure* migration, emberdust and sigil drops from seeded streams only, and the ascension entry in the panel.",
+      "verify": "npm run test:shop asserts no legendary appears on any shelf at any band, and that existing shelves are unchanged row-for-row. node assert: rollDrop at rankIndex < 3 never returns legendary across 100k seeded rolls, and at rankIndex >= 3 it does. Plus test:loot, test:loot-fallback, test:acceptance.",
+      "agent": "one",
+      "risk": "medium — touching rollDrop risks changing every existing drop"
+    }
+  ],
+  "waveSplit": {
+    "wave3A_buildingNow": {
+      "steps": [
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "scope": "Grip + stow/draw + inventory panel v1 with weapon slots. Everything needed for \"the characters properly hold the swords\", \"in the plaza the sword can be visible or placed in the inventory\", and \"an inventory button that displays everything about the character\". The armour slots exist in the panel but are rendered locked. STEP 1 IS NOT IN THIS WAVE — it was listed here, it was not built, and it has moved to 3-B where step 7 depends on it.",
+      "shippableAlone": "Yes, and it shipped. What it is NOT: \"every weapon family finally feels different\". That claim belonged to step 1 and step 1 did not land, so every family still swings on the sword's single 0.34 s timing with only damage / reach / arc / knockback multipliers separating them. What 3-A actually delivers is VISUAL and INFORMATIONAL: each family is held and stowed correctly, the sword goes on the back in town, and there is a character sheet you can equip from.",
+      "stepsAsShipped": [
+        2,
+        3,
+        4,
+        5,
+        6
+      ]
+    },
+    "wave3B_next": {
+      "steps": [
+        1,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14
+      ],
+      "scope": "STEP 1 FIRST AND ALONE — wiring the swing state machine is carried over from 3-A and steps 7-9 are unreachable without it. Then armour, sets, and the new weapon families (greatsword, hand axe, bow with real projectile flight, staff), plus legendary gating and Ascension. STASH_LIMIT 12 -> 40 moves here too, alongside step 13's panel v2.",
+      "shippableAlone": "Yes, but with two units inside it: step 1 ships on its own commit before anything else touches combat, and steps 10-13 are a unit — armour tables without the damage integration and the panel are invisible."
+    }
+  },
+  "risks": [
+    "STEP 1 IS A FEEL REGRESSION RISK ON THE ONE THING THE OWNER JUST APPROVED. Wiring the swing state machine changes every attack in the game. Mitigation is structural: SWORD_COMBO is documented as byte-identical to the hardcoded swing, the step ships alone in its own commit, and the assert is numeric rather than a judgement call. If the assert cannot be made to pass, the table is wrong and the table gets fixed — the wiring does not get abandoned.",
+    "PHONE GPU BUDGET. Dungeons are capped at 24 draw calls and 130k tris, and this document adds a stowed weapon, arrows, and armour looks. Mitigations, each already chosen: stowed and drawn are the SAME merged mesh re-parented (zero extra draw calls, and a hidden second mesh is explicitly rejected because it still costs a matrix update and a frustum test); arrows share one merged geometry through the existing bake-and-merge path and are capped at 12 with no per-arrow PointLight; armour part-swap is player-only.",
+    "GPU LEAKS HAVE SHIPPED THREE TIMES IN THIS PROJECT. Every new cache entry must set userData.shared = true or entity teardown will free it out from under other holders; every new pool must register for disposal; the stance flip must create and dispose nothing, which is why the test asserts weaponCacheStats() equality across 100 flips rather than merely checking the parent.",
+    "SAVE COMPATIBILITY. Eight slots, a new stash field, and a materials bag all land in a save that must still load in the shipped build. Mitigations: no SCHEMA_VERSION bump (the shop/worldTime precedent), ensureEquipment idempotent and called first by every entry point, and save.weapon kept as a dual-written mirror so a rollback still finds the player's weapon.",
+    "412 PX LANDSCAPE OVERFLOW. The Exchange already had to be rebuilt as a scroll box for this exact viewport. The inventory has strictly more content. Mitigation: the two-column layout is designed against the 290 px of usable height, the row density is copied from shopui's tightened values, and the visual test gates it at 915x412 in both v1 and v2.",
+    "SET BONUSES TRIVIALISING THE GAME. This is the classic failure mode of the feature the owner asked for. Mitigations are three and all numeric: the partial-vs-rule asymmetry (small flat numbers vs one unstackable rule), the hard 0.72 total DR clamp and +0.6 armour speed clamp, and the L20/L50/L80 balance envelope assert that FAILS THE BUILD rather than merely warning.",
+    "THE PROJECTILE LOOP IS SHARED. Step 8 touches the same _updateProjectiles that enemy casters, boss spread shots and the Nova projectile-wipe all depend on. Mitigation: g = 0 and vy = 0 must reproduce the existing integration float-for-float, asserted over 240 steps, and the pool is introduced behind the same call shape.",
+    "MISSING ASSETS ARE A DESIGN CONSTRAINT, NOT A TODO. There is no staff, no spear, no shield, no helmet and no boots in items.glb, and no boot or leg ICON either. Any of these can quietly become 'we'll add the model later', which in an offline game with a curated pack means never. Mitigation: the staff is procedural by design and tested with the pack absent; the leg and foot icon mappings are flagged as an open question for the owner BEFORE 3-B starts rather than after.",
+    "SCOPE. Fourteen agent-sized steps is two waves, not one. Attempting 3-A and 3-B together is how a wave lands half-finished. The split above is chosen so 3-A is independently playable and independently shippable.",
+    "BOW AIMING VS A MELEE CAMERA. The orbit camera was tuned for melee and shipped four days ago. A ranged weapon wants a different aim affordance. Mitigation: no new camera mode this wave — soft-lock inside a 25 degree cone using the existing camera yaw. If that reads badly, it becomes its own wave rather than a late addition to this one."
+  ],
+  "openQuestions": [
+    "BOW AIMING ON A PHONE. Recommended: soft-lock to the nearest enemy inside a 25 degree cone off the camera forward, no new input and no new camera mode. The alternative is a free-aim reticle, which needs a second thumb and a camera mode and is a wave of its own. Which does the owner want to feel?",
+    "ARMOUR SILHOUETTE. Does armour need to CHANGE HOW THE HUNTER LOOKS (character part-swap, 5 set looks x 2 rigs = 10 merged geometries, player-only) or is icon + stats enough for 3-B? Part-swap is the honest answer to 'collect a set' and is the only 3D expression available, but it is a real geometry cost and a real art-direction judgement.",
+    "LEG AND FOOT ICONS. There is no boot icon and no leg icon in the 108-key atlas. Options: reuse the set's chest icon desaturated, use bag/pouch as stand-ins, or draw two new icons into the atlas (tools/pack-icons.mjs already builds it, so this is cheap). This is the weakest mapping in the document and the owner should choose before step 10.",
+    "TRINKET SLOT: KEEP OR CUT? It is the best-supported slot in the whole pack (7 rings + 3 necklaces, all with icons) and it is the one slot no set can claim. But it is also an eighth slot on a 412 px screen. Recommended: keep.",
+    "DOES THE EXCHANGE SELL ARMOUR? Adding armour to the existing shelf roughly triples it (8 weapon rows -> 8 + 25). A second vendor — an Armoury door in the city, which the enterable-building system already supports — is cleaner but is new city content. Recommended: a second vendor, in a later wave; armour drops only until then.",
+    "WHERE DOES ASCENSION HAPPEN? The Exchange counter (zero new content, but a shop that also crafts is muddled) or a new Forge NPC / door (evocative, matches 'harder to develop', but is new city content and new dialogue)? Recommended: Forge, if there is room in 3-B.",
+    "SPEARS AND GLAIVES HAVE NO MODEL AND NO ICON. Ship them procedurally forever, or budget a small CC0 polearm pack? CONTENT_PACKS.json has no polearm entry at all, so this would be a new research pass. Recommended: procedural forever — buildPolearm already reads correctly and the pack budget is better spent elsewhere.",
+    "SHOULD STANCE BE REMEMBERED? Recommended NO — stance is transient and re-derived, because persisting it creates a third source of truth about what is in the hand. But the owner's phrasing ('the sword CAN be visible or placed in the inventory') might mean he wants the plaza to remember his preference. Worth one question.",
+    "TWIN DAGGERS AND THE OFFHAND. Daggers consume both hands, so the offhand slot locks. Is that acceptable, or should a single-dagger family exist so that dagger + focus / dagger + quiver becomes a build? Recommended: lock it in 3-B; revisit only if the offhand slot feels empty in play.",
+    "EMBERDUST AS A VISIBLE CURRENCY. It needs a HUD or panel home. The inventory STATS tab is the obvious place, but the owner may want it beside ash in the wallet strip. Cheap either way; ask before building both."
+  ]
+}

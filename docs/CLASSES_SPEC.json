@@ -1,0 +1,635 @@
+{
+  "summary": "Wave 3-B character-identity spec for EMBERGATE (repo slug stays 'gatebreaker'): the THREE interlocking layers the owner asked for — (a) DIRECTION, the stat path you pour points into (defense / agility / magic / power / perception) and the mastery thresholds that make going deep mean something qualitative; (b) CLASS, a separate axis with an explicit benefit AND an explicit drawback, chosen at the Assay Hall, which SOFT-matches the direction through a resonance bonus rather than hard-gating it; (c) ARCHON PATH, the endgame identity, of which SHADOW (the existing Bind army) is one of FIVE, each with its own signature mechanic and a stated, arithmetic power-parity argument. This document is a CONTRACT ONLY. Nothing in src/ was changed to write it. Wave 3-A builds NONE of this.",
+
+  "namingCompliance": {
+    "banned": "No Solo Leveling proper nouns anywhere in this spec, in code, or in UI strings. 'monarch' is BANNED — the concept is ARCHON. 'Arise' is BANNED — the skill is BIND. The owner's phrase 'shadow monarch' is implemented here as the SHADOW ARCHON path.",
+    "lineage": "'Archon' already exists in the shipped fiction: config.js GATES has rank S = \"ARCHON'S REACH\" with boss 'archon' / THE RIFT ARCHON, and biome key archonreach. The player ascending to an Archon path is therefore not a new noun — it is the game finally letting you become the thing at the end of the S gate. Use that. THE RIFT ARCHON is the shadow-side precursor; the ascension trial is fought in its reach.",
+    "otherNouns": "Class names, direction names, mastery names and archon resource names in this spec are all composed from the game's existing Cinderbound/Ash/Verge/Ember lexicon (see shadows.js PREFIXES/SUFFIXES, weapons.js TITLES, SHADOW_GRADES). None are drawn from any existing property. UI copy is uppercase-terse to match ui.js."
+  },
+
+  "studyFindings": {
+    "whatAlreadyExists": [
+      "progression.js is pure and THREE-free and is already the single place level/stat/capacity maths lives — classes.js must be the same and must be importable by node with no browser.",
+      "config.js STATS is a FIXED-ORDER five-element array (str, agi, vit, int, per) that ui.js, save.js and tools/progression-test.mjs all index off. NEVER reorder it. Directions are therefore keyed to those five existing stats, NOT to new stats.",
+      "config.js derive(save) already produces the whole derived block (maxHp, maxMp, atk, speed, crit, critDmg, atkSpeed, skillMul, cdr, dr, hpRegen, mpRegen, dmgFloor, tellLeadMs, dodgeWindow, shadowDmgMul). Class modifiers must be applied to THAT block and nowhere else, or the numbers fork.",
+      "save.js already has `classTier: null` (freshSave line 34) and progression.js awardClassTier() sets it to 'base' | 'advanced' | 'sovereign' from survival seconds at the level-40 trial. That field is a QUALITY tier, not a class identity — it is reinterpreted here, not replaced, and tools/progression-test.mjs lines 206-217 must keep passing verbatim.",
+      "The SHADOW path is already ~70% built: extraction (extractionChance, MAX_EXTRACT_ATTEMPTS, CORPSE_WINDOW), roster + field capacities, SHADOW_GRADES up to ASHEN FIRST (mul 4.0, maxCount 1), promote/canPromote/promoteCost, setDeployed/autoDeploy/deployedRecords, shadowCombat, game.js _spawnShadow / _updateShadows / _shadowStrike with the windup-synced contact frame, and the sanctioned dark treatment for bound creatures. This is the head start the parity argument has to answer for.",
+      "save.js proves the additive-field convention: `shop` and `worldTime` were added WITHOUT a schema bump because an absent value is indistinguishable from the default, and migrate() just sanitises them. Every field this spec adds follows that same rule — SCHEMA_VERSION stays 2.",
+      "config.js SKILLS has exactly five entries (attack, dash, slash 'Ruin' @L3, nova @L7, summon 'Bind' @L12) and game.js has one _try* method per skill. Archon paths deliberately do NOT add a sixth button on the HUD for four of the five paths — see interlock.noNewButtons.",
+      "The seed-fork convention is `mulberry32((seed ^ CONST) >>> 0)` with per-system constants documented at the top of dungeonlayout.js (0x9e3779b9 layout, 0x5f356495 decor, 0x1f123bb5 encounter; dungeon.js 0x85ebca6b shell, 0x27d4eb2f; city.js 0x9e3779b9 / 0x5bf03635 interiors). Anything this spec generates into a world takes a NEW unused constant.",
+      "quality.js TIERS cap maxFieldShadows at 4 / 6 / 9 / 12 (low/medium/high/ultra) and shadowFieldCapacity() takes the min of that and the earned value. Any archon that adds bodies to the field is clamped by that same tier value — no exceptions.",
+      "rim.js applyRim is OFF BY DEFAULT and the file's own header records WHY (the owner asked for characters that do not glow). glow.js GLOW_LAYER is layer-masked and opt-in. Both are the enforcement points for the no-glow-on-living-characters rule."
+    ],
+    "whatIsMissing": [
+      "There is no notion of a DIRECTION at all. Points go into five stats and the panel shows five sliders that, to a new player, all read as 'more damage'. Nothing rewards depth over spread, and nothing gives a stat a QUALITATIVE payoff.",
+      "There is no class identity. classTier exists with three values and is never read by anything except its own test.",
+      "There is no archon layer, no endgame identity fork, and no alternative to the shadow army — which is exactly the gap the owner named.",
+      "Respec (80 + 14/point, ash) is the only build-change tool and it is unbounded: at the L100 all-in figure of 495 spent points it costs 6,010 ash, which is more than the Exchange's entire late-game price curve. It needs a cap and a token."
+    ]
+  },
+
+  "ownerIntent": {
+    "quote": "then different directions you can go with your character by making it more of a defense character, or agility character, or magic character and so on along with classes... each class having its own benefits and drawbacks and the shadow monarch is an option but so are other monarchs depending on their development. make sure the other monarchs have the same capabilities to become powerful just as much as the shadow monarch. and classes are different then the actual direction of the character over abilities like agility, magic, and so on. they should match obviously. similar to how solo leveling does it.",
+    "reading": [
+      "THREE layers, not two. He explicitly separates 'the actual direction of the character' from 'classes' and says they should MATCH — that is a synergy statement, not an identity statement. If class were just a name for the direction he would not have called them different things.",
+      "'depending on their development' — the archon path must be EARNED from how you actually played, not picked off a menu on a character-creation screen. Ascension therefore reads the save's own history (what you killed, what you bound, how you fought), and the trial confirms it.",
+      "'make sure the other monarchs have the same capabilities to become powerful just as much' — this is the load-bearing sentence in the whole brief and it is why this document carries an arithmetic parity table rather than a paragraph of reassurance. It is also why the shared status-effect substrate (buildOrder STEP 6) is scheduled BEFORE any individual non-shadow path: parity fails if three paths each get a hand-rolled half-finished version of the same machinery.",
+      "'they should match obviously' — SOFT synergy. He wants matching to be the obvious and rewarded thing, not the only legal thing. Hard gating is rejected in classes.matchingPolicy with reasons."
+    ]
+  },
+
+  "layerA_directions": {
+    "concept": "A DIRECTION is not a choice the player makes in a menu — it is the name the game gives to what the player has already been doing with their points. It is derived, every frame, from save.stats. Choosing it is spending; changing it is respec. This is deliberately the cheapest possible implementation of the biggest-sounding feature in the brief: zero new save fields for the direction itself.",
+    "derivation": {
+      "function": "directionOf(save) -> 'str' | 'agi' | 'vit' | 'int' | 'per' | 'unsworn'",
+      "algorithm": "spent = sum(save.stats[k]) over the five STATS keys. lead = the key with the largest save.stats value, ties broken by STATS array order (deterministic — never by iteration order of the object). Return lead when spent >= 30 AND save.stats[lead] / spent >= 0.35; otherwise 'unsworn'.",
+      "whyAutoStatsAreExcluded": "effectiveStat() adds save.autoStats (the +1-per-level grant) to every stat equally. Including it in the share test would drag every player toward 'unsworn' at low level and toward whatever they happened to lead in at high level. Direction is about CHOICES, so it reads save.stats — the spent record — only.",
+      "spentReaches30At": "level 7 if all-in (6 levels x 5 points), level 10-12 for a normal spread. So a player has a direction by the time Bind unlocks at 12, which is the right moment for the game to first name it.",
+      "unsworn": "'UNSWORN' is a real, non-punished state with its own panel line ('NO DIRECTION SET — SPEND DEEPER'). It grants nothing and costs nothing. Every existing save with a flat spread reads as UNSWORN and plays exactly as it does today."
+    },
+    "theFiveDirections": [
+      {
+        "key": "vit",
+        "name": "BULWARK",
+        "ownerWord": "defense character",
+        "linearEffect": "Per point (unchanged, from STAT_RATES.vit): +11 max HP, +0.05 HP regen/sec, +0.18% flat damage reduction, DR cap 45%.",
+        "masteries": [
+          { "tier": 1, "spentThreshold": 60, "name": "IRONHIDE", "effect": "Any single hit that would take more than 12% of max HP is capped at 12% of max HP. Applied AFTER dr. Hard cap on burst — this is what makes VIT survive an A/S boss's opener, which raw HP cannot.", "impl": "One clamp in game.js _damagePlayer. No new state." },
+          { "tier": 2, "spentThreshold": 120, "name": "RIPOSTE", "effect": "Taking a hit while above 50% HP returns 25% of the POST-mitigation damage as a 3.5 m shockwave centred on you, 0.9 s internal cooldown.", "impl": "Reuses fx.ring + the existing _coneTargets/radius damage path. Zero new meshes." },
+          { "tier": 3, "spentThreshold": 200, "name": "UNYIELDING", "effect": "One lethal hit per 90 s leaves you at 1 HP instead and grants 2.0 s invulnerability (p.invuln, the field dash already writes). Cooldown is real time, tracked on the run, NOT persisted.", "impl": "One guard in the death path." }
+        ]
+      },
+      {
+        "key": "agi",
+        "name": "WINDSTEP",
+        "ownerWord": "agility character",
+        "linearEffect": "Per point (unchanged): +0.09 move speed (asymptotic to +4.2), +0.55% crit (cap 55%), +0.35% crit damage, +4 ms perfect-dodge window (base 110 ms, cap 260 ms).",
+        "masteries": [
+          { "tier": 1, "spentThreshold": 60, "name": "SLIPSTREAM", "effect": "A dodge that clears an attack inside derived.dodgeWindow refunds the dash cooldown in full and grants 0.6 s of +35% attack speed.", "impl": "derived.dodgeWindow already exists and is already computed; the perfect-dodge detection is the only new bit and it belongs next to the existing p.invuln check." },
+          { "tier": 2, "spentThreshold": 120, "name": "ANSWER", "effect": "A perfect dodge queues one guaranteed critical strike: the next basic attack landed within 1.2 s crits automatically at 1.3x the normal crit multiplier.", "impl": "One timer on the player + one branch in _damageEnemy's crit roll." },
+          { "tier": 3, "spentThreshold": 200, "name": "TEMPO", "effect": "Perfect dodges chain: each one within 4 s of the last adds a stack (max 5) of +8% move speed and +6% crit damage. One stack decays every 2 s once the chain lapses.", "impl": "One integer + one timer. No allocation in the update loop — the stack count multiplies into the already-recomputed derived block." }
+        ]
+      },
+      {
+        "key": "int",
+        "name": "EMBERMIND",
+        "ownerWord": "magic character",
+        "linearEffect": "Per point (unchanged): +7 max MP, +0.16 MP regen/sec, +0.45% cooldown reduction (cap 40%), +2.5% skill multiplier, +0.35 shadow roster capacity, +1.1% shadow damage.",
+        "masteries": [
+          { "tier": 1, "spentThreshold": 60, "name": "KINDLING", "effect": "A kill within 3 s of a skill cast refunds 20% of that skill's mana cost. Stacks with itself up to the full cost.", "impl": "One timestamp + the existing kill hook." },
+          { "tier": 2, "spentThreshold": 120, "name": "RESIDUE", "effect": "Every skill cast leaves a 4 m field at the cast point for 3 s dealing 12% of derived.atk per second to enemies inside it. Max 3 fields live.", "impl": "ONE pooled decal channel (src/render/decalpool.js already exists) + a radius tick on the existing enemy list. One draw call for all three fields." },
+          { "tier": 3, "spentThreshold": 200, "name": "OVERCHARGE", "effect": "Every 4th skill cast inside a 10 s window costs 0 mana and deals 1.6x. The counter resets if 10 s pass with no cast — so it rewards a rotation, not a stockpile.", "impl": "One counter + one timer." }
+        ]
+      },
+      {
+        "key": "str",
+        "name": "BREAKER",
+        "ownerWord": "and so on (the power axis the existing combo finisher already implies)",
+        "linearEffect": "Per point (unchanged): +2.4 attack power, +0.6% attack speed (cap 30%).",
+        "masteries": [
+          { "tier": 1, "spentThreshold": 60, "name": "SUNDER", "effect": "The combo finisher (p.comboIndex === 3, already in _applySwingDamage) applies ARMOUR BREAK for 5 s: the target takes +18% damage from all sources including shadows. Does not stack with itself, refreshes.", "impl": "One float on the enemy record read by _damageEnemy." },
+          { "tier": 2, "spentThreshold": 120, "name": "AFTERSHOCK", "effect": "The finisher also detonates a 5 m shockwave for 40% of derived.atk, using the existing finisher's fx.ring + fx.addShake so it costs no new VFX.", "impl": "Radius damage in the existing finisher branch." },
+          { "tier": 3, "spentThreshold": 200, "name": "RUINOUS", "effect": "Kills refresh the combo window (p.comboTimer back to full) so a room chains as one long combo, and every 3rd finisher staggers everything within 7 m for 0.8 s (stagger is already an enemy field).", "impl": "One counter + the existing stagger write." }
+        ]
+      },
+      {
+        "key": "per",
+        "name": "AUGUR",
+        "ownerWord": "and so on (the read-the-fight axis; PER is the repo's most mechanically distinctive stat)",
+        "linearEffect": "Per point (unchanged): +1.2% damage floor (base 55%, cap 92%), +8 ms telegraph lead (base 120 ms, cap 520 ms), +0.4% bind/extraction chance.",
+        "masteries": [
+          { "tier": 1, "spentThreshold": 60, "name": "READING", "effect": "Enemy telegraphs render as a ground arc showing the ACTUAL swing cone and reach, appearing derived.tellLeadMs before contact. This is the abstract stat finally becoming a visible thing.", "impl": "decalpool.js channel, one InstancedMesh of arc quads, max 6 live. One draw call." },
+          { "tier": 2, "spentThreshold": 120, "name": "PUNISH", "effect": "Hitting an enemy while its telegraph timer is running deals +30% and has a 25% chance to cancel the wind-up outright (the enemy loses the attack and eats its own cooldown).", "impl": "The enemy telegraph field already exists on both enemy and shadow records." },
+          { "tier": 3, "spentThreshold": 200, "name": "CERTAINTY", "effect": "The damage floor becomes 100% — no low rolls, ever — and crit damage +25%. AUGUR's ceiling is consistency converted into throughput.", "impl": "One override of derived.dmgFloor and one add to derived.critDmg." }
+        ]
+      }
+    ],
+    "masteryRules": {
+      "thresholdsAreOnSpentPointsOnly": "60 / 120 / 200 SPENT points in that one stat. autoStats does not count, or every player would own every mastery by level 200-equivalent for free and the whole layer would evaporate.",
+      "notGatedByDirection": "Masteries are per-stat thresholds and are independent of directionOf(). A 200/145 str/vit build owns BREAKER T3 and BULWARK T2 at once. Direction is the LABEL and the resonance key; masteries are the payout. Keeping them separate is what stops the layer from producing dead ends after a respec.",
+      "reachability": "All-in reaches T1 at level 13, T2 at level 25, T3 at level 41. A 60/40 two-stat split reaches lead T3 at level 68 and off-stat T2 at level 61. A flat five-way spread reaches T1 in everything at level 61 and never reaches T3 — which is the intended trade and the reason to have a direction at all.",
+      "qualitativeNotMultiplicative": "EVERY mastery adds a BEHAVIOUR (a cap, a proc, a field, a refund) and none of them is a flat percentage multiplier on derived.atk or derived.maxHp. This is the primary anti-power-creep rule in the spec and it is what keeps interlock.stackingRule to a depth of two. CERTAINTY's +25% crit damage and TEMPO's stacks are the two deliberate exceptions and both are capped and conditional.",
+      "uiSurface": "The stat panel (ui.js _renderStats, the STATS.forEach block) gains one line per stat: the mastery name and a 'NEXT: 200' progress figure. The direction name is shown once, above the grid, with its uppercase title. No new screen."
+    },
+    "respec": {
+      "current": "progression.js respecCost(save) = 80 + 14 x (total spent points), paid in save.ash; respec() refunds every point and zeroes save.stats.",
+      "problem": "Unbounded. At the L100 all-in figure (495 spent) that is 6,010 ash, which is well past the Exchange's whole price curve, so late-game respec is theoretical rather than real. Directions and masteries make respec a much more meaningful button, so it has to actually be pressable.",
+      "changes": [
+        "KEEP the formula shape and the existing assert: respecCost(save) = Math.min(3000, 80 + 14 * spent). At spent = 3 this is still 122, so tools/progression-test.mjs line 105 passes verbatim. The cap binds from spent = 209 upward.",
+        "ADD save.respecTokens (integer, default 0). respec() consumes a token when one is held and charges ash only when it is not. Tokens are granted by: choosing a class (+1), ascending to an archon (+1), and the migration below (+1 for any existing save at level >= 20).",
+        "respec() ALSO clears the direction and every mastery, because both are derived from save.stats and save.stats goes to zero. This must be stated in the confirm dialog — losing BREAKER T3 is a bigger deal than losing 345 points, and a player who is surprised by it will be justifiably angry."
+      ],
+      "whatRespecDoesNotTouch": "className, classTier, archon, and the shadow roster. Direction is fluid; class is a commitment; archon is an identity. Rewriting those has its own price (see classes.rechoosing and archons.reascension)."
+    }
+  },
+
+  "layerB_classes": {
+    "concept": "A class is a SHAPE, not a strength. Every class in the roster below is a set of trades against the same baseline: a real benefit paid for with a real drawback, both stated as percentages against the derived block. The roster is deliberately wider than the five directions (eight classes over five stats, two of them hybrids) so that 'which class matches my direction' is a question with more than one answer.",
+    "choosing": {
+      "where": "THE ASSAY HALL — city.js SERVICES id 'assay' at (0, -38), one of the five enterable buildings, already built, already dressed (interiors.js ENTERABLES 'assay', its own dressing table and hearth). It is the building the fiction already uses for measuring hunters. No new building, no new interior.",
+      "when": "Level 20. Early enough that the class shapes the middle of the game rather than decorating the end of it, late enough that the player has a direction (spent >= 30 happens by ~level 10) and can read what 'matches'.",
+      "how": "Walk in, talk to the assayer, pick from the roster. The panel shows, for each class, the benefit line, the drawback line IN THE SAME TYPE SIZE, its affinity stat, and a RESONANT / NEUTRAL badge computed against the player's current direction. Drawbacks are never in small print — a class whose downside a player did not read is a class they will blame the game for.",
+      "cost": "Free. The commitment IS the cost.",
+      "saveField": "save.className (string key | null). Default null.",
+      "classTierReinterpretation": "The EXISTING save.classTier ('base' | 'advanced' | 'sovereign', set by the level-40 trial from survival seconds) becomes CLASS QUALITY: a single multiplier on the magnitude of the class's BENEFIT terms only — base 1.00, advanced 1.12, sovereign 1.25. Drawbacks are never scaled by quality; a better trial makes you better at your class, it does not excuse it. progression.js awardClassTier() and its five existing asserts are unchanged.",
+      "trialWithNoClass": "A save that reaches the level-40 trial with className still null still gets its classTier and its +8 points as today. The next Assay Hall visit offers the class choice with the earned quality already banked. Nothing is lost by ignoring the system."
+    },
+    "matchingPolicy": {
+      "recommendation": "SOFT SYNERGY. Recommended without reservation.",
+      "mechanism": "RESONANCE. Let affinityMatched = directionOf(save) is one of the class's affinity keys. Let m = the mastery tier reached in the class's matched affinity stat (0-3). resonance = affinityMatched ? m : 0. Each resonance tier scales the class's BENEFIT percentages by +4% relative and its DRAWBACK percentages by -2% relative. At resonance 3 a class is 12% better at what it is good at and 6% less punished for what it is bad at.",
+      "worstCaseSpread": "Resonance 3 on the largest benefit term in the roster (BLADEDANCER dash cooldown 1.60 -> 1.05 s, a 34% cut) moves it to 1.03 s. The gap between a fully resonant build and a deliberately mismatched one is ~12% of the class layer, which is roughly one weapon rarity step (RARITIES uncommon->rare is 1.09 -> 1.20). That is the correct size: noticeable, chase-worthy, and nowhere near mandatory.",
+      "whyNotHardGating": [
+        "Respec exists and is now cheap enough to press. Hard gating means a respec can silently invalidate your class, which is a bug report, not a design.",
+        "Hybrid builds are the interesting ones and hard gating deletes them. A VANGUARD who went 60% vit / 40% int to reach EMBERMIND T1 is exactly the kind of build the owner's 'directions' brief is asking for.",
+        "The owner said the layers 'should match obviously' — obviously is an adverb about legibility, not a lock. Soft synergy is legible: the panel prints RESONANT in gold.",
+        "Hard gating multiplies the migration problem: every existing save would need a class assigned that its stats happen to legalise, and there is no honest way to do that."
+      ],
+      "encouragementBeyondNumbers": "The Assay Hall panel sorts the roster with resonant classes first and prints a one-line 'YOUR PATH SO FAR READS AS <DIRECTION>' header. Legibility does more work here than the 12% does."
+    },
+    "roster": [
+      {
+        "key": "vanguard",
+        "name": "VANGUARD",
+        "affinity": ["vit"],
+        "fantasy": "The one who is still standing when the room stops moving.",
+        "benefit": "+14% max HP; the damage-reduction cap rises 45% -> 55%; 25% of every incoming hit is applied as a bleed over 3 s instead of instantly, and the untaken remainder is cancelled outright if you kill anything before it lands.",
+        "drawback": "-12% move speed; dash distance -20% (7.5 -> 6.0); crit rate is capped at 30% instead of 55%.",
+        "readsAs": "Slow, unkillable, uninterested in crit. Pairs with BULWARK; the delayed-damage clause is what makes it aggressive rather than passive."
+      },
+      {
+        "key": "berserker",
+        "name": "BERSERKER",
+        "affinity": ["str"],
+        "fantasy": "Every wound is an argument for swinging harder.",
+        "benefit": "Attack power scales +0.45% per 1% of missing HP, to +40% at the edge of death; the attack-speed cap rises 30% -> 36%.",
+        "drawback": "Healing received -35%; HP regen -50%; the damage-reduction cap drops 45% -> 25%.",
+        "readsAs": "A damage curve you have to stand in the fire to reach. Pairs with BREAKER. The DR floor is deliberately the harshest drawback in the roster because the benefit is the largest."
+      },
+      {
+        "key": "bladedancer",
+        "name": "BLADEDANCER",
+        "affinity": ["agi"],
+        "fantasy": "Never in the same place the blow was aimed at.",
+        "benefit": "Dash cooldown 1.60 -> 1.05 s; dash i-frames 0.34 -> 0.42 s; +12% crit damage; perfect-dodge window +40 ms on top of the AGI-derived value (cap becomes 300 ms).",
+        "drawback": "-18% max HP; -15% attack power; knockback taken +40%.",
+        "readsAs": "The highest skill-expression class in the roster: it converts dodging well into damage and dodging badly into death. Pairs with WINDSTEP."
+      },
+      {
+        "key": "hexweaver",
+        "name": "HEXWEAVER",
+        "affinity": ["int"],
+        "fantasy": "The blade is a formality.",
+        "benefit": "+25% skill damage (on top of derived.skillMul); the cooldown-reduction cap rises 40% -> 52%; MP regen +60%.",
+        "drawback": "-25% basic-attack damage; -20% attack speed; -12% max HP.",
+        "readsAs": "Rotation-driven. Pairs with EMBERMIND. The basic-attack penalty is what stops it from simply being 'INT but better'."
+      },
+      {
+        "key": "binder",
+        "name": "BINDER",
+        "affinity": ["int", "per"],
+        "fantasy": "You arrived alone. That was an oversight.",
+        "benefit": "Roster capacity +25%; field capacity +2 (STILL hard-clamped by quality.js maxFieldShadows — no exceptions); shadow damage +20%; extraction chance +12 percentage points before the clamp.",
+        "drawback": "-20% personal attack power; -15% max HP; Nova and Ruin cost +30% mana.",
+        "readsAs": "The natural feeder into SHADOW ARCHON and explicitly NOT a requirement for it — see archons.classIsNotDestiny. A BINDER who ascends as FROST gets a very strange, very good bodyguard build."
+      },
+      {
+        "key": "oracle",
+        "name": "ORACLE",
+        "affinity": ["per"],
+        "fantasy": "You have already seen this fight.",
+        "benefit": "Damage floor +20 percentage points (the 92% cap becomes reachable as 100%); telegraph lead +120 ms; +18% damage to any enemy currently winding up.",
+        "drawback": "-20% crit rate; -10% move speed; skills cost +25% mana.",
+        "readsAs": "Trades the top of the damage roll for the bottom of it and for information. Pairs with AUGUR."
+      },
+      {
+        "key": "templar",
+        "name": "TEMPLAR",
+        "affinity": ["vit", "int"],
+        "fantasy": "Faith is a load-bearing structure.",
+        "benefit": "30% of effective INT counts as VIT for max-HP and damage-reduction purposes; skills heal you for 6% of the damage they deal.",
+        "drawback": "-20% skill damage; -15% crit rate; all cooldowns +15% (applied before cdr).",
+        "readsAs": "The sustain class. The one build in the roster that can hold a boss chamber solo for a long time. Hybrid affinity — resonant with either BULWARK or EMBERMIND."
+      },
+      {
+        "key": "reaver",
+        "name": "REAVER",
+        "affinity": ["str", "agi"],
+        "fantasy": "Momentum is the only defence worth having.",
+        "benefit": "+3% life leech on all damage; every kill grants +6% move speed and +4% attack speed for 4 s, stacking to 5.",
+        "drawback": "-25% max MP; skills cost +40% mana; -10% max HP.",
+        "readsAs": "Snowballs through a room and falls apart against a single target with no adds. Hybrid affinity — resonant with BREAKER or WINDSTEP."
+      }
+    ],
+    "rechoosing": {
+      "cost": "One ASSAY SEAL, bought at the Assay Hall for 1,800 ash, or granted free the first time (every player deserves one look at a class they picked from a menu at level 20).",
+      "whatChanges": "className only. classTier, stats, direction, archon, roster and stash are untouched.",
+      "whyNotFree": "The drawbacks are the whole design. If swapping class is free, the optimal play is to hold the class whose drawback does not apply to the current fight, and the layer stops being a commitment."
+    }
+  },
+
+  "layerC_archons": {
+    "concept": "The Archon path is the endgame identity: what you are, after the S gate. There are FIVE. Each owns a resource, a status system or a body of allies that no other path touches, and each is balanced to the same composite ceiling by a different route. SHADOW is the one the codebase already half-built; it gets no advantage from that beyond arriving first.",
+    "unlock": {
+      "conditions": [
+        "Level 55 (past rankOf's S threshold of 53, before SOVEREIGN at 71 — so the world calls you S rank before it lets you become something else).",
+        "save.classTier is set (i.e. the level-40 trial is done).",
+        "At least one clear of an S-rank gate: save.cleared.S is a number.",
+        "Any FOUR of the five per-path affinity counters have to be zero for the path to be hidden; see resonanceReading below."
+      ],
+      "trial": "THE REACH. A single-entry S-rank dungeon run into ARCHON'S REACH (config.js GATES rank S, boss 'archon' / THE RIFT ARCHON, arena 76) with the exit portal sealed. Not a new dungeon: it is the existing S gate with a flag. Reaching and killing the boss ascends you.",
+      "howThePathIsOffered": "'depending on their development', per the brief. The save carries five small counters (see archonState.affinity) incremented by things the player was already doing. At the trial's end the game offers the TOP TWO paths by counter plus SHADOW if it is not already in that pair (Shadow is always offerable because Bind is available to every build). The player picks from those. Nobody is ever offered fewer than two.",
+      "resonanceReading": {
+        "shadow": "+1 per successful Bind extraction; +3 per shadow promoted.",
+        "flame": "+1 per enemy killed by a combo finisher; +2 per Nova that hits 4 or more.",
+        "frost": "+1 per perfect dodge; +2 per enemy killed while staggered.",
+        "storm": "+1 per 400 m travelled inside a gate; +2 per dash that clears an attack.",
+        "beast": "+1 per elite killed; +3 per boss killed without dying.",
+        "storage": "Five small integers on save.archonState.affinity, capped at 9999 each so an idle grinder cannot overflow. Written on the same cadence as the existing onSave() calls."
+      },
+      "saveField": "save.archon (string key | null). Default null. Null means 'not ascended' and changes nothing about how the game plays."
+    },
+    "classIsNotDestiny": "Any class may ascend to any path. BINDER is the obvious Shadow feeder and it is not a prerequisite; a VANGUARD Shadow Archon is a wall with an army behind it and is a perfectly good build. The affinity counters bias the OFFER, not the legality.",
+    "reascension": {
+      "cost": "One ASHEN SIGIL. Sigils drop from S-rank bosses at a rate of one per three clears (seeded, see determinism.forks). Re-ascending keeps level, stats, class and roster; it resets archonState.resource to 0 and the path-specific unlocks to their tier-1 state.",
+      "why": "The owner wants five viable identities. If the choice is permanent, four of them are things most players will never see."
+    },
+    "paths": [
+      {
+        "key": "shadow",
+        "name": "SHADOW ARCHON",
+        "ownerPhrase": "the concept he called 'shadow monarch'",
+        "identity": "Command. You do not fight the room; you bring one.",
+        "resource": "None — the army IS the resource. Roster and field capacity, already in progression.js.",
+        "signatureMechanic": {
+          "name": "SOVEREIGN'S WILL",
+          "existingPortion": "Bind extraction, the roster, SHADOW_GRADES through ASHEN FIRST (mul 4.0, maxCount 1), promote, deploy, shadowCombat, the field AI with the windup-synced contact frame, and the sanctioned dark treatment. All shipped.",
+          "newPortion": [
+            "COMMAND STATES. A three-way stance toggle on the shadow panel: HOLD (shadows stay within 4 m of you and intercept anything that closes), HUNT (current behaviour — nearest enemy within 26 m), FOCUS (all shadows attack your last-hit target). One enum on the run state and three branches in the existing _updateShadows target selection. No new AI.",
+            "LEGION STEP. Recall every fielded shadow to you instantly; each detonates for 60% of its own atk in a 4 m radius; they re-form at your side over 6 s at 50% HP. 45 s cooldown. This is the path's burst window and the answer to 'my army is on the wrong side of the room'.",
+            "FIELD CAPACITY +2, still hard-clamped by quality.js maxFieldShadows. On a low-tier phone this grants nothing and the path is still fine, because a Shadow Archon's damage rides gradeMultiplier and shadowDmgMul, not headcount.",
+            "ASHEN SECOND. The maxCount-1 ASHEN FIRST slot becomes maxCount 2 for this path only. One number in a path-aware read of SHADOW_GRADES."
+          ]
+        },
+        "playstyle": "Set up, position, commit. Highest floor in the roster — the army fights while you reposition — and the lowest ceiling on personal burst.",
+        "weakness": "Boss chambers. One target, no adds to bind, and the army's DPS is spread across a windup cycle it cannot rush.",
+        "headStart": "REAL AND ACKNOWLEDGED. Roughly 70% of this path is already in the tree (see studyFindings). Its remaining work is one build step; every other path needs two or three. buildOrder schedules the shared substrate BEFORE the other paths precisely so this head start does not turn into a permanent quality gap."
+      },
+      {
+        "key": "flame",
+        "name": "FLAME ARCHON",
+        "identity": "Ignition. Nothing you hit stops burning, and burning things set fire to each other.",
+        "resource": "EMBER, 0-100. +2 per Pyre stack consumed by a combustion. Decays 3/s out of combat.",
+        "signatureMechanic": {
+          "name": "PYRE AND ASHFALL",
+          "detail": [
+            "PYRE STACKS. Every hit you land applies 1 Pyre stack to the target (max 10). Each stack is a 2% damage-over-time tick of your derived.atk per second, so a 10-stack target burns for 20% atk/s.",
+            "COMBUSTION. At 10 stacks the target combusts: 220% of derived.atk in a 4 m radius, stacks reset to 0, and every enemy caught in the blast gains 4 stacks. In a packed room this cascades, which IS the path.",
+            "ASHFALL (the ultimate, at 100 Ember). The floor burns for 8 s in a 14 m radius around you at 45% atk/s and applies 1 stack per second to everything standing in it. Ember is spent in full."
+          ]
+        },
+        "vfxBudget": "One pooled InstancedMesh of flame quads (max 64 instances, one draw call) + one decalpool channel for Ashfall's floor ring. Stacks are an integer on the enemy record and a colour TINT on the enemy's existing material — never an emissive or a rim, because enemies are living characters (rim.js's whole header explains why).",
+        "playstyle": "Hit everything a little rather than one thing a lot. Rooms melt; single targets are slow.",
+        "weakness": "Bosses (nothing to cascade into) and sparse corridors."
+      },
+      {
+        "key": "frost",
+        "name": "FROST ARCHON",
+        "identity": "Arrest. The fight happens at the speed you allow.",
+        "resource": "RIME, applied to enemies (0-10 each) rather than banked on the player. The player's own bank is the BARRIER below.",
+        "signatureMechanic": {
+          "name": "RIME AND SHATTER",
+          "detail": [
+            "RIME. Every hit applies 1 Rime stack: -6% enemy move and attack speed each, to -60% at 10.",
+            "FREEZE. The 10th stack freezes the target solid for 2.2 s. A frozen enemy takes +45% damage and cannot act. Stacks clear on thaw.",
+            "SHATTER. A single hit on a frozen enemy exceeding 15% of its max HP shatters it: 300% of THAT HIT's damage is split among all enemies within 6 m and applies 3 Rime to each. Kill-chaining by control instead of by fire.",
+            "GLACIAL BARRIER. Each Rime stack applied grants a shield worth 0.4% of your max HP, capping at 35% of max HP. The shield absorbs before HP and decays 2%/s out of combat. This is why FROST's effective-HP figure in the parity table is the highest in the roster."
+          ]
+        },
+        "vfxBudget": "One pooled InstancedMesh of rime shard quads (max 48, one draw) + a per-enemy material tint. The freeze pose is the existing stagger hold — no new animation state.",
+        "playstyle": "Nothing gets to hit you at full speed, ever. Slow, safe, enormous burst inside a freeze window.",
+        "weakness": "Lowest raw room-clear throughput in the roster, and the freeze windows have to be earned hit by hit."
+      },
+      {
+        "key": "storm",
+        "name": "STORM ARCHON",
+        "identity": "Momentum. Standing still is the only way to be weak.",
+        "resource": "CHARGE, 0-200. +1 per metre travelled. Decays 8/s while stationary. This is the only resource in the roster generated by MOVEMENT, which is why the path feels unlike the other four in the hands.",
+        "signatureMechanic": {
+          "name": "ARC AND TEMPEST",
+          "detail": [
+            "ARC. Every landed hit discharges 10 Charge and chains lightning to up to 4 additional enemies within 8 m for 55% of derived.atk each. No Charge, no chain — so a Storm Archon who stops moving is a plain hunter, and that is the deal.",
+            "TEMPEST STEP (the ultimate, at 200 Charge). 6 s of: move speed +55% with a HARD ABSOLUTE CEILING of 14 u/s, dash cooldown zero, every dash leaves a bolt that deals 90% atk along its line, and basic attacks ignore their cooldown. Charge is spent in full and cannot regenerate for the duration.",
+            "The 14 u/s ceiling is not flavour: the collision solver, the camera follow and the walk cycle were all tuned around a base of 6.0 with an agility bonus asymptotic to 4.2 (config.js STAT_RATES.agi comments record the last time an uncapped speed term broke this). Any implementation that lets Tempest Step exceed 14 u/s is a bug."
+          ]
+        },
+        "vfxBudget": "One pooled InstancedMesh of thin box segments for the chains (max 40 segments, one draw) reusing the existing fx.burst for the endpoints. No trails, no ribbons, no new shader.",
+        "playstyle": "Never stop. Highest mobility and the best multi-target burst; the class is a kiting problem the player solves with their thumbs.",
+        "weakness": "Lowest effective HP in the roster and completely neutered in a corridor or a boss chamber that forces you to hold ground."
+      },
+      {
+        "key": "beast",
+        "name": "BEAST ARCHON",
+        "identity": "Pact. One overwhelming ally instead of many small ones — and, when it matters, you become the thing yourself.",
+        "resource": "None banked. The cooldown on WILD FORM is the resource, and it is shortened by kills.",
+        "signatureMechanic": {
+          "name": "PACT AND WILD FORM",
+          "detail": [
+            "PACT BEASTS. Five pact slots, one per gate rank band (E/D, C, B, A, S). A pact is bound from a boss or elite corpse using the existing extraction path, so it costs no new system. You field exactly ONE pact beast at a time and it fights at 4.0x a normal shadow's shadowCombat() numbers.",
+            "Fielding a pact beast consumes the ENTIRE field-shadow allowance — a Beast Archon has one ally, not thirteen. That is what keeps this inside quality.js's maxFieldShadows on a low-tier phone with no special case, and it is the mirror image of Shadow's design rather than a reskin of it.",
+            "WILD FORM. 12 s in the shape of your active pact beast: 2.2x attack power, 1.5x move speed (subject to the same 14 u/s ceiling), 40% flat damage reduction, no skills and no items. 90 s cooldown, reduced 6 s per kill made while transformed.",
+            "NO GLOW ON THE PLAYER. Wild Form is a LIVING character and the no-rim/no-emissive rule applies without exception. The transformation is sold by silhouette swap (SkeletonUtils.clone of the creature rig, the same path _makeBoundBody already uses), a desaturated palette shift on the player's own materials, and a one-off fx.burst + fx.ring + fx.addShake at the transition. If that does not read strongly enough on device, the fix is a longer transition and a bigger camera pull — NOT a rim."
+          ]
+        },
+        "vfxBudget": "Zero new pools. The pact beast is one character inside the existing field budget; Wild Form swaps the player mesh for a cloned creature rig (net zero draw calls) and every effect it uses already exists.",
+        "playstyle": "Boss killer. One huge ally holding aggro plus a 12 s window where you personally hit like a boss.",
+        "weakness": "Worst room-clear in the roster — one ally, no cascade, no AoE — and the Wild Form window is on a long timer you can waste."
+      }
+    ],
+    "powerParity": {
+      "claim": "All five paths reach the same composite ceiling by different routes. This is stated arithmetically because the owner asked for it explicitly and because 'they're all balanced' is not a design.",
+      "yardstick": {
+        "measuredAt": "Level 70, a build that is resonant with its class, quality tier 'advanced', a rare-rarity weapon of the archetype the path favours, quality tier 'high' (maxFieldShadows 9).",
+        "axes": {
+          "roomDps": "Damage per second, averaged over 60 s, against an S-gate room population of 9 mixed enemies (gate.waveSize 9 per config.js GATES rank S), measured from room entry to room clear.",
+          "bossDps": "Damage per second against THE RIFT ARCHON (9,800 base HP, scaled) over 60 s with no adds.",
+          "eHP": "Max HP divided by (1 - dr), plus any shield or delayed-damage term, plus the fraction of incoming damage the path's allies absorb.",
+          "mobility": "Mean traversal speed across a full dungeon crawl including dash uptime."
+        },
+        "weights": { "roomDps": 0.35, "bossDps": 0.30, "eHP": 0.25, "mobility": 0.10 },
+        "weightRationale": "Room clear is weighted highest because DUNGEON_SPEC made room-to-room crawling the primary experience. Boss DPS is close behind because the boss chamber is the run's payoff. eHP is a quarter because dying ends the run. Mobility is small but non-zero so the movement-resource path is not paying for a stat nobody scores."
+      },
+      "table": [
+        { "path": "shadow", "roomDps": 1.12, "bossDps": 0.88, "eHP": 1.05, "mobility": 0.85, "composite": 1.004 },
+        { "path": "flame",  "roomDps": 1.30, "bossDps": 0.82, "eHP": 0.82, "mobility": 0.95, "composite": 1.001 },
+        { "path": "frost",  "roomDps": 0.87, "bossDps": 1.06, "eHP": 1.20, "mobility": 0.80, "composite": 1.0025 },
+        { "path": "storm",  "roomDps": 1.10, "bossDps": 0.92, "eHP": 0.72, "mobility": 1.60, "composite": 1.001 },
+        { "path": "beast",  "roomDps": 0.82, "bossDps": 1.22, "eHP": 0.95, "mobility": 1.10, "composite": 1.001 }
+      ],
+      "spread": "Composite range 1.001 - 1.004, i.e. 0.3%. (Each row's composite is the weighted sum of its own axes and is reproducible from this table with a calculator — do that before trusting it.) The AXIS spread is enormous on purpose: room DPS varies 0.82 - 1.30 (a factor of 1.59) and mobility 0.80 - 1.60 (a factor of 2.0). Identical composites with wildly different distributions is exactly what 'equally powerful, genuinely different' means, and it is the only version of parity that is checkable.",
+      "perPathArgument": [
+        "SHADOW reaches the ceiling through PERSISTENCE — 9 to 13 bodies that fight while the player repositions, and a roster that carries promotion investment across the entire game. Its route is compounding: gradeMultiplier (up to 4.0 at ASHEN FIRST) times shadowDmgMul (1 + INT x 0.011, which is 4.5x at 319 effective INT) times headcount. It pays for that with the worst boss numbers in the roster, because a single target neutralises headcount.",
+        "FLAME reaches it through CASCADE — combustion at 10 stacks re-seeds 4 stacks on everything nearby, so room DPS grows superlinearly with enemy density while every other path grows linearly. Ashfall converts a whole room into a single sustained tick. It pays with the lowest single-target output and near-zero defensive terms.",
+        "FROST reaches it through DENIAL AND WINDOWS — a 60% slow on everything plus 2.2 s freezes means a large fraction of incoming damage is never dealt, which is real power that the eHP axis is there to score. Its burst arrives all at once inside a freeze (+45% taken, then a 300% shatter split), so its boss number beats Shadow's despite its room number being the roster's lowest. It pays with the slowest clears and the most demanding setup.",
+        "STORM reaches it through UPTIME AND REACH — Arc turns every single landed hit into five hits at 55%, i.e. a 2.75x multiplier on hit-count in any group, and Tempest Step removes attack cooldowns entirely for 6 s. Its mobility score of 1.60 is not a consolation prize: it is the axis that lets it engage and disengage at will, which is why it can afford the roster's worst eHP. It pays with total dependence on open ground.",
+        "BEAST reaches it through CONCENTRATION — one ally at 4.0x a shadow's stats plus a 12 s personal 2.2x window that shortens by 6 s per kill. Against a boss that is Shadow's compounding maths pointed at a single target with none of the spread. It pays with the roster's worst room clear and a long ultimate cooldown that punishes a bad read."
+      ],
+      "headStartRemediation": {
+        "statement": "SHADOW is genuinely ahead. Extraction, roster, grades, promotion, deployment, field AI, the dark treatment and the field-capacity governor are all shipped and tested. The other four have none of their machinery.",
+        "whatTheOthersNeedForParity": [
+          "A shared STATUS SUBSTRATE: per-enemy stack integers with expiry, a per-enemy tint channel that is not emissive, a pooled InstancedMesh VFX allocator with a hard instance cap, and a per-path resource with a decay rule. FLAME, FROST and STORM are all thin configurations of this one module. Building it once is the single highest-leverage step in the whole build order and it is scheduled BEFORE any individual path (buildOrder STEP 6).",
+          "BEAST needs no substrate — it needs the pact-slot data model and the Wild Form rig swap, both of which reuse _makeBoundBody / SkeletonUtils.clone paths that already exist.",
+          "A parity HARNESS: tools/classes-test.mjs must include a headless DPS/eHP model that evaluates the five paths against the yardstick above and asserts every composite lands within 0.06 of 1.00. Without that assert, this table is a wish."
+        ],
+        "riskIfSkipped": "If FLAME/FROST/STORM are each built ad hoc, they will each get a slightly different stack expiry rule, three separate InstancedMesh pools with three separate leak surfaces, and three different opinions about whether a tint is emissive. That is the shape of all three previously-shipped GPU leaks in this project."
+      }
+    }
+  },
+
+  "interlock": {
+    "stackingRule": {
+      "name": "ADDITIVE-WITHIN-LAYER, ONE MULTIPLY BETWEEN LAYERS, ARCHON ORTHOGONAL.",
+      "steps": [
+        "LAYER A produces the base. derive(save) is unchanged and still authoritative. Direction masteries add BEHAVIOURS (caps, procs, refunds, fields) and — with two capped exceptions, CERTAINTY and TEMPO — never percentage multipliers on the derived block. A player with no class and no archon gets exactly today's numbers.",
+        "LAYER B applies ONCE. Each class contributes terms to two pools per derived field: pct (fraction of base) and add (flat). Class quality (1.00 / 1.12 / 1.25) and resonance (benefit x (1 + 0.04r), drawback x (1 - 0.02r)) scale the class's own terms BEFORE they enter the pool. Percentages then SUM within a field and apply once: final = base * (1 + clamp(sumPct, -0.5, +0.6)) + sumAdd. Cap-raising terms (DR cap, crit cap, atk-speed cap, cdr cap) replace the cap rather than multiplying it, and the lowest cap wins when two terms disagree.",
+        "LAYER C touches NEITHER. An archon path reads the final derived block and operates entirely on its own resource, its own status stacks and its own units. No archon term ever enters the pct/add pools. This is the rule that keeps the whole thing from multiplying into nonsense, and it is checkable: a unit test asserts that applying an archon changes zero fields of the derived block."
+      ],
+      "maximumMultiplicativeDepth": "Two. base x (1 + sumPct). Compare with the alternative everyone reaches for first — stats x class x direction x archon — which at four 25% terms is 2.44x and at eight is 5.96x. That is the nonsense the rule exists to prevent.",
+      "clampRationale": "sumPct in [-0.5, +0.6] means no single field can be more than 60% above or 50% below its stat-derived value from the class layer, whatever combination of quality, resonance and future content stacks up. It is a guardrail against content added in Wave 4, not against anything in this spec."
+    },
+    "noNewButtons": {
+      "rule": "The HUD has five skills (attack, dash, Ruin, Nova, Bind) and a mobile thumb budget. Four of the five archon paths add ZERO new buttons — Pyre, Rime and Arc are passive riders on hits already being landed, and the pact beast fights on its own.",
+      "theOneSlot": "Exactly one contextual ARCHON button replaces the Bind button's slot in gate mode once ascended, and its behaviour is path-dependent: SHADOW = Legion Step (Bind moves to a long-press), FLAME = Ashfall, FROST = a manual freeze-detonate on the nearest 10-stack target, STORM = Tempest Step, BEAST = Wild Form. One button, five meanings, no new HUD real estate."
+    },
+    "workedExamples": [
+      {
+        "archon": "SHADOW ARCHON",
+        "build": "THE QUIET GENERAL — direction EMBERMIND (int), class BINDER, level 70",
+        "allocation": "345 spent points: int 250, vit 95. autoStats 69. Effective: int 319, vit 164, str/agi/per 69 each.",
+        "layerA": "derive(): maxHp 2,555 | maxMp 2,490 | atk 289.0 | cdr 0.40 (capped) | dr 0.295 | skillMul 8.975 | shadowDmgMul 4.509. Masteries: EMBERMIND T3 (int 250 >= 200) — KINDLING, RESIDUE, OVERCHARGE. BULWARK T1 (vit 95 >= 60) — IRONHIDE. Direction = int (250/345 = 72% share).",
+        "layerB": "BINDER, affinity [int, per], direction int -> RESONANT, mastery tier 3 -> resonance 3. Quality 'advanced' (1.12). Benefits: shadow damage +20% x 1.12 x 1.12 = +25.4% -> shadowDmgMul 5.654; extraction +12 pts x 1.2544 = +15.1 pts; roster +25% (already at the 120 hard cap, so inert); field +2 (clamped by tier). Drawbacks: atk -20% x 0.94 = -18.8% -> atk 234.7; maxHp -15% x 0.94 = -14.1% -> 2,195.",
+        "layerC": "Roster 120, field 12 (tier-clamped from an earned 17). SOVEREIGN'S WILL: FOCUS stance on the boss, HOLD in corridors. Two ASHEN FIRST at mul 4.0. Legion Step on a 45 s timer for the moment the room surrounds you.",
+        "feel": "You personally hit for less than a level-40 BERSERKER and it does not matter. Room DPS 1.12, boss DPS 0.88."
+      },
+      {
+        "archon": "FLAME ARCHON",
+        "build": "THE LONG BURN — direction BREAKER (str), class BERSERKER, level 70",
+        "allocation": "345 spent: str 230, vit 70, agi 45. Effective: str 299, vit 139, agi 114, int/per 69.",
+        "layerA": "derive(): atk 841.0 | atkSpeed 0.30 (capped) | maxHp 2,280 | dr 0.250 | crit 0.55 (capped) | speed 9.84. Masteries: BREAKER T3 (str 230) — SUNDER, AFTERSHOCK, RUINOUS. BULWARK T1 (vit 70) — IRONHIDE. Direction = str (67% share).",
+        "layerB": "BERSERKER, affinity [str] -> RESONANT, resonance 3, quality 'advanced'. Benefits: missing-HP scaling +40% max x 1.2544 = +50.2% at the edge; atk-speed cap 30% -> 36% x 1.2544 on the raise = 37.5%. Drawbacks: healing -35% x 0.94 = -32.9%; regen -50% x 0.94 = -47%; DR cap 45% -> 25%, so the derived 0.250 sits exactly at the new cap.",
+        "layerC": "Pyre 1 stack per hit at ~2.7 hits/s -> a 10-stack combustion roughly every 3.7 s per target, each for 220% x 841 = 1,850 in 4 m, re-seeding 4 stacks on everything caught. Ember fills in ~35 s of room fighting; Ashfall for 8 s at 45% x 841 = 378/s over 14 m.",
+        "feel": "You fight at 30% HP on purpose. Room DPS 1.30 — the roster's best — and the roster's worst eHP-with-no-shield at 0.82."
+      },
+      {
+        "archon": "FROST ARCHON",
+        "build": "THE STANDING WALL — direction BULWARK (vit), class VANGUARD, level 70",
+        "allocation": "345 spent: vit 245, int 60, per 40. Effective: vit 314, int 129, per 109, str/agi 69.",
+        "layerA": "derive(): maxHp 4,205 | dr would be 0.5652, clamped to the 0.45 base cap | maxMp 1,160 | atk 289.0. Masteries: BULWARK T3 (vit 245) — IRONHIDE, RIPOSTE, UNYIELDING. EMBERMIND T1 (int 60) — KINDLING. Direction = vit (71% share).",
+        "layerB": "VANGUARD, affinity [vit] -> RESONANT, resonance 3, quality 'advanced'. Benefits: maxHp +14% x 1.2544 = +17.6% -> 4,944; DR cap 45% -> 55%, the +10 raise x 1.2544 = +12.5 -> cap 57.5%, so dr lands at its uncapped 0.565; 25% of each hit deferred over 3 s. Drawbacks: speed -12% x 0.94 = -11.3%; dash 7.5 -> 6.15; crit cap 30%.",
+        "layerC": "Glacial Barrier caps at 35% of 4,944 = 1,730. eHP = 4,944 / (1 - 0.5652) + 1,730 = 13,096. Rime holds the room at -60% speed; freezes at 10 stacks give +45% damage taken windows and 300% shatter splits.",
+        "feel": "Nothing in an S gate meaningfully threatens you and nothing dies quickly either. eHP 1.20 — the roster's best — room DPS 0.87, its worst."
+      },
+      {
+        "archon": "STORM ARCHON",
+        "build": "THE UNCAUGHT — direction WINDSTEP (agi), class BLADEDANCER, level 70",
+        "allocation": "345 spent: agi 260, vit 50, str 35. Effective: agi 329, vit 119, str 104.",
+        "layerA": "derive(): speed 10.196 | crit 0.55 (capped) | critDmg 2.651 | dodgeWindow 260 ms (capped) | maxHp 2,060 | atk 373.0. Masteries: WINDSTEP T3 (agi 260) — SLIPSTREAM, ANSWER, TEMPO. Direction = agi (75% share).",
+        "layerB": "BLADEDANCER, affinity [agi] -> RESONANT, resonance 3, quality 'advanced'. Benefits: dash cd 1.60 -> 1.05, the 0.55 cut x 1.2544 -> 1.60 - 0.690 = 0.91 s; i-frames 0.34 -> 0.44; critDmg +12% x 1.2544 = +15.1% -> 3.051; dodge window +40 ms x 1.2544 = +50 ms -> 310 ms. Drawbacks: maxHp -18% x 0.94 = -16.9% -> 1,712; atk -15% x 0.94 = -14.1% -> 320.4; knockback taken +37.6%.",
+        "layerC": "Charge fills in ~200 m of movement, roughly 25 s of a normal crawl. Arc chains 4 extra targets at 55% x 320.4 = 176 each per landed hit. Tempest Step: speed 10.196 x 1.55 = 15.80, HARD-CLAMPED TO 14.0; 6 s of no attack cooldown and bolt-leaving dashes.",
+        "feel": "A 310 ms perfect-dodge window feeding TEMPO stacks feeding SLIPSTREAM dash refunds. Mobility 1.60, eHP 0.72 — you die to two mistakes."
+      },
+      {
+        "archon": "BEAST ARCHON",
+        "build": "THE PACT — direction BREAKER (str) with a heavy agi second, class REAVER, level 70",
+        "allocation": "345 spent: str 150, agi 130, vit 65. Effective: str 219, agi 199, vit 134.",
+        "layerA": "derive(): atk 649.0 | speed 10.14 | crit 0.55 (capped) | maxHp 2,225 | maxMp 740. Masteries: BREAKER T2 (str 150) — SUNDER, AFTERSHOCK. WINDSTEP T2 (agi 130) — SLIPSTREAM, ANSWER. BULWARK T1 (vit 65) — IRONHIDE. Direction = str (150/345 = 43.5% share, over the 35% bar).",
+        "layerB": "REAVER, affinity [str, agi] -> RESONANT via str, mastery tier in str is 2 -> resonance 2, quality 'advanced'. Benefits: leech +3% x 1.12 x 1.08 = +3.63%; kill stacks +6% speed / +4% atk speed x 1.2096, to 5 stacks. Drawbacks: maxMp -25% x 0.96 = -24% -> 562; skill mana +40% x 0.96 = +38.4%; maxHp -10% x 0.96 = -9.6% -> 2,011.",
+        "layerC": "S-band pact beast bound from a brute-archetype boss corpse at WARLORD grade: shadowCombat gives ~1,014 HP / ~218 atk, x 4.0 pact multiplier -> 4,056 HP / 871 atk, and it consumes the entire field allowance. Wild Form: 12 s at atk 649 x 2.2 = 1,428, speed 10.14 x 1.5 = 15.2 CLAMPED TO 14.0, 40% flat DR, 90 s cooldown falling 6 s per kill made inside it.",
+        "feel": "Three-quarters of the fight is you and one enormous ally trading with a boss; the last quarter is you being the boss. Boss DPS 1.22 — the roster's best — room DPS 0.82, its worst."
+      }
+    ],
+    "hybridSanityCheck": "The five examples above deliberately use five different classes, five different directions and five different archons, and none of them is a straight line down one column. That is the proof that the three layers are genuinely independent axes rather than three names for the same choice."
+  },
+
+  "balanceAndMigration": {
+    "nullIsTheIdentityElement": {
+      "rule": "className === null AND archon === null AND direction === 'unsworn' AND every mastery tier 0 MUST produce derived numbers BYTE-IDENTICAL to what config.js derive() produces today.",
+      "why": "Every save in existence is in that state. If the identity element is not exact, every returning player's character silently changes on the update they did not ask for.",
+      "assert": "tools/classes-test.mjs constructs 200 pseudo-random saves (seeded via mulberry32, no Math.random), runs derive() and applyLayers() on each, and asserts deep equality of every field. This is the first assert written and the last one allowed to fail."
+    },
+    "saveSchema": {
+      "versionBump": "NONE. SCHEMA_VERSION stays 2. Every field below is ADDITIVE and an absent value is indistinguishable from its default — exactly the reasoning save.js already records for `shop` and `worldTime`.",
+      "newFields": [
+        { "field": "className", "type": "string | null", "default": null, "sanitiser": "Must be a key of CLASSES; anything else -> null. An unknown string from a future or hand-edited save must NOT reach applyLayers()." },
+        { "field": "archon", "type": "string | null", "default": null, "sanitiser": "Must be a key of ARCHONS; anything else -> null." },
+        { "field": "respecTokens", "type": "integer >= 0", "default": 0, "sanitiser": "clamp(floor(n), 0, 99); NaN/Infinity -> 0. Same defensive posture as sanitiseAsh()." },
+        { "field": "archonState", "type": "object", "default": "{ resource: 0, sigils: 0, ascendedAt: 0, pacts: [], affinity: { shadow: 0, flame: 0, frost: 0, storm: 0, beast: 0 } }", "sanitiser": "Structural only, mirroring sanitiseShop(): resource/sigils/ascendedAt coerced to finite non-negative numbers, pacts filtered to objects with a numeric roster id, affinity keys clamped to [0, 9999] with missing keys filled to 0. Whether a pact id still names a live roster entry is classes.js's business, not save.js's — save.js must not import classes.js." }
+      ],
+      "existingFieldsTouched": "classTier is READ with a new meaning and is never written by this system (progression.js awardClassTier keeps sole ownership). stats, points, autoStats, shadows and ash are read-only from classes.js's point of view except through the existing progression.js functions."
+    },
+    "migration": {
+      "defaultAssignment": "className = null ('UNSWORN'). NOT an auto-assigned best-guess class. A guessed class carries a DRAWBACK the player never agreed to, which is strictly worse than having no class at all, and there is no honest way to infer intent from a stat spread that predates the system existing.",
+      "steps": [
+        "migrate() fills the four new fields with their defaults on every save it touches, v1 and v2 alike, via the same merge-onto-fresh pattern already in place.",
+        "Any save at level >= 20 (i.e. past the class-choice gate) is flagged so the next Assay Hall visit offers the class choice with a 'YOUR CLASS AWAITS' toast, using the existing ui.toast gold style.",
+        "Any save at level >= 20 gets respecTokens = 1 on migration. Directions and masteries change what a stat spread is worth; a player who spread points flat under the old rules deserves one free look at the new ones. Granted ONCE — guard with a boolean inside archonState so a repeated migration cannot mint tokens.",
+        "Any save at level >= 55 with cleared.S set is flagged as ascension-eligible and gets the trial offer at the S gate. It is not auto-ascended: 'depending on their development' means the player picks from what their history offers.",
+        "Affinity counters start at 0 for every existing save. That means a returning level-80 player is offered SHADOW plus the two paths whose counters climb fastest in their first session back, which is the correct behaviour — the offer should reflect how they play NOW, not a history the game never recorded."
+      ],
+      "rollbackSafety": "A save written by this build and then loaded by the current shipped build reads four unknown fields, ignores them, and plays normally — className/archon/respecTokens/archonState are never referenced by any shipped code path. The reverse (old save, new build) is the identity-element case above. Both directions are asserted in tools/classes-test.mjs."
+    },
+    "balanceGuards": [
+      "sumPct per derived field clamped to [-0.5, +0.6] (interlock.stackingRule).",
+      "Every cap-raising term REPLACES a cap; when two disagree the LOWER wins. BERSERKER's DR cap of 25% beats VANGUARD's 55% if a future effect ever grants both.",
+      "Absolute move-speed ceiling of 14 u/s applies to every source combined, including Tempest Step and Wild Form. STAT_RATES.agi's own comment records what happened the last time a speed term went uncapped.",
+      "Field-shadow headcount is ALWAYS min(earned, quality tier maxFieldShadows). BINDER's +2 and SHADOW ARCHON's +2 are inputs to `earned`, never overrides of the tier.",
+      "No mastery, class or archon term may raise a stat's own cap beyond the STAT_RATES value by more than 15 percentage points."
+    ],
+    "performanceBudget": {
+      "drawCalls": "At most +3 over the shipped dungeon figure, and only for the ascended path: one InstancedMesh for the active archon's status VFX (Flame flames / Frost shards / Storm segments — only ONE is ever allocated, because you have exactly one path), one decalpool channel shared by RESIDUE + READING + Ashfall, and one for AUGUR's telegraph arcs. DUNGEON_SPEC's <= 24 (E/D) and <= 30 (C cavern) budgets stand and tools/dungeon-test.mjs's renderer.info.render.calls delta assert must be extended to cover an ascended save.",
+      "triangles": "Status VFX are quads. 64 flame quads = 128 tris. Immaterial against the 130k scenery budget. Wild Form is a rig swap, net zero.",
+      "allocations": "Zero per-frame allocation in any update loop. Status stacks are integers on the existing enemy record; resources are scalars on the run state; every Vector3 comes from the module-level tmpV/tmpV2 scratch pattern game.js already uses.",
+      "disposal": "EVERY pooled mesh, material and decal channel this system creates registers for disposal on the same path as the existing shadow meshes (scene.remove + disposeObject3D). GPU leaks have shipped from this project three times; tools/classes-test.mjs asserts a build/teardown cycle returns renderer.info.memory.geometries and .textures to their pre-build values."
+    },
+    "determinism": {
+      "generationVsCombat": "Combat-time procs (crit rolls, Bind extraction) already use Math.random() and that stays — they do not participate in world rebuilds. ANY content this system generates into a world MUST use a forked mulberry32 stream so build(seed) replays identically after GPU context loss.",
+      "forks": [
+        "archonRnd = mulberry32((seed ^ 0x2545f491) >>> 0) — NEW constant, verified unused against the existing set (0x9e3779b9, 0x5bf03635, 0x85ebca6b, 0x27d4eb2f, 0x5f356495, 0x1f123bb5). Owns: ASHEN SIGIL drops from S bosses, the pact-beast archetype offered by a given gate, and the ascension trial's boss placement.",
+        "Document it in the same header-comment style dungeonlayout.js uses, in the same place, so there is one list of forks and not two."
+      ],
+      "noWallClock": "No Date.now() and no Math.random() in anything a rebuild replays. Note that shadows.js makeShadow() writes bornAt: Date.now() today — that is a display field only, never read by generation, and it must stay that way; pact records follow the same rule."
+    }
+  },
+
+  "modules": [
+    {
+      "path": "src/game/classes.js",
+      "status": "new",
+      "purpose": "The whole of layers A, B and C as DATA plus pure functions. THREE-free and DOM-free, exactly like progression.js and config.js, so tools/classes-test.mjs can drive it in node with no browser. It must not import game.js, weapons.js or anything that pulls THREE.",
+      "exports": [
+        "export const DIRECTIONS = { str: {...}, agi: {...}, vit: {...}, int: {...}, per: {...} };  // name + mastery table",
+        "export const MASTERY_THRESHOLDS = [60, 120, 200];",
+        "export const CLASSES = { vanguard, berserker, bladedancer, hexweaver, binder, oracle, templar, reaver };",
+        "export const CLASS_LIST = Object.values(CLASSES);",
+        "export const ARCHONS = { shadow, flame, frost, storm, beast };",
+        "export const CLASS_QUALITY = { base: 1.00, advanced: 1.12, sovereign: 1.25 };",
+        "export function directionOf(save) -> key | 'unsworn'",
+        "export function masteryTier(save, statKey) -> 0 | 1 | 2 | 3",
+        "export function masteriesOf(save) -> [{ stat, tier, key, name }]",
+        "export function resonanceOf(save) -> 0 | 1 | 2 | 3",
+        "export function classModifiers(save) -> { pct: {field: n}, add: {field: n}, caps: {field: n}, flags: {...} }",
+        "export function applyLayers(save, derived) -> derived'   // returns a NEW object; never mutates the input",
+        "export function canChooseClass(save) -> boolean          // level >= 20",
+        "export function chooseClass(save, key) -> boolean        // sets className, grants +1 respecToken once",
+        "export function archonOffers(save) -> [key, key, ...]    // top two by affinity, plus 'shadow' if absent",
+        "export function canAscend(save) -> boolean",
+        "export function ascend(save, key) -> boolean",
+        "export function bumpAffinity(save, key, n) -> void",
+        "export function archonResourceRules(key) -> { max, gainPer, decayPerSecond, ultimateCost }"
+      ],
+      "dependsOn": ["src/game/config.js (STATS, STAT_RATES, derive)", "src/game/progression.js (effectiveStat)"],
+      "notes": "applyLayers MUST be a pure function of (save, derived) and must return derived unchanged when className and archon are both null. That property is the migration guarantee and is asserted first."
+    },
+    {
+      "path": "src/game/config.js",
+      "status": "modified",
+      "purpose": "derive() gains nothing. The class layer is applied by classes.applyLayers() at the call site (game.js refreshDerived), NOT inside derive(). Keeping derive() pure and class-blind is what makes the null-identity assert trivially true and keeps ui.js's existing derive() import working unchanged.",
+      "notes": "The ONLY change here is data: nothing in STATS, STAT_RATES, SKILLS or the gate tables moves. If a build step finds itself editing STATS, it has taken a wrong turn."
+    },
+    {
+      "path": "src/game/progression.js",
+      "status": "modified",
+      "purpose": "respecCost() gains the Math.min(3000, ...) cap; respec() gains the token path. classTrialAvailable and awardClassTier are untouched.",
+      "notes": "All five existing class-trial asserts and the respec-cost assert at spent=3 must pass verbatim after the change. If they do not, the change is wrong."
+    },
+    {
+      "path": "src/core/save.js",
+      "status": "modified",
+      "purpose": "freshSave() gains the four fields; migrate() gains their sanitisers and the level>=20 token grant guard. No SCHEMA_VERSION change.",
+      "notes": "save.js must NOT import classes.js. The className/archon sanitisers validate against a small string allowlist duplicated as a local const with a comment pointing at classes.js as the source of truth — the same trade save.js already made to avoid importing weapons.js for the shop's `sold` list."
+    },
+    {
+      "path": "src/game/game.js",
+      "status": "modified",
+      "purpose": "refreshDerived() pipes derive() through applyLayers(); the mastery procs hook the existing damage/dodge/kill/finisher paths; the archon button replaces the Bind slot once ascended; affinity counters bump on the existing kill/bind/dash hooks.",
+      "notes": "This file is 1,978 lines and is the contention hot spot. buildOrder gives it to at most one step at a time and never concurrently with another agent."
+    },
+    {
+      "path": "src/game/archon.js",
+      "status": "new",
+      "purpose": "The shared status-effect and resource substrate: per-target stack tables with expiry, the non-emissive tint channel, a capped InstancedMesh VFX pool allocator, and the per-path resource tick. FLAME, FROST and STORM are configurations of this module; SHADOW and BEAST use only its resource half.",
+      "exports": [
+        "export class StatusTable { apply(target, kind, n), get(target, kind), tick(dt), clear(target), disposeAll() }",
+        "export class ArchonPool { constructor(scene, { kind, maxInstances }), spawn(pos, opts), tick(dt), dispose() }",
+        "export function tintForStacks(kind, n) -> Color   // material COLOUR only, never emissive",
+        "export class ResourceMeter { constructor(rules), gain(n), spend(n), tick(dt), get value() }"
+      ],
+      "dependsOn": ["three", "src/render/decalpool.js", "src/game/classes.js (ARCHONS rules)"],
+      "notes": "This is the parity-critical module. It exists so FLAME, FROST and STORM cannot drift apart in quality, and so there is exactly ONE disposal surface for archon VFX instead of three."
+    },
+    {
+      "path": "src/ui/ui.js",
+      "status": "modified",
+      "purpose": "Stat panel: direction header, per-stat mastery line with next-threshold progress, class benefit/drawback summary with the RESONANT badge, archon resource meter on the HUD.",
+      "notes": "No new screen. The mastery line goes inside the existing STATS.forEach block and the class summary above the grid."
+    },
+    {
+      "path": "src/ui/cityui.js",
+      "status": "modified",
+      "purpose": "The Assay Hall class-choice panel and the Assay Seal purchase.",
+      "notes": "Reuses the shopui.js list/detail pattern rather than inventing a third panel language."
+    },
+    {
+      "path": "tools/classes-test.mjs",
+      "status": "new",
+      "purpose": "Headless node suite: null-identity byte equality over 200 seeded saves; direction derivation edge cases (ties, the 35% boundary, spent < 30); mastery thresholds; the stacking clamp; migration in both directions; the parity model asserting all five composites land within 0.06 of 1.00; and a determinism replay of archonRnd.",
+      "notes": "Registered in package.json as `test:classes`. Runs in node with no browser, like tools/progression-test.mjs."
+    }
+  ],
+
+  "buildOrder": [
+    "WAVE 3-A BUILDS NONE OF THIS. Wave 3-A owns bigger rooms, seed-derived randomised enemy counts, weapon grip/stow and inventory v1. Not one line of directions, classes or archons belongs in that wave, and no Wave 3-A step may touch src/game/classes.js, src/game/archon.js, save.className, save.archon or save.archonState. This document is Wave 3-B's contract and its first step must not begin until Wave 3-A's tree is clean and green.",
+
+    "STEP 1 — CLASSES CORE (new src/game/classes.js + new tools/classes-test.mjs). Pure data + pure functions: DIRECTIONS with the fifteen masteries, MASTERY_THRESHOLDS, the eight CLASSES with their pct/add/caps term sets, the five ARCHONS with resource rules, directionOf / masteryTier / resonanceOf / classModifiers / applyLayers. NO integration — nothing imports it yet. VERIFY: `node tools/classes-test.mjs` — the null-identity assert over 200 seeded saves passes first, then direction boundaries (spent 29 vs 30, share 34.9% vs 35.0%, exact ties resolving by STATS order), mastery thresholds at 59/60/119/120/199/200, and the sumPct clamp at both ends. One agent, zero contention, no browser.",
+
+    "STEP 2 — SAVE + RESPEC (src/core/save.js + src/game/progression.js). The four additive fields, their sanitisers, the level>=20 one-shot token grant guard, respecCost's 3000 cap, respec()'s token path. VERIFY: `GB_PORT=<assigned> npm run test:progression` green with all existing asserts unchanged (especially respec cost at spent=3 = 122 and the five class-trial asserts); new asserts for round-tripping a v1 save, a v2 save with the new fields absent, and a v2 save with hand-corrupted values through migrate(). One agent. Owns both files exclusively.",
+
+    "STEP 3 — DERIVED INTEGRATION + STAT PANEL (src/game/game.js refreshDerived + src/ui/ui.js). Pipe derive() through applyLayers(); render the direction header, the per-stat mastery lines and their next-threshold progress. Classes still unchoosable, so every save is UNSWORN and every number must be unchanged. VERIFY: full suite green — smoke, test:progression, test:entities, test:flow, test:dungeon, acceptance (43 checks) — plus a pixel-identical landscape screenshot against a pre-change capture, because a null class that changes one number is the failure mode this step exists to catch. One agent; owns game.js and ui.js for its duration.",
+
+    "STEP 4 — DIRECTION MASTERIES (src/game/game.js combat hooks + src/render/decalpool.js channel). All fifteen masteries: the clamps, procs, refunds, shockwaves, the RESIDUE field and the READING telegraph arcs. VERIFY: new test:classes cases driving a headless combat model for each proc; test:dungeon draw-call delta with READING and RESIDUE both live stays inside the DUNGEON_SPEC budget; a teardown cycle returns renderer.info.memory to baseline. One agent; owns game.js.",
+
+    "STEP 5 — CLASS CHOICE (src/ui/cityui.js Assay Hall panel + src/game/classes.js chooseClass + the classTier quality reinterpretation). The roster panel with benefit and drawback in equal type, the RESONANT badge, the Assay Seal, the migration's 'YOUR CLASS AWAITS' toast. VERIFY: `GB_PORT=<assigned> npm run test:city` and `test:interiors` green; a scripted harness run walks into the Assay Hall, picks BERSERKER, and asserts the derived block changes by exactly the modelled amounts and by nothing else. One agent.",
+
+    "STEP 6 — ARCHON SUBSTRATE (new src/game/archon.js). StatusTable, ArchonPool, tintForStacks, ResourceMeter. No path uses it yet. THIS STEP IS THE PARITY GUARANTEE and is scheduled before any individual non-shadow path on purpose: three ad-hoc implementations of the same machinery is exactly how FLAME/FROST/STORM would end up worse than SHADOW. VERIFY: a headless stack-expiry and resource-decay suite; a browser step asserting one pool of 64 instances is one draw call and that dispose() returns geometries/textures to baseline; an assert that tintForStacks never writes an emissive or a rim (grep the module for `emissive` and `applyRim` and assert zero hits, plus a runtime material traverse). One agent, new file, zero contention.",
+
+    "STEP 7 — ASCENSION (src/game/classes.js archonOffers/canAscend/ascend + the THE REACH trial flag on the S gate + src/ui/ui.js archon panel and resource meter + the contextual archon button). Affinity counters wired to the existing kill/bind/dash/finisher hooks. NO path mechanics yet — ascending sets save.archon and lights the meter, and that is all. VERIFY: test:classes offer-selection cases (top two by affinity plus shadow, never fewer than two); a harness run that ascends and asserts the derived block is UNCHANGED by ascension, which is interlock.stackingRule step 3 made testable. One agent.",
+
+    "STEP 8 — SHADOW ARCHON (src/game/game.js _updateShadows command states + Legion Step + the field-capacity and ASHEN SECOND reads). Smallest path step because of the head start. VERIFY: test:classes roster/field-capacity cases; a harness run with 12 fielded shadows asserting HOLD/HUNT/FOCUS produce the three distinct target selections and that Legion Step's recall-detonate-reform cycle disposes and rebuilds nothing (the meshes persist; only positions and HP change). One agent; owns game.js.",
+
+    "STEP 9 — FLAME + FROST (src/game/archon.js configurations + game.js hit hooks). Pyre stacks, combustion cascade, Ember, Ashfall; Rime, freeze, shatter, Glacial Barrier. Both on the STEP 6 substrate — if either needs a new pool or a new expiry rule, STEP 6 was built wrong and the fix belongs there, not here. VERIFY: test:classes DPS-model cases for both paths landing on their table rows; test:dungeon draw-call delta <= +2 with a path active; no per-frame allocation (a heap-delta assert across 600 simulated frames). One agent.",
+
+    "STEP 10 — STORM + BEAST (src/game/archon.js Storm configuration + a new pact/wild-form section in game.js). Charge from distance travelled, Arc chains, Tempest Step with the 14 u/s hard clamp; pact slots, the 4.0x pact beast consuming the whole field allowance, Wild Form as a rig swap with NO rim and NO emissive on the player. VERIFY: an explicit assert that peak player speed never exceeds 14.0 u/s under any combination of agi, class, Tempest Step and Wild Form; a material traverse during Wild Form asserting zero emissive and zero GLOW_LAYER membership on the player root; test:classes DPS-model cases for both paths. One agent.",
+
+    "STEP 11 — PARITY PASS + ACCEPTANCE (tools/classes-test.mjs parity model + tools/acceptance.mjs additions). Run the five worked builds through the headless model, assert every composite is within 0.06 of 1.00, and TUNE THE TABLES — not the model — until they are. Extend acceptance with: a null-class save producing shipped numbers; a class-chosen save producing the modelled numbers; an ascended save producing an unchanged derived block; and the 14 u/s ceiling. VERIFY: every suite green — smoke, test:items, test:characters, test:creatures-live, test:nav, test:loot (re-run; ~2/13 known-flaky), test:city, test:frontier, test:daynight, test:interiors, test:citylife, test:shop, test:progression, test:frameclock, test:entities, test:flow, test:collision, test:dungeon-gen, test:dungeon, test:visual, test:classes, acceptance. One agent, and it must be the last one."
+  ],
+
+  "risks": [
+    "THE NULL-IDENTITY REGRESSION IS THE TOP RISK. Every existing save has no class and no archon, so if applyLayers() shifts a single derived field by a rounding step, every returning player's character changes without consent. Mitigation is structural: STEP 1 writes that assert before anything else exists, STEP 3 cannot land without a pixel-identical screenshot, and STEP 11 puts it in acceptance.",
+    "PARITY DRIFT. The parity table is a model, and models are wrong. The real risk is not that a path is 8% off — it is that FLAME/FROST/STORM ship as thin reskins because they were each built in a hurry against a different half-finished substrate. STEP 6 is the entire mitigation and it must not be merged into STEP 9.",
+    "SCOPE COLLISION WITH WAVE 3-A AND THE REST OF WAVE 3-B. game.js is 1,978 lines and is touched by STEPS 3, 4, 8 and 10 here, by Wave 3-A's inventory work, and by Wave 3-B's armor/weapon-family agents. The build order gives it to exactly one step at a time; the orchestrator must not run two game.js steps concurrently.",
+    "GPU LEAKS. This project has shipped leaks three times. The archon substrate adds pooled InstancedMeshes and decal channels with lifetimes tied to a save field rather than to a scene build, which is a new and worse shape of the same hazard. STEP 6's dispose-to-baseline assert is the tripwire and it must run on every subsequent step.",
+    "DRAW-CALL CREEP ON PHONES. READING arcs + RESIDUE fields + an archon pool + Ashfall decals is four new submissions on top of a dungeon already budgeted at <= 24. The budget in balanceAndMigration.performanceBudget is +3 total, which forces the decal channels to be SHARED. If an implementation reaches for a fourth channel, the answer is to share, not to raise the budget.",
+    "DRAWBACK RESENTMENT. Eight classes with real drawbacks means eight ways for a player to feel they were tricked. Mitigation is presentational and non-negotiable: drawbacks render in the same type size as benefits, on the choice panel and on the stat panel, forever.",
+    "RESPEC ANXIETY. Losing BREAKER T3 to a respec is a much bigger loss than losing 345 points and it is invisible unless the game says so. The confirm dialog must name every mastery about to be lost, individually.",
+    "TOO MANY NUMBERS. Three layers, fifteen masteries, eight classes and five paths is a lot of panel. The mitigation is that DIRECTION IS DERIVED — it costs the player zero decisions — and that only ONE new button ever reaches the HUD."
+  ],
+
+  "openQuestions": [
+    "Class count: eight is a wide roster to balance and to build panels for. Six (dropping TEMPLAR and REAVER, the two hybrids) is defensible and cuts STEP 5's surface by a quarter. Recommendation: keep eight — the hybrids are what make 'matching' a question with more than one answer — but the orchestrator should confirm with the owner before STEP 5 rather than after.",
+    "Archon count: five paths is one more than the brief's minimum of four. If the schedule slips, BEAST is the one to defer — it is the only path that needs a rig swap and a pact data model rather than a substrate configuration. Deferring it costs the least and loses the least distinct fantasy, since STORM already covers 'personal power spike'.",
+    "Should the archon path change the character's LOOK? Armor sets are a sibling Wave 3-B contract and the natural place for it. Recommendation: no path-specific player material in this spec at all — it collides with the armor agent's files and it is the single easiest way to accidentally put a glow on a living character. Route to the armor spec.",
+    "Ascension level 55 vs 60. 55 sits between rankOf's S (53) and SOVEREIGN (71) and leaves 45 levels of archon play. 60 makes the S-rank band feel longer. Cheap to retune — one constant — and worth an owner reaction rather than a decision here.",
+    "Whether ASHEN SIGIL should also be purchasable at the Exchange for a large ash sum, so a player with no S-gate luck is not locked out of re-ascension. Leaning yes at ~9,000 ash, but it is an economy question and shop.js belongs to another agent.",
+    "Does the direction system want a SIXTH stat later (the 'and so on' in the owner's phrasing)? STATS is a fixed-order array that save.js, ui.js and the progression test all index — adding to the END is safe, inserting is not. Flagged so a future agent does not discover it the hard way.",
+    "Multiplayer/leaderboard implications of parity: none today, since the game is fully offline. Noted only so a future networked feature does not treat this table as a competitive-balance document — it is a single-player feel document."
+  ]
+}

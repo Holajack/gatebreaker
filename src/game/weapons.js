@@ -128,35 +128,66 @@ export function weaponCacheStats() {
 // axe visibly winds further back and the daggers barely wind up at all.
 
 export const ARCHETYPES = {
-  // The rx pitches were retuned against the SKINNED rig (they were authored on
-  // the box-man): the pack models run straight up +Y from a guard pivot, and
-  // on the Idle_Sword arms-down pose anything shallower than ~25 degrees
-  // leaves the blade vertical inside the arm silhouette — "held" only in the
-  // scene graph. Forward pitch puts the blade visibly out of the body at rest
-  // and reads as a ready stance mid-combo.
+  // THE SIGN OF rx WAS WRONG IN EVERY ENTRY, AND THAT IS THE WHOLE OF THE
+  // "he isn't really holding it" BUG. The previous values (sword -0.45,
+  // greataxe -0.35, daggers -0.65, polearm -0.30) were written against a
+  // comment that asks for FORWARD pitch — but the hand socket is
+  // character-aligned (characters.js makeSocket inverts the bone's rest-pose
+  // world quaternion), and in that frame a rotation of -rx about X tips the
+  // model's +Y toward -Z, i.e. BACKWARD, into the torso.
+  //
+  // tools/grip-probe.mjs measured the shipped sword at bladeDir
+  // (0.011, 0.896, -0.443): 26 degrees BEHIND vertical, blade buried in the
+  // shoulder, only the grip and pommel visible past the arm. Positive rx is
+  // what the comment always meant.
+  //
+  // The rz/tilt sign was wrong the same way. The character's right hand sits
+  // at local x = -0.25, so the character's right is -X, and the composite
+  // blade direction works out to x = -sin(rz + packTilt). A NEGATIVE total
+  // therefore leans the blade ACROSS the body to the left — the probe caught
+  // the sword's bounds running from x -0.47 to +0.18, straight through the
+  // chest. Positive leans it outboard, clear of the silhouette.
   sword: {
     name: 'Sword', feel: 'Balanced. Three chops, moderate reach, cancels cleanly.',
     build: buildSword,
-    grip: { y: 0, z: 0.08, rx: -0.45, rz: 0 },
+    grip: { y: 0, z: 0.06, rx: 0.34, rz: 0.10 },
     anim: { lo: -1.50, hi: 1.90, twist: 0.22, twoHand: false, thrust: false, alternate: false },
+    mass: 1.4,
   },
   greataxe: {
+    // Two-handed, so it hangs closer to the body's centre line and pitches
+    // less: a haft angled hard forward reads as "carrying a shovel".
     name: 'Greataxe', feel: 'Slow, enormous, wide. You are committed the moment you press.',
     build: buildGreatweapon,
-    grip: { y: -0.02, z: 0.10, rx: -0.35, rz: 0.10 },
+    grip: { y: -0.02, z: 0.08, rx: 0.26, rz: 0.06 },
     anim: { lo: -2.30, hi: 2.40, twist: 0.42, twoHand: true, thrust: false, alternate: false },
+    mass: 4.8,
   },
   daggers: {
+    // The steepest pitch of the four on purpose: a short blade held near
+    // vertical disappears against the forearm, and the dagger silhouette is
+    // the only thing telling the player he is the fast archetype.
     name: 'Twin Daggers', feel: 'Five hits, short reach, steps into the target, crits constantly.',
     build: buildDaggers,
-    grip: { y: 0.02, z: 0.10, rx: -0.65, rz: 0 },
+    grip: { y: 0.02, z: 0.08, rx: 0.52, rz: 0.12 },
     anim: { lo: -0.90, hi: 1.55, twist: 0.14, twoHand: false, thrust: false, alternate: true },
+    mass: 0.9,
   },
   polearm: {
+    // Nearly upright: a 2.5 m shaft pitched as far as a sword would put the
+    // butt through the floor and the point through the character's own head.
     name: 'Spear', feel: 'Long reach, narrow thrusts. Poke from outside their swing.',
     build: buildPolearm,
-    grip: { y: 0.04, z: 0.12, rx: -0.30, rz: 0 },
+    // z was 0.10 and that is the one number in this table that was still wrong.
+    // A pole is nearly upright, so a forward offset does not disappear into a
+    // pitch the way it does on a raked sword: grip-measure put the shaft axis
+    // 0.036 m clear of the fist centre, and the hand crop showed the haft
+    // passing OUTSIDE an apparently open hand. 0.02 threads it through the
+    // fingers. rx/rz are unchanged — the lean is what keeps a 2.5 m shaft out of
+    // the character's own silhouette.
+    grip: { y: 0.04, z: 0.02, rx: 0.16, rz: 0.05 },
     anim: { lo: -0.55, hi: 1.15, twist: 0.10, twoHand: true, thrust: true, alternate: false },
+    mass: 2.2,
   },
 };
 
@@ -667,7 +698,49 @@ export function setModelSource(getMesh) {
 // Each value below puts the archetype's tip within ~0.1 of the procedural
 // weapon it replaces (procedural sword tip ~1.6 above the fist, greataxe ~1.5,
 // dagger ~0.66), which is the silhouette the game's combat was tuned around.
-const MODEL_SCALE = { sword: 0.60, greataxe: 0.62, daggers: 0.50, polearm: 0.55 };
+// `lift` is the third number, and it is the other half of the grip bug.
+//
+// Every items.glb weapon pivots at the GUARD and runs +Y up the blade, so its
+// handle hangs BELOW the pivot. Dropping the pivot on the fist therefore puts
+// the fist around the crossguard with the whole handle and pommel dangling
+// free underneath — which is precisely what the audit crop shows: a wrapped
+// grip and a pommel floating past an empty-looking hand. `lift` slides the
+// model up its own axis so the MIDDLE OF THE HANDLE lands in the fist, which
+// is the difference between "the weapon is parented to the hand" and "the
+// character is holding the weapon". Procedural weapons need none of this:
+// buildSword and friends already author the origin at the middle of the grip.
+//
+// LIFT IS NOT ONE NUMBER FOR ALL FOUR, and it is NOT a number you can guess off
+// a screenshot — two passes tried and both stopped short, leaving the pommel on
+// the knuckles with the fist closed around nothing. tools/grip-measure.mjs now
+// derives it instead, and the rule it implements is:
+//
+//     lift = (where the fist sits along the shaft) - (handle length) / 2
+//
+// both terms measured on the LIVE, animated player: the fist from the posed skin
+// vertices of the wrist and every phalanx, the handle from the model's own
+// geometry. Measured on this rig the fist lands at about -0.176 along the shaft
+// (a hand's length past the wrist socket, which is why every by-eye guess landed
+// high), and the pack Sword's handle is 0.252 m at scale 0.60. That gives
+// sword -0.05 and daggers -0.09, both confirmed against a rendered hand crop:
+// the wrap now enters the top of the fist and the pommel emerges below it.
+//
+// A HAFT weapon is deliberately NOT on this rule. greataxe/maul/polearm have
+// 0.5-1.5 m of shaft you may grip anywhere along, "mid-handle" would put the
+// hands at the balance point of a pole, and their crops already read correctly.
+// Do not "make them consistent".
+//
+// offhandLift exists because the offhand dagger is REVERSE-gripped: equipWeapon
+// keeps the builder's ~180-degree X rotation, so that copy's local +Y points at
+// the floor and the shared lift slides it the WRONG WAY — lowering the main
+// hand raised the offhand out of its fist. It is a separate number because it is
+// a separate direction, not because the two daggers differ.
+export const PACK_FIT = {
+  sword: { scale: 0.60, tilt: 0.16, lift: -0.05 },
+  greataxe: { scale: 0.62, tilt: 0.10, lift: 0.22 },
+  daggers: { scale: 0.50, tilt: 0.14, lift: -0.09, offhandLift: 0.14 },
+  polearm: { scale: 0.55, tilt: 0.06, lift: 0.10 },
+};
 
 // Rarity is carried by swapping to the pack's own gold variants rather than by
 // tinting: clones share materials with the source GLB, so mutating a material
@@ -705,21 +778,22 @@ export function weaponModelName(weapon) {
   }
 }
 
-// Tilt away from the body, radians about Z. The pack models' pivot is the
-// guard, so they run straight up +Y out of the fist — which is exactly where
-// the humanoid's 0.72-long arm mesh already is, and the blade renders entirely
-// inside the arm. The procedural builders escape this by being long enough to
-// clear the shoulder. Confirmed by screenshot: without the tilt only the tip
-// is visible; with it the whole blade reads.
-const MODEL_TILT = { sword: -0.30, greataxe: -0.26, daggers: -0.20, polearm: -0.18 };
-
-/** One pack model wrapped so equipWeapon's applyGrip has a clean node to pose. */
-function packPart(name, archKey) {
-  const holder = _getModel(name, { scale: MODEL_SCALE[archKey] ?? 0.4 });
+/**
+ * One pack model wrapped so equipWeapon's applyGrip has a clean node to pose.
+ * `lift` overrides the archetype's, which only the reverse-gripped offhand
+ * needs — see PACK_FIT.daggers.offhandLift.
+ */
+function packPart(name, archKey, lift) {
+  const fit = PACK_FIT[archKey] || PACK_FIT.sword;
+  const holder = _getModel(name, { scale: fit.scale });
   if (!holder) return null;
   // applyGrip overwrites position/rotation on the group it is handed, so the
-  // scale and the clearance tilt live one level down where they survive.
-  holder.rotation.z = MODEL_TILT[archKey] ?? 0;
+  // scale, the outboard tilt and the handle lift all live one level down where
+  // they survive. The lift is applied along the OUTER group's +Y (the blade
+  // axis after applyGrip has posed it), so it slides the model along its own
+  // length rather than dragging it off the hand sideways.
+  holder.rotation.z = fit.tilt;
+  holder.position.y = lift ?? fit.lift;
   const outer = new THREE.Group();
   outer.add(holder);
   outer.userData.archetype = archKey;
@@ -738,7 +812,7 @@ function buildPackMesh(weapon, archKey, ghost) {
   if (!g) return null;
 
   if (archKey === 'daggers') {
-    const off = packPart(name, archKey);
+    const off = packPart(name, archKey, PACK_FIT.daggers.offhandLift);
     if (off) {
       // Same reverse grip the procedural builder authors, so equipWeapon's
       // offhand handling below needs no special case for pack models.
@@ -767,12 +841,12 @@ function buildPackMesh(weapon, archKey, ghost) {
 /**
  * Held-weapon kinds, mapped onto items.glb node names.
  *
- * Scales are in the same space MODEL_SCALE above uses: the pack is
+ * Scales are in the same space PACK_FIT above uses: the pack is
  * metre-mismatched against this game (its Sword is 2.30 units tall on a
  * ~2.14-unit humanoid), and these land each model's tip within ~0.1 of the
  * procedural weapon it replaces, which is the silhouette the combat was tuned
  * around. `tilt` rotates the model away from the body so the blade clears the
- * arm instead of rendering inside it — see the MODEL_TILT note above.
+ * arm instead of rendering inside it — see the PACK_FIT note above.
  */
 // `grip` is the same shape ARCHETYPES.grip uses: offsets layered on the hand
 // socket plus a resting pitch, per weapon CLASS, so an axe hangs low off the
@@ -786,14 +860,35 @@ function buildPackMesh(weapon, archKey, ghost) {
 // against a torso half-width of ~0.3, i.e. invisible from behind and "not
 // held" from the front. ~30-40 degrees of forward pitch pushes the head clear
 // of the silhouette from every angle.
-const HELD_MODELS = {
-  sword: { item: 'Sword', scale: 0.60, tilt: -0.30, grip: { y: 0, z: 0.08, rx: -0.50 } },
-  bigsword: { item: 'Sword_big', scale: 0.52, tilt: -0.32, grip: { y: -0.02, z: 0.08, rx: -0.55 } },
-  axe: { item: 'Axe_small', scale: 0.62, tilt: -0.34, grip: { y: -0.02, z: 0.08, rx: -0.55 } },
-  greataxe: { item: 'Axe_Double', scale: 0.62, tilt: -0.30, grip: { y: -0.02, z: 0.10, rx: -0.45 } },
-  hammer: { item: 'Hammer_Double', scale: 0.60, tilt: -0.28, grip: { y: -0.03, z: 0.10, rx: -0.45 } },
-  dagger: { item: 'Dagger', scale: 0.55, tilt: -0.24, grip: { y: 0.02, z: 0.10, rx: -0.70 } },
-  bow: { item: 'Bow_Wooden', scale: 0.62, tilt: -0.10, grip: { y: 0, z: 0.04, rx: -0.35 } },
+// SIGNS CORRECTED HERE FOR THE SAME REASON AS ARCHETYPES.grip above: every rx
+// and every tilt in this table used to be negative, which pitched the blade
+// backward into the torso and leaned it across the chest. `lift` is new and is
+// what actually puts the handle in the fist rather than the crossguard.
+export const HELD_MODELS = {
+  // The three short-handled entries carry the SAME correction PACK_FIT
+  // documents, from the same measurement: enemies hold the same guard-pivoted
+  // models on the same rig, so "pommel on the knuckles" was never a
+  // player-only bug — tools/grip-measure.mjs audits these kinds too, and the
+  // npc-sword crop showed it as plainly as the player's did. The haft entries
+  // below measured correct and are deliberately left alone.
+  sword: { item: 'Sword', scale: 0.60, tilt: 0.16, lift: -0.05, grip: { y: 0, z: 0.06, rx: 0.36 } },
+  // Sword_big is NOT "the sword, bigger", and it is the one model the geometry
+  // rule mispredicts: its pivot sits partway UP the grip rather than at the
+  // guard, so grip-measure's handle-below-pivot reads 0.091 m and asks for
+  // -0.10, and -0.10 still left the pommel resting on the knuckles. -0.22 comes
+  // off a rendered sweep of the hand crop (-0.10 / -0.16 / -0.22 / -0.28): it is
+  // where the guard clears the top of the fist and the pommel emerges under it,
+  // and -0.28 has begun to bury the guard again. Measure the render, not the
+  // pivot, when the two disagree.
+  bigsword: { item: 'Sword_big', scale: 0.52, tilt: 0.12, lift: -0.22, grip: { y: -0.02, z: 0.07, rx: 0.30 } },
+  axe: { item: 'Axe_small', scale: 0.62, tilt: 0.14, lift: 0.12, grip: { y: -0.02, z: 0.06, rx: 0.34 } },
+  greataxe: { item: 'Axe_Double', scale: 0.62, tilt: 0.10, lift: 0.22, grip: { y: -0.02, z: 0.08, rx: 0.26 } },
+  hammer: { item: 'Hammer_Double', scale: 0.60, tilt: 0.10, lift: 0.22, grip: { y: -0.03, z: 0.08, rx: 0.26 } },
+  dagger: { item: 'Dagger', scale: 0.55, tilt: 0.14, lift: -0.09, grip: { y: 0.02, z: 0.07, rx: 0.50 } },
+  // A bow is carried ACROSS the body, not raised, so it keeps the shallowest
+  // pitch of the set — and it is gripped at the riser, which is the middle of
+  // the model rather than one end, hence lift 0.
+  bow: { item: 'Bow_Wooden', scale: 0.62, tilt: 0.06, lift: 0, grip: { y: 0, z: 0.05, rx: 0.14 } },
 };
 
 /**
@@ -985,6 +1080,9 @@ export function buildHeldWeapon(kind, { ghost = false } = {}) {
   holder.add(mesh);
   holder.scale.setScalar(spec.scale);
   holder.rotation.z = spec.tilt;
+  // See PACK_FIT.lift: the pack pivots at the guard, so without this the fist
+  // closes on the crossguard and the whole handle hangs below it.
+  holder.position.y = spec.lift || 0;
 
   const outer = new THREE.Group();
   outer.add(holder);
@@ -1056,10 +1154,25 @@ export function equipWeapon(root, weapon, { ghost = false } = {}) {
 
   // Existing code reads rig.blade for the held weapon; keep that contract.
   rig.blade = main;
-  root.userData.weapon = { instance: weapon, main, offhand, ghost };
+  root.userData.weapon = {
+    instance: weapon, main, offhand, ghost,
+    // The DRAWN pose, captured the moment it is authored. setStance restores
+    // from this rather than recomputing, because the offhand dagger's reverse
+    // grip is a rotation the BUILDER authored and equipWeapon layered on top —
+    // recomputing it from the archetype alone would quietly lose the reverse.
+    hold: {
+      main: snapshot(main),
+      offhand: offhand ? snapshot(offhand) : null,
+    },
+    stance: 'drawn',
+  };
   // A skinned character idles differently with a blade out (Idle_Sword) and
   // attacks with a slash instead of a punch — tell it the fist is full.
   root.userData.character?.setArmed?.(true);
+  // Equipping while sheathed keeps the new weapon sheathed. The panel shows it
+  // on the back, which is the honest read: stance is a property of the
+  // CHARACTER, not of the item, so swapping the item must not silently draw.
+  if (root.userData.stance === 'sheathed') setStance(root, 'sheathed');
   return main;
 }
 
@@ -1077,6 +1190,158 @@ export function unequipWeapon(root) {
 
 export function currentWeapon(root) {
   return root?.userData?.weapon?.instance || null;
+}
+
+// ------------------------------------------------------------- stow and draw
+//
+// "when they are in the plaza, the sword can be visible or placed in the
+// inventory" — the owner. A stance is 'drawn' or 'sheathed', it lives on the
+// CHARACTER and it is NOT PERSISTED: a resumed save re-derives it from where
+// the player is standing and what is near him. Persisting it would create a
+// third source of truth about what is in the hand, alongside the equipment
+// record and root.userData.weapon.
+//
+// HARD RULE: RE-PARENT ONLY. Nothing here creates geometry, creates a material
+// or disposes anything. The asset-cache note at the top of this file measured a
+// material dispose at 8-60 ms of shader recompile on a mid-range Android, and a
+// stow that rebuilt the mesh would pay that every time the player walked into
+// the plaza. It is also why a stowed weapon is the SAME object re-parented and
+// not a second hidden mesh: a hidden mesh still costs a matrix update and a
+// frustum test, and two meshes is how a stow feature becomes a permanent draw
+// call in a 24-call dungeon budget.
+
+/**
+ * Where each archetype rides when it is put away, and how.
+ *
+ * The transform is expressed in the stow socket's own space, which is
+ * character-aligned and character-scaled (characters.js makeSocket), so these
+ * numbers are metres and radians on a 2.14-unit humanoid and mean the same
+ * thing on the procedural box-man. `socket` is a NAME rather than just a
+ * transform precisely because twin daggers ride at the HIPS while everything
+ * else rides on the BACK.
+ *
+ * Rotations follow the same composite as the grips above: for a rotation
+ * (rx, 0, rz) the model's +Y axis ends up at (-sin rz, cos rz * cos rx,
+ * cos rz * sin rx). An rx near ±pi is a weapon carried point-DOWN.
+ */
+export const STOW = {
+  // Hilt over the right shoulder where the hand can reach it, blade running
+  // down across the back to the left hip. Point-down, hence rx near -pi.
+  sword: { socket: 'back', x: -0.16, y: 0.16, z: -0.20, rx: -3.02, ry: 0, rz: -0.40 },
+  // Head UP over the shoulder, haft butt near the hip: a greataxe carried
+  // point-down would put a 40 cm bit through the back of the character's knee.
+  greataxe: { socket: 'back', x: -0.05, y: -0.40, z: -0.30, rx: -0.10, ry: 0, rz: -0.28 },
+  // Near vertical. A 2.5 m shaft raked as hard as a sword pushes the butt
+  // through the floor at one end and the point through the head at the other.
+  polearm: { socket: 'back', x: 0.02, y: -0.80, z: -0.30, rx: -0.08, ry: 0, rz: -0.16 },
+  // ONE PER HIP, which is the whole reason this table carries a socket name.
+  daggers: {
+    socket: 'hip', x: -0.26, y: 0.01, z: -0.12, rx: -2.94, ry: 0, rz: -0.10,
+    offhand: { x: 0.26, y: 0.01, z: -0.12, rx: -2.94, ry: 0, rz: 0.10 },
+  },
+};
+
+/**
+ * Seconds to bring the weapon out. The mass law applied to one more verb: a
+ * greataxe player who let it sheath while wandering pays for that the moment
+ * something jumps him, a dagger player pays almost nothing. Without this,
+ * stow/draw is a free cosmetic toggle and mass stops being a real property.
+ */
+export function drawTime(weapon) {
+  const arch = weapon?.arch || ARCHETYPES[weapon?.archetype] || null;
+  const mass = arch?.mass ?? 1.4;
+  return Math.min(0.45, 0.18 + 0.035 * mass);
+}
+
+function snapshot(obj) {
+  return {
+    px: obj.position.x, py: obj.position.y, pz: obj.position.z,
+    rx: obj.rotation.x, ry: obj.rotation.y, rz: obj.rotation.z,
+  };
+}
+
+function restore(obj, s) {
+  obj.position.set(s.px, s.py, s.pz);
+  obj.rotation.set(s.rx, s.ry, s.rz);
+}
+
+/**
+ * The stow anchor for `name`, with a fallback chain that ends somewhere real.
+ *
+ * The procedural box-man carries explicit rig.back / rig.hip anchors (see
+ * entities.js) so the game still stows correctly with public/models/ deleted;
+ * the last resort is the torso, which puts the weapon in roughly the right
+ * place rather than at the character's feet.
+ */
+function stowSocket(rig, name) {
+  if (!rig) return null;
+  return (name === 'hip' ? rig.hip : rig.back) || rig.back || rig.hip || rig.torso || rig.body || null;
+}
+
+/** 'drawn' | 'sheathed' — what this character is currently doing with it. */
+export function weaponStance(root) {
+  return root?.userData?.stance || 'drawn';
+}
+
+/**
+ * Move the equipped weapon between the fist and its stow socket.
+ *
+ * Returns the stance actually applied, which is NOT always the one asked for:
+ * a character holding nothing, or an archetype with no STOW entry, stays
+ * drawn. Callers should believe the return value, not the argument.
+ */
+export function setStance(root, stance) {
+  const want = stance === 'sheathed' ? 'sheathed' : 'drawn';
+  const held = root?.userData?.weapon;
+  if (!held || !held.main) {
+    // Remember the intent anyway: equipping later should honour it.
+    if (root?.userData) root.userData.stance = want;
+    return want;
+  }
+  const rig = root.userData.rig;
+  const arch = held.instance?.arch || ARCHETYPES[held.instance?.archetype] || ARCHETYPES.sword;
+  const archKey = held.main.userData.archetype
+    || (arch === ARCHETYPES.daggers ? 'daggers' : held.instance?.base?.archetype)
+    || 'sword';
+  const table = STOW[archKey];
+
+  if (want === 'sheathed') {
+    const socket = table ? stowSocket(rig, table.socket) : null;
+    // No anchor and no table both mean "this rig cannot put it away"; saying so
+    // by returning 'drawn' is better than hiding the weapon inside the pelvis.
+    if (!socket) { root.userData.stance = 'drawn'; return 'drawn'; }
+    socket.add(held.main);
+    held.main.position.set(table.x, table.y, table.z);
+    held.main.rotation.set(table.rx, table.ry || 0, table.rz);
+    if (held.offhand) {
+      const off = table.offhand || table;
+      const offSocket = stowSocket(rig, off.socket || table.socket);
+      offSocket?.add(held.offhand);
+      held.offhand.position.set(off.x, off.y, off.z);
+      held.offhand.rotation.set(off.rx, off.ry || 0, off.rz);
+    }
+    // The free win: setArmed(false) swaps the idle back to the neutral
+    // arms-down clip and invalidates the cached action, so sheathing produces
+    // the relaxed plaza walk with no additional animation work.
+    root.userData.character?.setArmed?.(false);
+  } else {
+    const rHand = handSocket(rig, 'R');
+    if (!rHand) { root.userData.stance = 'sheathed'; return 'sheathed'; }
+    rHand.add(held.main);
+    restore(held.main, held.hold.main);
+    if (held.offhand && held.hold.offhand) {
+      const lHand = handSocket(rig, 'L');
+      if (lHand) {
+        lHand.add(held.offhand);
+        restore(held.offhand, held.hold.offhand);
+      }
+    }
+    root.userData.character?.setArmed?.(true);
+  }
+
+  held.stance = want;
+  root.userData.stance = want;
+  return want;
 }
 
 // --------------------------------------------------------- swing state machine

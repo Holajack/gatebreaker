@@ -18,6 +18,17 @@ function store() {
   }
 }
 
+// The eight slots, in the order the inventory panel draws them. Exported so a
+// panel or a test never has to spell the list out a second time — two lists of
+// slot names is how a slot goes missing from exactly one of them.
+export const EQUIP_SLOTS = ['weapon', 'offhand', 'head', 'chest', 'hands', 'legs', 'feet', 'trinket'];
+
+export function freshEquipment() {
+  const e = {};
+  for (const s of EQUIP_SLOTS) e[s] = null;
+  return e;
+}
+
 export function freshSave() {
   return {
     version: SCHEMA_VERSION,
@@ -35,8 +46,19 @@ export function freshSave() {
     unlockedAnomaly: false,
     totalKills: 0,
     deaths: 0,
+    // The v1-and-still-current single-weapon field. It is now a MIRROR of
+    // equipment.weapon rather than the source of truth — see ensureEquipment.
     weapon: null,
     stash: [],
+    // Eight equipment slots. Five of them (head/chest/hands/legs/feet) are the
+    // armour slots Wave 3-B fills; they exist here now so a save written today
+    // is already the shape the armour wave reads, and so the inventory panel
+    // can show them as real empty slots instead of pretending.
+    //
+    // Deliberately NOT a schema bump, on the save.shop / save.worldTime
+    // precedent: an absent value is indistinguishable from this one, so
+    // ensureEquipment() IS the migration and it runs on first contact.
+    equipment: freshEquipment(),
     // The Exchange's memory: which rank band the shelf was rolled for, and
     // which of that band's bases have already been bought. band -1 means "no
     // shelf rolled yet", which is what every save written before the shop
@@ -79,11 +101,68 @@ function sanitiseShop(v) {
   return { band, sold };
 }
 
+// An item INSTANCE is five short fields: kind, base id, rarity key, seed and
+// the level it was rolled at. Nothing else is ever persisted, because a rolled
+// stat line is exactly the thing that goes stale the next time the tables are
+// tuned — weapons.js already enforces this and armour will obey it identically.
+//
+// Validation here is STRUCTURAL ONLY. Whether `b` names a weapon that still
+// exists is game/weapons.js's business; this module deliberately does not
+// import it (that would pull THREE into a module the headless progression test
+// loads), exactly as sanitiseShop() refuses to validate a `sold` id.
+function sanitiseItem(v) {
+  if (!v || typeof v !== 'object') return null;
+  if (typeof v.b !== 'string' || !v.b) return null;
+  // Kind: 'w' weapon, 'a' armor, 't' trinket. ABSENT MEANS 'w' — that absence
+  // IS the migration for every stash entry and every save.weapon ever written.
+  const k = (v.k === 'a' || v.k === 't') ? v.k : (v.k === undefined || v.k === 'w' ? 'w' : null);
+  if (k === null) return null;   // an unknown kind is dropped, never thrown on
+  const s = Number.isFinite(v.s) ? (v.s >>> 0) : 0;
+  const l = Number.isFinite(v.l) ? Math.max(1, Math.floor(v.l)) : 1;
+  const r = typeof v.r === 'string' ? v.r : 'common';
+  return { k, b: v.b, r, s, l };
+}
+
+/**
+ * Bring `save` up to the eight-slot equipment model, in place. Idempotent, and
+ * called first by every entry point — this is the migration, in the same shape
+ * as game/shop.js's ensureShopSave, and for the same reason: an absent
+ * `equipment` is indistinguishable from an empty one, so a schema bump would
+ * buy nothing and cost every existing profile a reload path.
+ *
+ * The one real upgrade it performs: a pre-wave save has `save.weapon` and no
+ * `save.equipment`, so the old single weapon is COPIED into the weapon slot.
+ */
+export function ensureEquipment(save) {
+  if (!save || typeof save !== 'object') return save;
+  const src = (save.equipment && typeof save.equipment === 'object') ? save.equipment : {};
+  const out = freshEquipment();
+  for (const slot of EQUIP_SLOTS) out[slot] = sanitiseItem(src[slot]);
+  // v-old -> v-new: the one slot that already existed.
+  if (!out.weapon) out.weapon = sanitiseItem(save.weapon);
+  save.equipment = out;
+  // The MIRROR. save.weapon keeps being written so a build rolled back to the
+  // shipped version still finds the right sword instead of an empty fist —
+  // save.js's own "leave the v1 key in place" note is the precedent for caring.
+  save.weapon = out.weapon ? { b: out.weapon.b, r: out.weapon.r, s: out.weapon.s, l: out.weapon.l } : null;
+  save.stash = (Array.isArray(save.stash) ? save.stash : [])
+    .map(sanitiseItem)
+    .filter(Boolean);
+  return save;
+}
+
 /**
  * Upgrade any parsed save object to the v2 shape. Pure — no storage access —
  * so it is directly testable and so load() can decide what to persist.
  */
 export function migrate(raw) {
+  // ensureEquipment wraps every exit: migrate() is the one funnel load() and
+  // the tests both go through, so putting the equipment upgrade here means no
+  // caller can reach a save that has not had it applied.
+  return ensureEquipment(_migrate(raw));
+}
+
+function _migrate(raw) {
   const base = freshSave();
   if (!raw || typeof raw !== 'object') return base;
   // The rig loader switches on this value, so the contract is exactly the two

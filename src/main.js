@@ -11,6 +11,8 @@ import { FrameClock } from './core/frameclock.js';
 import { AppState } from './core/appstate.js';
 import { preloadCity } from './world/city.js';
 import { ShopUI } from './ui/shopui.js';
+import { InventoryUI } from './ui/inventoryui.js';
+import * as Weapons from './game/weapons.js';
 
 const canvas = document.getElementById('scene');
 const audio = new Audio();
@@ -89,6 +91,43 @@ ui.game = game;
 // layer. Deliberately NOT an AppState screen — see the header of shopui.js.
 game.shopUI = new ShopUI({ game, audio });
 
+// The hunter's sheet. Constructed here for the same reason the shop is: it
+// outlives every city rebuild, and a panel that built its DOM per open would
+// leak an #inv node per visit. Deliberately NOT an AppState screen — see the
+// header of inventoryui.js.
+game.invUI = new InventoryUI({ game, audio });
+
+// Three ways in, one of them a thumb: the HUD button, the pause panel and
+// desktop's I key. Delegated from document so the HUD button works in the city
+// and in a gate without ui.js needing to know the panel exists.
+function toggleInventory() {
+  if (!game.invUI) return;
+  audio.ui();
+  // ONE overlay at a time: the shop and the sheet both hide #cityUi and both
+  // claim the back button, so opening one over the other would leave whichever
+  // lost the race unreachable.
+  if (game.shopUI?.isOpen) game.shopUI.close();
+  game.invUI.toggle();
+}
+document.addEventListener('click', (e) => {
+  if (!e.target?.closest?.('#btnInventory, #btnInventoryPause')) return;
+  e.stopPropagation();
+  e.preventDefault();
+  // Opened FROM the pause screen: hide pause, and put it back on close.
+  // Without the return path the game stays paused with nothing on screen —
+  // #pause is what owns RESUME, and hiding it without a way back is a
+  // soft-lock, not a menu.
+  const fromPause = !document.getElementById('pause')?.classList.contains('hidden');
+  if (fromPause) ui.hide('pause');
+  toggleInventory();
+  if (fromPause && game.invUI?.isOpen) game.invUI.onClose = () => ui.showPause();
+}, true);
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'i' && e.key !== 'I') return;
+  if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
+  toggleInventory();
+});
+
 // ui.js still owns the gate-list DOM; main.js owns where its two entry points
 // lead. Both of them — the title's play button and the results panel's
 // CONTINUE — used to open that list, and both should now put you in the city.
@@ -127,6 +166,11 @@ function handleBack() {
   // closes the panel and leaves you standing in the doorway you opened it
   // from, which is what walking out of a shop means. It closes through its own
   // method rather than ui.hide so its isOpen flag cannot go stale.
+  // The sheet is checked first because it is the one that can be opened from
+  // inside a gate, where the pause panel below would otherwise swallow the
+  // press. Only one overlay is ever open (see toggleInventory), so the order
+  // here is about which check runs, not about nesting.
+  if (game.invUI?.isOpen) { game.invUI.close(); return; }
   if (game.shopUI?.isOpen) { game.shopUI.close(); return; }
   for (const id of ['how', 'levelup']) {
     const el = document.getElementById(id);
@@ -260,3 +304,11 @@ clock.start();
 window.__game = game;
 window.__clock = clock;
 window.__app = app;
+// The LIVE weapons module, for tools/grip-audit.mjs and tools/grip-probe.mjs.
+// A tool that reaches for it with its own `await import('/src/game/weapons.js')`
+// gets a SECOND module instance whose `_getModel` is still null — measured:
+// weaponCacheStats() came back all zeroes and every pack lookup silently fell
+// through to the procedural builder, so an entire grip audit ran against
+// weapons the player never sees. Handing the real one out is cheaper than
+// re-learning that.
+window.__weapons = Weapons;

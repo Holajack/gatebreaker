@@ -125,7 +125,7 @@
   <div id="title" class="screen hidden">
     <div class="title-inner">
       <h1 class="game-title">EMBERGATE</h1>
-      <span class="build-stamp">BUILD 1.6-camera</span>
+      <span class="build-stamp">BUILD 1.7-arsenal</span>
       <p class="game-sub">AN OPEN-WORLD GATE-HUNTING RPG</p>
       <div class="title-hunter">
         <span id="titleName">UNRANKED BREAKER</span>
@@ -173,6 +173,10 @@
         <span id="comboText" class="combo hidden"></span>
         <span id="pointsBadge" class="points-badge hidden"></span>
       </div>
+      <!-- The owner asked for "an inventory button", and a button that only
+           exists inside a menu is not that. It sits in the HUD in BOTH the
+           city and a gate. -->
+      <button id="btnInventory" class="icon-btn" aria-label="Inventory">▤</button>
       <button id="btnPause" class="icon-btn" aria-label="Pause">| |</button>
     </div>
 
@@ -214,6 +218,7 @@
       <div id="pauseStats" class="readout"></div>
       <button class="btn primary" id="btnResume">RESUME</button>
       <button class="btn" id="btnAllocate">STATS &amp; SKILLS</button>
+      <button class="btn" id="btnInventoryPause">INVENTORY</button>
       <button class="btn ghost" id="btnQuit">ABANDON GATE</button>
     </div>
   </div>

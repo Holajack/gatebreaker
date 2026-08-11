@@ -11,7 +11,7 @@ import {
   loadCreatureModels, creaturesReady, makeCreature, creatureStats,
   setCreatureQuality, creatureBudgetAvailable,
 } from '../render/creatures.js';
-import { buildHeldWeapon, enemyWeaponKind } from './weapons.js';
+import { buildHeldWeapon, enemyWeaponKind, setStance } from './weapons.js';
 
 // Humanoids. There are now TWO implementations behind makeHumanoid():
 //
@@ -607,6 +607,11 @@ function buildSkinnedInto(root, opts) {
     // sockets on a skinned rig that are actually a hand.
     hand: inst.sockets.hand || null,
     handL: inst.sockets.handL || null,
+    // Where a sheathed weapon rides. weapons.js setStance re-parents between
+    // these and the hand; null here falls back to the torso rather than
+    // dropping the weapon at the character's feet.
+    back: inst.sockets.back || null,
+    hip: inst.sockets.hip || null,
   };
 
   // A corpse is the one humanoid game.js never calls animateRig on: it is
@@ -629,6 +634,10 @@ function buildSkinnedInto(root, opts) {
     // The upgrade path re-parents the weapon without going through
     // equipWeapon, so the armed idle/attack posture is restated here.
     inst.setArmed?.(true);
+    // ...and so is the stance. The pack upgrade lands seconds after boot, long
+    // after the city may already have sheathed the sword; putting the blade
+    // back in the fist here would look like the toggle spontaneously failed.
+    if (root.userData.stance === 'sheathed') setStance(root, 'sheathed');
   } else if (inst.isCreature) {
     // game.js hands every enemy a 'sword'/'claw'/'staff' string. A monster
     // ignores it: what it carries was decided when it was modelled.
@@ -783,8 +792,18 @@ export function makeHumanoid(opts = {}) {
   // rig keys are kept because animateRig and game.js both address them by name.
   // eyeL/eyeR likewise both point at the single merged eye mesh, so the
   // telegraph flare still works unchanged.
+  // Stow anchors for the offline path. The game must boot and play with
+  // public/models/ deleted, which means the box-man has to be able to put a
+  // sword away too. Two empty Object3Ds cost no draw call and no geometry; the
+  // heights are the box-man's own chest and hip (shoulder pivots sit at 1.58,
+  // leg pivots at 0.82), so weapons.js's one STOW table lands in the same
+  // place on both bodies.
+  const backAnchor = new THREE.Object3D(); backAnchor.position.set(0, 1.55, 0);
+  const hipAnchor = new THREE.Object3D(); hipAnchor.position.set(0, 1.00, 0);
+  body.add(backAnchor, hipAnchor);
   root.userData.rig = {
     body, torso, head: torso, armL, armR, legL, legR, blade, eyeL: eyes, eyeR: eyes,
+    back: backAnchor, hip: hipAnchor,
   };
   // If the pack is still in flight this box-man is provisional: remember what
   // it was asked for so upgradePendingHumanoids can rebuild it as a real

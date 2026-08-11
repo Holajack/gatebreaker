@@ -2,7 +2,11 @@
 // Everything the designer would want to tune lives here.
 //
 // This file is deliberately THREE-free and side-effect free so the headless
-// progression test can import it in Node.
+// progression test can import it in Node. src/core/rng.js is THREE-free for
+// exactly this reason, so the one roll that lives here (rollWaveSize) may
+// import it without breaking that property.
+
+import { mulberry32 } from '../core/rng.js';
 
 export const RANKS = ['E', 'D', 'C', 'B', 'A', 'S'];
 
@@ -43,22 +47,113 @@ export const STAT_RATES = {
   per: { floor: 0.012, floorBase: 0.55, floorCap: 0.92, tellMs: 8, tellBaseMs: 120, tellCapMs: 520, extract: 0.004 },
 };
 
+// ENEMY COUNTS. `enemies` is the trash total for a run (the boss is extra),
+// `waveSize` caps how many are ALIVE at once, and `bossAdds` is the boss
+// chamber's own pack. The encounter director trickles replacements in as they
+// die, so waveSize is what a fight FEELS like and `enemies` is how many waves
+// the room costs.
+//
+// BOTH counts are ROLLED PER RUN off forked mulberry32 streams keyed on the run
+// seed, and written back onto the gate before anything reads them:
+// Dungeon.build rolls `enemies` from `enemyBand`, EncounterDirector rolls
+// `waveSize` from `waveBand`. A context-loss rebuild (same seed) lands on the
+// identical pair — never Math.random. The `enemies` / `waveSize` fields below
+// are the NOMINAL values: they are what B+ use (the arena world has neither
+// roll site) and what a headless caller with no seed sees.
+//
+// --- WHY waveSize MOVED --------------------------------------------------
+// The first pass of this wave grew the rooms ~5.5x in area and left waveSize
+// alone, on the theory that a bigger TOTAL buys more waves rather than a busier
+// moment. Measured, that produced the opposite of the ask: a sealed 30 x 26 m
+// room containing 3 live enemies — sparser AND longer at the same time.
+// waveSize has to move with the rooms.
+//
+// The parity held here is bodies per metre of room WIDTH, not per square metre
+// of floor, because enemies converge on the player: what a bigger room adds is
+// approach distance in ONE dimension plus a longer wall of pressure, a linear
+// term. Area parity is also literally unpayable — the old E room was 13 x 10 m
+// = 130 m2 carrying waveSize 3 (2.31 live per 100 m2), and 2.31 x 720 m2 (the
+// new mean E room, measured off live layouts) asks for 16.6 live in a room
+// whose entire budget is 8.
+//
+//   anchor   old E room sqrt(130 m2) = 11.4 m wide holding 3 live
+//            => 3 / 11.4 = 0.263 live bodies per metre of room width
+//   E  new mean room 720 m2, sqrt = 26.8 m -> 0.263 x 26.8 = 7.05   -> 7
+//   D  new mean room 830 m2, sqrt = 28.8 m, keeping D's 4/3 rank premium:
+//            3 x (4/3) x (28.8 / 11.4) = 10.1                        -> 9
+//   C  zone disc r 12 m = 452 m2, sqrt = 21.3 m, 2x rank premium:
+//            3 x 2 x (21.3 / 11.4) = 11.2                            -> 11
+//
+// D is trimmed 10 -> 9 so its TOTAL stays under C's; the C cavern's zones are
+// open floor with no walls to hold a pack, which is what its higher live count
+// is paying for.
+//
+// TOTALS then follow from waveSize x waves-per-room x combat rooms, holding
+// waves per room at ~1.15 — a room is now ONE real fight plus a short tail,
+// not two and a half skirmishes of three:
+//   E   7 x 1.15 x 4.5 rooms = 36  -> enemyBand [30, 42]
+//   D   9 x 1.15 x 5.0 rooms = 52  -> enemyBand [44, 60]
+//   C  11 x 1.15 x 4.5 zones = 57  -> enemyBand [48, 66]
+//
+// B/A/S keep their old waveSize on purpose. The arena disc did NOT change size
+// this wave, so there is nothing to re-derive from; the resulting C-11 > B-7
+// step is an artifact of the arena being a different (and much larger) space,
+// not a typo. It gets revisited when the arena does.
+//
+// BOSS CHAMBERS get their own pack. The same width parity applied to the E
+// chamber (38 x 38 m, sqrt = 38 m) asks for 0.263 x 38 = 10 bodies of pressure.
+// The boss is scale 2.5 with a 1.5 m collision radius and room-crossing
+// telegraphs — it holds the centre the way three trash bodies cannot, so it
+// counts as 3, leaving 7. Only `live` of those stand at once, so open floor
+// always outnumbers occupied floor and one dash (7.5 m) always breaks contact;
+// the rest arrive from `total` as replacements across the fight. That is the
+// difference between kiting and being swarmed.
+//   E  38x38 = 1444 m2, sqrt 38 -> 10 - 3 = 7  -> live 7, total 16
+//   D  42x42 = 1764 m2, sqrt 42 -> 11 - 3 = 8  -> live 8, total 18
+//   C  grotto ~40 m across       -> 10 - 3 = 7, +1 live for its lancer packs
+//                                              -> live 8, total 18
+//
+// --- WHY `live` MOVED (fixup 1) ------------------------------------------
+// The first pass derived those 7/8/8 trash-equivalents and then shipped 4/5/6,
+// which made the boss chamber the SPARSEST room in the dungeon by more than 2x
+// — measured, E boss peak was boss + 4 = 5 bodies in 1444 m2 (289 m2 each)
+// against an ordinary 780 m2 E room holding 6-8 (98-130 m2 each). The room the
+// owner actually named ("especially for the boss room") was getting the
+// weakest version of the wave's own lever. `live` now IS the derivation.
+//
+// The ceiling is a PERF invariant, not a taste call: bossAdds.live <=
+// waveBand[1] - 1, so the chamber's peak body count never exceeds the peak an
+// ordinary room of the same rank already sustains (skinned characters are the
+// dominant frame cost — ~14k tris each — so one extra concurrent body is the
+// whole delta, and here there is not even one).
+//   E  boss + 7 = 8 bodies, waveBand hi 8   -> equal, no new peak
+//   D  boss + 8 = 9,        waveBand hi 10  -> under
+//   C  boss + 8 = 9,        waveBand hi 12  -> under
+// TOTALS hold the room convention of ~2.3 waves for a boss fight (an ordinary
+// room is 1.15): 7 x 2.3 = 16, 8 x 2.3 = 18. encounters.js owns the RHYTHM
+// that gets the chamber to its cap — see BOSS_ADDS_DELAY / _INTERVAL there.
 export const GATES = [
   {
     rank: 'E', name: 'THE WARREN', biome: 'warren',
-    enemies: 12, waveSize: 3, enemyLevel: 2, bossLevel: 6, arena: 46,
+    enemies: 36, enemyBand: [30, 42], waveSize: 7, waveBand: [6, 8],
+    bossAdds: { live: 7, total: 16 },
+    enemyLevel: 2, bossLevel: 6, arena: 46,
     boss: 'warden', reqLevel: 1,
     blurb: 'A shallow tear. Good place to learn which end of the blade cuts.',
   },
   {
     rank: 'D', name: 'THE OSSUARY', biome: 'ossuary',
-    enemies: 18, waveSize: 4, enemyLevel: 7, bossLevel: 12, arena: 52,
+    enemies: 52, enemyBand: [44, 60], waveSize: 9, waveBand: [8, 10],
+    bossAdds: { live: 8, total: 18 },
+    enemyLevel: 7, bossLevel: 12, arena: 52,
     boss: 'gravelord', reqLevel: 5,
     blurb: 'The dead here were buried standing up. They still are.',
   },
   {
     rank: 'C', name: 'DEEPGLASS CAVERN', biome: 'deepglass',
-    enemies: 26, waveSize: 6, enemyLevel: 14, bossLevel: 21, arena: 58,
+    enemies: 57, enemyBand: [48, 66], waveSize: 11, waveBand: [10, 12],
+    bossAdds: { live: 8, total: 18 },
+    enemyLevel: 14, bossLevel: 21, arena: 58,
     boss: 'frostcaller', reqLevel: 11,
     blurb: 'Cold enough that blood freezes before it finishes falling.',
   },
@@ -81,6 +176,33 @@ export const GATES = [
     blurb: 'No hunter has walked back out. The record is unbroken.',
   },
 ];
+
+/**
+ * Roll this run's live-enemy cap from the gate's `waveBand`.
+ *
+ * Mirrors dungeon.js's rollEnemyCount exactly — same shape, same fallback
+ * discipline, its own forked constant — because the two numbers must be able to
+ * move independently: retuning how CROWDED a fight is may never reshuffle how
+ * LONG a run is, and vice versa. Pure and THREE-free so the headless suites can
+ * exercise it.
+ *
+ * @param {object} gate  a GATES row (or the per-run shallow copy of one)
+ * @param {number} seed  per-run gate seed
+ * @returns {number}     live cap; gate.waveSize when the gate carries no band
+ */
+export function rollWaveSize(gate, seed) {
+  const band = gate?.waveBand;
+  if (!Array.isArray(band) || band.length !== 2) return gate?.waveSize ?? 3;
+  const lo = Math.min(band[0], band[1]) | 0;
+  const hi = Math.max(band[0], band[1]) | 0;
+  if (!(hi >= lo) || lo < 1) return gate.waveSize;
+  // Fork constant: murmur3's finaliser, chosen because it collides with none of
+  // the streams already in use — 0x9e3779b9 / 0x5f356495 / 0x1f123bb5 (layout,
+  // decor, encounter), 0x85ebca6b / 0x27d4eb2f (dungeon shell/props) and
+  // 0x632be59b (rollEnemyCount).
+  const rnd = mulberry32((seed ^ 0xc2b2ae35) >>> 0);
+  return lo + Math.floor(rnd() * (hi - lo + 1));
+}
 
 // Chance a B+ gate rolls an off-canon "anomaly" biome instead of its own.
 export const ANOMALY_CHANCE = { E: 0, D: 0, C: 0, B: 0.14, A: 0.20, S: 0.26 };
@@ -142,6 +264,33 @@ export const BOSSES = {
   weaver:     { name: 'THE VOIDWEAVER',  hp: 5200,  atk: 74, speed: 3.8, scale: 3.0, color: 0x5a2a8c, glow: 0xd08aff, xp: 3200 },
   archon:     { name: 'THE RIFT ARCHON', hp: 9800,  atk: 104, speed: 4.0, scale: 3.4, color: 0x8c1440, glow: 0xff5c8a, xp: 6800 },
 };
+
+// THE BOLT PLANE. Every projectile in the game — trash caster bolts and boss
+// spread shots alike — flies in ONE horizontal plane at this height, and this
+// is the single constant that says so.
+//
+// It lives here, in the THREE-free balance table, because THREE consumers need
+// the same number and drifted apart the moment they each kept their own copy:
+//   game.js  _spawnProjectile flattens the direction (`.setY(0)`), so a bolt
+//            never changes height after it is born; the player hit test is a
+//            1.1 m sphere centred at y 1.2. |1.6 - 1.2| = 0.4 m leaves 0.7 m of
+//            lateral radius to hit with. The boss used to spawn its spread shot
+//            at 2.4: 2.4 - 1.2 = 1.20 > 1.1, so the whole pattern MISSED at
+//            every range, measured 10/10 trials at 4-14 m, E and D, normal and
+//            enraged. A flat-flying bolt must be born on the plane it can hit
+//            from, so _spawnProjectile now stamps this height itself.
+//   game.js  _agentLosBlocked probes obstacleField.lineBlocked at this feetY,
+//            so a caster's decision to fire is judged at the height its bolt
+//            actually travels.
+//   dungeonlayout.js  COVER_KINDS is designed against it: a piece is only cover
+//            if its collision `top` clears this plane (COVER_MIN_TOP there).
+//            rubble's top is 1.75 — it clears 1.6 by 0.15 m but does NOT clear
+//            2.4, which is why the old boss height would have flown over a
+//            third of the boss chamber's cover even after the hit test was
+//            fixed.
+// 1.6 (not 1.2) because that is where the trash caster already fired from and
+// it reads as chest height on a 1.8 m body; every COVER_KINDS top clears it.
+export const PROJECTILE_Y = 1.6;
 
 // --- Skills ---
 // summon has no maxShadows any more: how many shadows exist and how many stand

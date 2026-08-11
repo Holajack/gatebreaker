@@ -1,4 +1,5 @@
 import { mulberry32 } from '../core/rng.js';
+import { rollWaveSize } from './config.js';
 
 // The room-state director — DUNGEON_SPEC.json STEP 5.
 //
@@ -45,6 +46,31 @@ const PORTAL_RADIUS = 1.6;
 // A spawn point this close to the player is skipped when any other will do —
 // nobody should materialise inside the player's swing arc.
 const SPAWN_CLEARANCE = 2.5;
+// BOSS CHAMBER ADDS. A 38 x 38 m chamber holding exactly one enemy was the
+// emptiest room in the game and the reason dodging there meant nothing: there
+// was only ever one thing to dodge, and 1444 m2 to do it in. config.js's
+// `bossAdds` sizes the pack (see the arithmetic there); these two constants
+// decide the RHYTHM of it.
+//
+// The boss gets the room to itself for the first beat — its entrance, the
+// camera hold and the first exchange are the fight introducing itself, and a
+// grunt walking in over the top of that is noise. After that a body arrives
+// every BOSS_ADDS_INTERVAL while there is room under the live cap.
+//
+// FIXUP 1 RE-TIMED BOTH. At 6.0 s + 3.0 s the chamber held ONE body for the
+// first six seconds and, at the corrected live caps (E 7, D 8), would not have
+// reached its cap until 6 + 3 x 6 = 24 s — most of a boss fight spent in the
+// emptiest room in the game, which is the defect config.js's bossAdds block
+// exists to remove. The delay now covers the entrance and the boss's FIRST
+// pattern only (_bossBrain's patternCd is 4.4-6.0 s cold), and the interval
+// fills the floor inside the second:
+//   E  4.0 + 1.2 x (7 - 1) = 11.2 s to a full 7-body floor
+//   D  4.0 + 1.2 x (8 - 1) = 12.4 s
+// One body per 1.2 s is still a trickle a player can answer — a single Ruin
+// (4.2 s cooldown, 8 m arc) clears more than it delivers — so this is pressure,
+// not attrition.
+const BOSS_ADDS_DELAY = 4.0;
+const BOSS_ADDS_INTERVAL = 1.2;
 
 // Rank-appropriate enemy mixes. Weights over ENEMY_TYPES keys that already
 // exist — the owner's "different E-rank gates have different enemies" is a
@@ -74,8 +100,34 @@ export function rollRoomPacks(gate, rnd, count = 16) {
   const gateIndex = ['E', 'D', 'C', 'B', 'A', 'S'].indexOf(gate.rank);
   const pool = PACK_TABLE.filter((p) => gateIndex >= p.minGate);
   const packs = [];
+  if (!pool.length) return packs;
+  // SHUFFLE BAG, not an independent roll per room. An independent roll deals
+  // the same pack to adjacent rooms often enough to read as sameness — with
+  // the 3-pack E pool that is one room in three — and now that a run is 4-5
+  // BIG rooms instead of 6-7 small ones, every room that feels like a repeat
+  // is a bigger fraction of the dungeon. The bag deals each pack once before
+  // any repeats, and a reshuffle never immediately re-deals the pack that
+  // closed the previous bag. Still a pure function of `rnd`, so the rebuild
+  // after a context loss deals the identical hand.
+  let bag = [];
+  let last = null;
   for (let i = 0; i < count; i++) {
-    packs.push(pool[Math.floor(rnd() * pool.length)] || pool[0]);
+    if (!bag.length) {
+      bag = pool.slice();
+      for (let k = bag.length - 1; k > 0; k--) {   // Fisher-Yates, same stream
+        const j = Math.floor(rnd() * (k + 1));
+        const t = bag[k]; bag[k] = bag[j]; bag[j] = t;
+      }
+      // The bag is dealt from the end, so the seam repeat to dodge is the LAST
+      // element matching what we just dealt.
+      if (bag.length > 1 && bag[bag.length - 1] === last) {
+        const t = bag[bag.length - 1];
+        bag[bag.length - 1] = bag[bag.length - 2];
+        bag[bag.length - 2] = t;
+      }
+    }
+    last = bag.pop();
+    packs.push(last);
   }
   return packs;
 }
@@ -103,6 +155,26 @@ export class EncounterDirector {
     // rolls can never reshuffle rooms, and the per-run seed reproduces the
     // same deal after a context-loss rebuild.
     this.rnd = mulberry32((seed ^ 0x1f123bb5) >>> 0);
+
+    // LIVE CONCURRENCY, rolled per run from gate.waveBand off its own forked
+    // stream (config.rollWaveSize). Written straight back onto the gate because
+    // gate.waveSize is what every other consumer already reads — game.js's
+    // arena _spawnWave, the HUD, tools/dungeon-test — and two fields that mean
+    // the same thing is exactly how they drift apart. The roll's INPUT is
+    // gate.waveBand, which nothing ever writes, so re-entering a gate rolls
+    // from the band again rather than jittering an already-jittered number.
+    this.waveSize = rollWaveSize(gate, seed);
+    gate.waveSize = this.waveSize;
+
+    // Boss-chamber pack. Sized in config.js; metered by _updateBossAdds.
+    const adds = gate.bossAdds;
+    this._adds = {
+      live: Math.max(0, adds?.live | 0),
+      total: Math.max(0, adds?.total | 0),
+      spawned: 0,
+      timer: BOSS_ADDS_DELAY,
+    };
+
     const rooms = dungeon.layout.rooms;
     this.rooms = rooms;
     // Entry is safe ground by construction (the shadow escort deploys there);
@@ -147,7 +219,8 @@ export class EncounterDirector {
     if (this._phase === 'boss') {
       // _killEnemy's boss branch skips _clearGate for encounter-driven worlds
       // (EDIT 6); the flip of bossActive is our death signal.
-      if (this._bossSpawned && !g.bossActive) this.onBossDeath();
+      if (this._bossSpawned && !g.bossActive) { this.onBossDeath(); return; }
+      if (this._bossSpawned) this._updateBossAdds(dt);
       return;
     }
 
@@ -215,7 +288,7 @@ export class EncounterDirector {
       this._budget = room.budget;
       this._roomSpawned = 0;
       this._spawnCursor = Math.floor(this.rnd() * Math.max(1, room.spawnPoints.length));
-      const first = Math.min(this.gate.waveSize, this._budget);
+      const first = Math.min(this.waveSize, this._budget);
       for (let i = 0; i < first; i++) this._spawnOne(room);
       this._trickle = TRICKLE_INTERVAL;
       return;
@@ -224,7 +297,7 @@ export class EncounterDirector {
     // COMBAT: meter the remainder, watch for the clear, rescue stray shadows.
     if (this._roomSpawned < this._budget) {
       this._trickle -= dt;
-      if (this._trickle <= 0 && g.enemies.length < this.gate.waveSize) {
+      if (this._trickle <= 0 && g.enemies.length < this.waveSize) {
         this._spawnOne(room);
         this._trickle = TRICKLE_INTERVAL;
       }
@@ -315,6 +388,36 @@ export class EncounterDirector {
   }
 
   // ---------------------------------------------------------------- boss
+
+  /**
+   * Trickle the boss chamber's pack in while the boss is alive.
+   *
+   * Deliberately NOT a wave: the pool is spread across the whole fight one body
+   * at a time, so the chamber is never empty and never a wall. Stops dead the
+   * moment the boss does — onBossDeath flips the phase out of 'boss' before
+   * this is reached again, so the exit walk is not a running fight.
+   */
+  _updateBossAdds(dt) {
+    const a = this._adds;
+    if (a.live <= 0 || a.spawned >= a.total) return;
+    const g = this.g;
+    // The chamber is sealed and this director is the only thing that spawns
+    // into it, so every non-boss entry in g.enemies is one of ours.
+    let live = 0;
+    for (const e of g.enemies) if (!e.isBoss) live++;
+    if (live >= a.live) return;
+    a.timer -= dt;
+    if (a.timer > 0) return;
+    a.timer = BOSS_ADDS_INTERVAL;
+    this._spawnOne(this.rooms[this.dungeon.layout.bossRoom]);
+    a.spawned++;
+    // Keep the run's own accounting honest. `killed` is scored against
+    // gate.enemies by the HUD and by the results row, and an add outside that
+    // total reads as "37 / 36 cleared". Incremented as each add actually
+    // LANDS — never by the whole pool up front — so a boss that dies early
+    // cannot leave the total holding bodies that were never made.
+    this.gate.enemies++;
+  }
 
   onBossDeath() {
     if (this._phase === 'exit' || this._phase === 'done') return;

@@ -13,7 +13,10 @@
 //  6. The OLD main.js gate really did halve the rate on 72/90/144 Hz.
 
 import { FrameClock, detectRefreshHz } from '../src/core/frameclock.js';
-import { Quality, TIERS } from '../src/core/quality.js';
+import {
+  Quality, TIERS,
+  skinnedShadowCeiling, skinnedBodyCensus, acquireSkinnedBody, releaseSkinnedBody,
+} from '../src/core/quality.js';
 
 let failures = 0;
 const ok = (cond, label, detail = '') => {
@@ -198,6 +201,43 @@ console.log('\nQuality governor');
     && typeof TIERS[t].cityChunkRadius === 'number'
     && typeof TIERS[t].instanceScale === 'number'), 'every tier carries the new spec fields',
     ORDER.map((t) => `${t}:${TIERS[t].maxFieldShadows}/${TIERS[t].cityChunkRadius}/${TIERS[t].instanceScale}`).join(' '));
+}
+{
+  // The shared skinned-body ceiling (quality.js). Asserted as MONOTONIC and as
+  // strictly above the tier's own field-shadow cap, because the two interact:
+  // if maxSkinnedBodies ever fell to or below maxFieldShadows, a full shadow
+  // company alone could consume the ceiling and every enemy in the gate would
+  // spawn as a procedural fallback — the failure this ceiling exists to stop,
+  // arriving through the ceiling itself.
+  const vals = ORDER.map((t) => TIERS[t].maxSkinnedBodies);
+  ok(vals.every((v) => Number.isInteger(v) && v > 0), 'every tier declares maxSkinnedBodies', vals.join('/'));
+  ok(vals.every((v, i) => i === 0 || v >= vals[i - 1]), 'maxSkinnedBodies rises with the tier', vals.join(' <= '));
+  ok(ORDER.every((t) => TIERS[t].maxSkinnedBodies > TIERS[t].maxFieldShadows),
+    'maxSkinnedBodies leaves room for enemies above the shadow field cap',
+    ORDER.map((t) => `${t}:${TIERS[t].maxSkinnedBodies}>${TIERS[t].maxFieldShadows}`).join(' '));
+
+  // The shadow sub-ceiling has to be reachable AND has to leave slack: at least
+  // one shadow may be skinned at every tier, and never the whole ceiling.
+  const shadowCaps = ORDER.map((t) => skinnedShadowCeiling(TIERS[t]));
+  ok(shadowCaps.every((v, i) => v >= 1 && v < TIERS[ORDER[i]].maxSkinnedBodies),
+    'the shadow share of the ceiling is >= 1 and never the whole thing',
+    ORDER.map((t, i) => `${t}:${shadowCaps[i]}/${TIERS[t].maxSkinnedBodies}`).join(' '));
+
+  // And the ledger itself: acquire/release must balance, and a release with
+  // nothing held must not mint slots (a double-dispose is a real code path —
+  // disposeCharacterModels disposes every live instance and each one releases).
+  const before = skinnedBodyCensus();
+  acquireSkinnedBody(false);
+  acquireSkinnedBody(true);
+  const held = skinnedBodyCensus();
+  releaseSkinnedBody(false);
+  releaseSkinnedBody(true);
+  releaseSkinnedBody(true);            // the double-release
+  const after = skinnedBodyCensus();
+  ok(held.bodies === before.bodies + 2 && held.shadows === before.shadows + 1,
+    'acquireSkinnedBody counts totals and shadows separately', JSON.stringify(held));
+  ok(after.bodies === before.bodies && after.shadows === before.shadows,
+    'releaseSkinnedBody is clamped — a double release mints nothing', JSON.stringify(after));
 }
 
 console.log('\nOld main.js gate, for the record');

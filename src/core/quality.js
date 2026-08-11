@@ -21,6 +21,7 @@ export const TIERS = {
     viewDistance: 130,
     anisotropy: 1,
     maxFieldShadows: 4,
+    maxSkinnedBodies: 12,
     cityChunkRadius: 2,
     instanceScale: 0.4,
   },
@@ -35,6 +36,7 @@ export const TIERS = {
     viewDistance: 180,
     anisotropy: 2,
     maxFieldShadows: 6,
+    maxSkinnedBodies: 16,
     cityChunkRadius: 3,
     instanceScale: 0.7,
   },
@@ -49,6 +51,7 @@ export const TIERS = {
     viewDistance: 240,
     anisotropy: 4,
     maxFieldShadows: 9,
+    maxSkinnedBodies: 20,
     cityChunkRadius: 4,
     instanceScale: 1.0,
   },
@@ -63,10 +66,108 @@ export const TIERS = {
     viewDistance: 300,
     anisotropy: 8,
     maxFieldShadows: 12,
+    maxSkinnedBodies: 24,
     cityChunkRadius: 4,
     instanceScale: 1.25,
   },
 };
+
+// --------------------------------------------------- skinned-body ceiling
+//
+// `maxSkinnedBodies` is the ONE ceiling on how many GLB-backed, skeleton-driven
+// bodies may stand in a scene at once — enemies, the boss, the player and the
+// bound shadow army all draw from it. It exists because characters.js and
+// creatures.js each carried a private budget (medium 14 apiece, and creatures
+// exempted shadows from theirs entirely), so nothing in the game had an opinion
+// about the TOTAL: a full shadow company stacked on top of a full wave instead
+// of trading against it.
+//
+// SIZED OFF MEASUREMENT, AND THE MEASUREMENT SAID SOMETHING SURPRISING.
+// tools/density-probe.mjs, E and D crawls on SwiftShader, composed peak frames:
+//
+//   a skinned body      ~5.5k geometry triangles (4.1k-8.5k across the packs),
+//                       ~15k of renderer.info.render.triangles once it has gone
+//                       through the main pass, the key light's depth map and the
+//                       glow pass, and ~7 draw calls
+//   the PROCEDURAL body ~0.5k geometry, ~1.4k frame triangles — and ~17 DRAW
+//                       CALLS, because it is six separate boxes and a weapon
+//                       where the skinned one is a single merged mesh
+//
+// So falling back past the ceiling buys triangles at the price of draw calls,
+// at roughly 14k triangles for 10 extra calls per body — a bad trade on a phone,
+// where calls are the tighter budget. (This is not news to the codebase: build
+// step 5 existed to take a character from 21.3 calls to <= 12, and the
+// procedural rig is what it was taking them FROM.)
+//
+// That reshapes what this ceiling is for. It is a SAFETY FENCE, not a routine
+// clamp: sized to sit above normal play at every tier, and to bite only where
+// the deepest gate meets the weakest device.
+//
+//   peak live bodies = maxFieldShadows + waveSize + player + boss
+//   low     4 + 12 + 2 = 18 vs 12  -> the C cavern sheds ~6 on a low phone
+//   medium  6 + 12 + 2 = 20 vs 16  -> C sheds ~4; E (14) and D (17) barely touch
+//   high    9 + 12 + 2 = 23 vs 20  -> C sheds ~3
+//   ultra  12 + 12 + 2 = 26 vs 24  -> C sheds ~2
+//
+// The SHADOW SUB-CEILING is the tier's own maxFieldShadows and nothing tighter.
+// A full company always fits; what it cannot do is take a slot an enemy would
+// have had, which is the "a big army trades against enemy count instead of
+// stacking on top of it" behaviour this fence was asked for — the trade happens
+// through the shared total, not by degrading the army for its own sake.
+
+/** The tier's total live skinned-body ceiling. */
+export function skinnedBodyCeiling(tier) {
+  const t = typeof tier === 'string' ? TIERS[tier] : tier;
+  const n = t?.maxSkinnedBodies;
+  return Number.isFinite(n) && n > 0 ? n : TIERS.medium.maxSkinnedBodies;
+}
+
+/** How many of those slots the bound shadow army may take. */
+export function skinnedShadowCeiling(tier) {
+  const t = typeof tier === 'string' ? TIERS[tier] : tier;
+  const n = t?.maxFieldShadows;
+  return Math.max(1, Math.min(skinnedBodyCeiling(tier) - 1,
+    Number.isFinite(n) && n > 0 ? n : TIERS.medium.maxFieldShadows));
+}
+
+// The ledger itself. Module-level rather than per-renderer because there is
+// exactly one scene at a time and both character modules are singletons for the
+// same reason; a second scene would need this to move, and nothing else.
+let _bodies = 0;
+let _shadowBodies = 0;
+
+/** Live counts, for tools and asserts. */
+export function skinnedBodyCensus() {
+  return { bodies: _bodies, shadows: _shadowBodies };
+}
+
+/**
+ * Is there room for one more? `isShadow` routes the caller to the shadow
+ * sub-ceiling as well as the total.
+ */
+export function skinnedBodyAvailable(tier, isShadow = false) {
+  if (_bodies >= skinnedBodyCeiling(tier)) return false;
+  if (isShadow && _shadowBodies >= skinnedShadowCeiling(tier)) return false;
+  return true;
+}
+
+/** Claim a slot. Callers that bypass the check (player, boss) still claim. */
+export function acquireSkinnedBody(isShadow = false) {
+  _bodies++;
+  if (isShadow) _shadowBodies++;
+}
+
+/** Hand a slot back. Clamped: a double-release must not mint free slots. */
+export function releaseSkinnedBody(isShadow = false) {
+  _bodies = Math.max(0, _bodies - 1);
+  if (isShadow) _shadowBodies = Math.max(0, _shadowBodies - 1);
+}
+
+/** Bulk release, for the model modules' own teardown counters. */
+export function releaseSkinnedBodies(bodies = 0, shadows = 0) {
+  _bodies = Math.max(0, _bodies - Math.max(0, bodies));
+  _shadowBodies = Math.max(0, _shadowBodies - Math.max(0, shadows));
+}
 
 const ORDER = ['low', 'medium', 'high', 'ultra'];
 

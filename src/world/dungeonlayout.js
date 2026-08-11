@@ -14,9 +14,13 @@
 //   decorRnd     = mulberry32((seed ^ 0x5f356495) >>> 0)   torches/columns/
 //                                                          props/alcoves
 //   encounterRnd = mulberry32((seed ^ 0x1f123bb5) >>> 0)   treasure roll
+//   coverRnd     = mulberry32((seed ^ 0x7feb352d) >>> 0)   interior cover field
 //
 // so decor tuning can never reshuffle rooms, and encounter tuning can never
 // move a wall. No Math.random, no Date.now, anywhere in this file.
+// coverRnd is its OWN stream and not a continuation of decorRnd for the same
+// reason: retuning how much cover a room carries must not move a single torch
+// sconce, because the sconces are what the 2-light pool anchors to.
 //
 // COORDINATES. The grid is w x h cells of `cell` = 2 m (matching citykit's
 // KIT_CELL and its 2 m wall modules). Grid +X = world +X ("e"), grid +Z =
@@ -42,66 +46,183 @@
 // corridor (-1 for the entry tunnel's junction, which leads outside).
 
 import { mulberry32 } from '../core/rng.js';
+// The ONE physical constant this generator shares with the sim: the height
+// every projectile flies at. config.js is THREE-free and DOM-free (its header
+// says so, and it imports only rng.js), so pulling it in keeps the plain-Node
+// soak working while removing the duplicated 1.2 that let the cover field be
+// designed for a height nothing fired at. See COVER_MIN_TOP below.
+import { PROJECTILE_Y } from '../game/config.js';
 
-// Every tunable per rank. `enemies` mirrors config.js GATES (E 12 / D 18 /
-// C 26) as the default room-budget total; Dungeon.build passes the live
-// gate.enemies through generateLayout's `enemies` option, so these defaults
-// only feed headless tests. E/D are the crawl kind; C is the STEP 8 cavern.
+// ---------------------------------------------------------------------------
+// ROOM SIZING IS MEASURED IN DASH UNITS. Read this before touching roomSize.
+// ---------------------------------------------------------------------------
+// config.js SKILLS.dash.distance = 7.5 m. A fighting room has to be sized
+// against that number or the movement skill has nowhere to go:
+//
+//   regular combat room, short axis >= 3 dashes = 3 x 7.5 = 22.5 m
+//     -> at CELL = 2 m that is 11.25 cells, so the SHORT-axis roll floor is
+//        12 cells = 24 m = 3.2 dashes. Three dashes is the minimum that lets
+//        a dodge land somewhere other than a wall and lets a pack flank.
+//   boss chamber, both axes >= 5 dashes = 5 x 7.5 = 37.5 m
+//     -> 19 cells = 38 m = 5.07 dashes (E), 21 cells = 42 m = 5.6 (D). Five
+//        is the kiting number: read a telegraph, dash out, circle, re-enter.
+//
+// The pre-wave-3 numbers were E rooms 5-8 x 4-6 cells = 10-16 x 8-12 m, i.e.
+// 1.1-1.6 dashes across the short axis — ONE dash crossed a whole room. The
+// boss was 9x7 cells = 18x14 m, under two dashes, and it was GROWN from a
+// regular roll so a crowded grid routinely under-delivered even that (measured
+// boss short axis 8-14 m over 60 seeds). Hence tryGenerate's step 5: the boss
+// chamber is now PLACED at its full size or the layout regenerates.
+//
+// GRID PACKING. Bigger rooms need a bigger grid, and the walk is a random
+// placer, so it needs slack on top of the raw area. Worst case in cells, each
+// rect inflated by its 1-cell rock shell:
+//   E: entry 9x7 = 63, 5 regular at 16x15 = 240 each = 1200, boss 20x20 = 400,
+//      ~7 corridors x 3x6 = ~126   ->  ~1789 of the 76x76 = 5776 grid = 31%.
+//   D: entry 63, 5 regular at 17x16 = 272 each = 1360, vault 21x17 = 357,
+//      boss 22x22 = 484, ~8 corridors = ~144  ->  ~2408 of 92x92 = 8464 = 28%.
+// Both clear comfortably with the 40-try-per-room placer (measured: 0 shallow
+// or failed layouts over 150 seeds per rank).
+// Room COUNT came down (E 5-6 -> 4-5, D 7-8 -> 5-6) to pay for the area: at
+// the old counts the enemy total needed to hold density would have tripled
+// run length, and the floor bbox would have doubled the nav-grid sweep.
+//
+// `enemies` is the nominal room-budget total and only feeds headless tests.
+// The live count is ROLLED PER RUN from config.js GATES[].enemyBand by
+// Dungeon.build, which passes it through generateLayout's `enemies` option.
 export const LAYOUT_PARAMS = {
   E: {
     kind: 'crawl',
-    grid: 48,                       // 48 x 48 cells = 96 m
-    rooms: [5, 6],                  // regular rooms, + entry + boss
-    roomSize: { w: [5, 8], d: [4, 6] },
-    bossSize: { w: 9, d: 7 },
+    grid: 76,                       // 76 x 76 cells = 152 m
+    rooms: [4, 5],                  // regular rooms, + entry + boss
+    // Entry is a deploy pad, not a fight room: it stays small so its floor
+    // area is not spent on the packing budget the fighting rooms need.
+    entrySize: { w: [6, 8], d: [5, 6] },
+    roomSize: { w: [12, 15], d: [12, 14] },   // 24-30 x 24-28 m (3.2-4.0 dashes)
+    bossSize: { w: 19, d: 19 },               // 38 x 38 m (5.07 dashes)
     vault: null,
     corridorWidths: [2],
-    corridorLen: [3, 6],
+    // PACING (wave 3-A2). Rooms grew 5.5x but corridors did not, so the walk
+    // between fights is now mostly room-crossing, not corridor: measured over
+    // 60 seeds the corridors are 5.4% of the E floor area and ~24% of the
+    // 151 m critical-path walk. Trimming the long tail 3-6 -> 2-5 cells
+    // (6-12 m -> 4-10 m) took the E critical-path walk 152.4 -> 143.0 m and D
+    // 184.3 -> 178.2 m over 150 seeds per rank, with boss depth unmoved
+    // (E mean 4.18 -> 4.15) and zero shallow or failed layouts. 2-4 measured
+    // 139.6 m but caps a corridor at 8 m, which flattens the reveal beat for
+    // 2.4 m more; 2-5 is the honest sweet spot. This is a ~6% lever, not the
+    // pacing fix — the fix is that rooms now carry cover and enemies, so the
+    // floor you cross is floor you fight on.
+    corridorLen: [2, 5],
     tunnelLen: [8, 10],
     loops: 1,
     minBossDepth: 3,
     wallHeight: 4,
     wallHeightLow: 2,               // face-'s' runs (fixed-camera occluders)
     torchSpacing: 6,
+    torchMinGap: 10,      // m between kept sconces (spread, see buildDecor)
+    torchCap: 40,         // hard cap; DRESS_LIMITS.torches is the render backstop
     propDensity: 'low',
     alcoves: false,
     treasure: { chance: 0.2, guaranteed: false },
-    fog: { near: 12, far: 34 },
-    enemies: 12,
+    // Fog far has to clear the room: at far 34 the opposite wall of a 38 m
+    // boss chamber was solid fog, so there was nothing to kite AROUND.
+    fog: { near: 13, far: 44 },
+    // Interior cover — see the INTERIOR COVER block above every constant.
+    cover: {
+      step: 7.0,          // candidate lattice pitch, m (just under one dash)
+      jitter: 1.8,        // per-point jitter, m — kills the lattice read
+      chance: 0.62,       // per-candidate keep roll
+      rubbleShare: 0.55,  // rubble vs pillar mix on the scatter
+      lane: 3.0,          // guaranteed clear floor between two footprints, m
+      wallInset: 3.2,     // footprint edge to room wall, m (perimeter ring)
+      doorClear: 5.5,     // door approach stays a clean lane, m
+      spawnClear: 1.6,    // clear margin around every spawn point, m
+      centreClear: 3.4,   // treasure chest + shrine footprint, m
+      bossClear: 4.5,     // the boss's rise anchor, m
+      exitClear: 3.5,     // the walk-out exit portal, m
+      ringFrac: 0.48,     // dais ring radius as a fraction of the boss half-span
+      ringSlots: 10,      // colonnade slots around that ring
+      ringKeep: 0.76,     // per-slot keep roll — a BROKEN colonnade
+      quadSlots: 7,       // rubble piles on the outer debris arc (see the arc
+                          // note in buildCover for why this moved 4 -> 7)
+      minPieces: 2,       // per-room floor; below it the lattice re-sweeps
+      rubbleCap: 24,      // per-gate 788-tri budget guard; see the cap note
+    },
+    // Nominal = the midpoint of GATES.E enemyBand [30, 42], headless only. It
+    // is written out rather than imported because config.js imports nothing
+    // from here and this file must stay THREE-free and standalone for the Node
+    // soak — so the ONE rule is: move a band in config.js, move the midpoint
+    // here in the same edit, or the generation soak starts testing a lighter
+    // dungeon than the one that ships. (30 + 42) / 2 = 36.
+    enemies: 36,
   },
   D: {
     kind: 'crawl',
-    grid: 56,                       // 56 x 56 cells = 112 m
-    rooms: [7, 8],
-    roomSize: { w: [5, 9], d: [4, 7] },
-    bossSize: { w: 10, d: 8 },
-    vault: { w: [10, 12], d: [6, 8] },  // one vault hall per layout
+    grid: 92,                       // 92 x 92 cells = 184 m
+    rooms: [5, 6],
+    entrySize: { w: [6, 8], d: [5, 6] },
+    roomSize: { w: [12, 16], d: [12, 15] },   // 24-32 x 24-30 m
+    bossSize: { w: 21, d: 21 },               // 42 x 42 m (5.6 dashes)
+    vault: { w: [17, 20], d: [13, 16] },      // one vault hall, 34-40 x 26-32 m
     corridorWidths: [2, 3],
-    corridorLen: [3, 6],
+    corridorLen: [2, 5],            // see the E note — same measurement, D
     tunnelLen: [9, 11],
     loops: 2,
-    minBossDepth: 4,
+    minBossDepth: 3,
     wallHeight: 4,
     wallHeightLow: 2,
     torchSpacing: 7,
+    torchMinGap: 11,
+    torchCap: 40,
     propDensity: 'medium',
     alcoves: true,
     treasure: { chance: 1, guaranteed: true },
-    fog: { near: 12, far: 36 },
-    enemies: 18,
+    fog: { near: 13, far: 46 },
+    // D is the ossuary: propDensity is already 'medium', so its cover field is
+    // a shade denser and its colonnade a slot longer than E's. Everything else
+    // is E's numbers — the clearances are body-sized, not rank-sized.
+    cover: {
+      step: 7.0,
+      jitter: 1.8,
+      chance: 0.68,
+      rubbleShare: 0.55,
+      lane: 3.0,
+      wallInset: 3.2,
+      doorClear: 5.5,
+      spawnClear: 1.6,
+      centreClear: 3.4,
+      bossClear: 4.5,
+      exitClear: 3.5,
+      ringFrac: 0.48,
+      ringSlots: 12,
+      ringKeep: 0.76,
+      quadSlots: 8,       // E's 7 + one slot for the wider 42 m chamber
+      minPieces: 2,
+      rubbleCap: 24,
+    },
+    enemies: 52,          // nominal = midpoint of GATES.D enemyBand [44, 60]
   },
   C: {
     kind: 'cavern',                 // STEP 8 — one huge organic chamber
-    grid: 64,                       // 64 x 64 cells = 128 m
+    grid: 80,                       // 80 x 80 cells = 160 m
     rooms: [4, 5],                  // encounter ZONES (combat), + entry + boss
-    discs: [9, 14],                 // disc-union random walk, disc count
+    discs: [11, 16],                // disc-union random walk, disc count
     discR: [8, 18],                 // walk disc radius, metres
     grottos: 2,                     // attached side grottos (3rd is the boss's)
     grottoR: [6, 9],                // side-grotto radius, metres
-    bossR: [10, 12],                // boss grotto radius, metres (~24x20 room)
+    // DASH UNITS, boss half: the grotto is the one C space that SEALS (neck
+    // membrane), so it is the one that has to satisfy the 5-dash rule on its
+    // own — 19-22 m radius = 38-44 m across = 5.1-5.9 dashes. It was 10-12 m
+    // radius (20-24 m, 2.7-3.2 dashes): a sealed pen, not an arena.
+    bossR: [19, 22],                // boss grotto radius, metres
     neckGap: [2, 3],                // rock cells between mass and boss grotto
-    zoneRadius: 9,                  // encounter trigger disc radius, metres
-    zoneSpacing: 14,                // min zone centre-to-centre, metres
+    // Zones are TRIGGER discs in open cavern, not walls — the space a fight
+    // gets is the surrounding mass (measured >= 40 m of open floor around
+    // every zone centre in the soak), so the 3-dash rule is already satisfied
+    // by the cavern itself and this radius only sets how far the aggro reaches.
+    zoneRadius: 10,                 // encounter trigger disc radius, metres
+    zoneSpacing: 16,                // min zone centre-to-centre, metres
     tunnelLen: [10, 12],
     tunnelWidth: 3,                 // cells (6 m)
     loops: 0,
@@ -119,7 +240,10 @@ export const LAYOUT_PARAMS = {
       doorClear: 3.0,               // clearing radius around door centres, m
     },
     fog: { near: 18, far: 55 },
-    enemies: 26,
+    // No `cover` block on purpose: the cavern's cover IS the stalagmite field
+    // above (spires at top 2.2-4.2 m block the 1.2 m caster line exactly like
+    // the crawl's rubble), so a second placer here would double-dress it.
+    enemies: 57,          // nominal = midpoint of GATES.C enemyBand [48, 66]
   },
 };
 
@@ -191,15 +315,16 @@ function tryGenerate(rank, params, enemies, seed) {
   const layoutRnd = mulberry32((seed ^ 0x9e3779b9) >>> 0);
   const decorRnd = mulberry32((seed ^ 0x5f356495) >>> 0);
   const encounterRnd = mulberry32((seed ^ 0x1f123bb5) >>> 0);
+  const coverRnd = mulberry32((seed ^ 0x7feb352d) >>> 0);
 
   const w = params.grid;
   const h = params.grid;
   const mask = new Uint8Array(w * h);         // 0 rock, 1 floor
-  // Ownership per cell: -1 rock, -2 corridor, >= 0 room id. Drives the pad
-  // checks that keep 1 cell of rock between any two floor areas that are not
-  // joined by a registered door — without it two rooms could touch and leak
-  // enemies past a sealed membrane.
-  const owner = new Int16Array(w * h).fill(-1);
+  // NOTE: there is no per-cell ownership array any more. Its only reader was
+  // the boss re-stamp's grow test, and the boss is now placed at full size
+  // through the same placeable() pad check every other room uses — which reads
+  // the mask alone and is what actually keeps 1 cell of rock between any two
+  // floor areas not joined by a registered door.
   const at = (gx, gz) => gx + gz * w;
   const inBounds = (gx, gz) => gx >= 1 && gz >= 1 && gx <= w - 2 && gz <= h - 2;
 
@@ -207,12 +332,9 @@ function tryGenerate(rank, params, enemies, seed) {
   const corridors = [];  // { gx, gz, gw, gd }
   const doors = [];      // { plane:'x'|'z', at, lo, hi, roomA, roomB }
 
-  function carve(gx, gz, gw, gd, own) {
+  function carve(gx, gz, gw, gd) {
     for (let z = gz; z < gz + gd; z++) {
-      for (let x = gx; x < gx + gw; x++) {
-        mask[at(x, z)] = 1;
-        owner[at(x, z)] = own;
-      }
+      for (let x = gx; x < gx + gw; x++) mask[at(x, z)] = 1;
     }
   }
 
@@ -261,24 +383,32 @@ function tryGenerate(rank, params, enemies, seed) {
 
   // --- step 2: entry room near the +Z edge, tunnel south of it -------------
   const tunnelLen = randint(layoutRnd, params.tunnelLen[0], params.tunnelLen[1]);
-  const egw = randint(layoutRnd, params.roomSize.w[0], params.roomSize.w[1]);
-  const egd = randint(layoutRnd, params.roomSize.d[0], params.roomSize.d[1]);
+  // Entry uses its OWN size band (params.entrySize): it is the safe deploy pad
+  // the shadow escort lands in, never a fight room, so spending 600 m2 of the
+  // packing budget on it would only cost the fighting rooms their space.
+  const entrySize = params.entrySize || params.roomSize;
+  const egw = randint(layoutRnd, entrySize.w[0], entrySize.w[1]);
+  const egd = randint(layoutRnd, entrySize.d[0], entrySize.d[1]);
   const egx = Math.floor((w - egw) / 2) + randint(layoutRnd, -2, 2);
   const egz = h - 1 - tunnelLen - egd;         // bottom row + tunnel + 1 border
-  carve(egx, egz, egw, egd, 0);
+  carve(egx, egz, egw, egd);
   rooms.push({ id: 0, gx: egx, gz: egz, gw: egw, gd: egd, kind: 'entry' });
 
   // Entry tunnel: 2 cells wide, centred on the entry room, running to +Z.
   const tx0 = egx + Math.floor((egw - 2) / 2);
-  carve(tx0, egz + egd, 2, tunnelLen, -2);
+  carve(tx0, egz + egd, 2, tunnelLen);
   corridors.push({ gx: tx0, gz: egz + egd, gw: 2, gd: tunnelLen });
   // Junction door (the membrane the intro seals behind you). roomB -1: the
   // far side is the outside world, not a room.
   doors.push({ plane: 'z', at: egz + egd, lo: tx0, hi: tx0 + 1, roomA: 0, roomB: -1 });
 
   // --- step 3: frontier room walk ------------------------------------------
-  const regular = randint(layoutRnd, params.rooms[0], params.rooms[1]);
-  const targetRooms = regular + 1;             // +1: the future boss room
+  // The boss chamber is NO LONGER one of these: it gets its own placement pass
+  // at full size below, because growing a regular room toward bossSize
+  // under-delivered on a crowded grid and the boss arena is the one room the
+  // 5-dash rule cannot be allowed to miss.
+  const targetRooms = randint(layoutRnd, params.rooms[0], params.rooms[1]);
+  const regular = targetRooms;
   // D carries one oversized vault hall; pick which placement slot it is now
   // so the roll count per room stays fixed.
   const vaultSlot = params.vault ? randint(layoutRnd, 0, targetRooms - 1) : -1;
@@ -303,8 +433,8 @@ function tryGenerate(rank, params, enemies, seed) {
       if (!placeable([cand.corridor, cand.room], [cand.allowed])) continue;
 
       const id = rooms.length;
-      carve(cand.room.gx, cand.room.gz, cand.room.gw, cand.room.gd, id);
-      carve(cand.corridor.gx, cand.corridor.gz, cand.corridor.gw, cand.corridor.gd, -2);
+      carve(cand.room.gx, cand.room.gz, cand.room.gw, cand.room.gd);
+      carve(cand.corridor.gx, cand.corridor.gz, cand.corridor.gw, cand.corridor.gd);
       rooms.push({ id, gx: cand.room.gx, gz: cand.room.gz, gw: cand.room.gw, gd: cand.room.gd, kind: 'combat' });
       corridors.push(cand.corridor);
       doors.push({ ...cand.doorA, roomA: src.id, roomB: id });
@@ -315,34 +445,60 @@ function tryGenerate(rank, params, enemies, seed) {
     placed++;
   }
   // Too few rooms is as bad as a shallow tree: signal regen via depth -1.
-  if (placed < params.rooms[0] + 1) return { depth: -1 };
+  if (placed < params.rooms[0]) return { depth: -1 };
 
   // --- step 4: loops --------------------------------------------------------
   for (let li = 0; li < params.loops; li++) {
     tryLoop(rooms, doors, corridors, layoutRnd, placeable, carve);
   }
 
-  // --- step 5: boss room = deepest room, re-stamped larger ------------------
-  const graph = adjacency(rooms.length, doors);
-  const depths = bfsDepths(graph, 0);
-  let boss = -1;
-  let bossDepth = -1;
+  // --- step 5: boss chamber, placed at FULL size off the deepest room -------
+  // Order candidate anchors deepest-first (ties broken by distance from the
+  // entry, then id, so the order is a pure function of the layout). The boss
+  // hangs off the first anchor that has bossSize-worth of clean rock beside
+  // it, which keeps it a sealed leaf one door deep from the run's far end.
+  // No anchor works -> depth -1 -> generateLayout regenerates from seed+1,
+  // and a full-size arena is worth a regeneration.
+  const preGraph = adjacency(rooms.length, doors);
+  const preDepths = bfsDepths(preGraph, 0);
   const entryC = roomCentre(rooms[0]);
-  let bossDist = -1;
-  for (const r of rooms) {
-    if (r.id === 0) continue;
-    const d = depths[r.id];
-    const c = roomCentre(r);
-    const dist = (c.x - entryC.x) ** 2 + (c.z - entryC.z) ** 2;
-    if (d > bossDepth || (d === bossDepth && dist > bossDist)) {
-      boss = r.id; bossDepth = d; bossDist = dist;
+  const anchors = rooms.filter((r) => r.id !== 0).sort((a, b) => {
+    if (preDepths[b.id] !== preDepths[a.id]) return preDepths[b.id] - preDepths[a.id];
+    const ca = roomCentre(a);
+    const cb = roomCentre(b);
+    const da = (ca.x - entryC.x) ** 2 + (ca.z - entryC.z) ** 2;
+    const db = (cb.x - entryC.x) ** 2 + (cb.z - entryC.z) ** 2;
+    return (db - da) || (a.id - b.id);
+  });
+  let boss = -1;
+  for (const src of anchors) {
+    for (let tries = 0; tries < 20 && boss < 0; tries++) {
+      const dir = rollDir(layoutRnd);
+      const cw = params.corridorWidths[
+        Math.floor(layoutRnd() * params.corridorWidths.length)];
+      const len = randint(layoutRnd, params.corridorLen[0], params.corridorLen[1]);
+      const cand = corridorAndRoom(src, dir, cw, len,
+        params.bossSize.w, params.bossSize.d, layoutRnd);
+      if (!cand) continue;
+      if (!placeable([cand.corridor, cand.room], [cand.allowed])) continue;
+      const id = rooms.length;
+      carve(cand.room.gx, cand.room.gz, cand.room.gw, cand.room.gd);
+      carve(cand.corridor.gx, cand.corridor.gz, cand.corridor.gw, cand.corridor.gd);
+      rooms.push({ id, gx: cand.room.gx, gz: cand.room.gz, gw: cand.room.gw, gd: cand.room.gd, kind: 'boss' });
+      corridors.push(cand.corridor);
+      doors.push({ ...cand.doorA, roomA: src.id, roomB: id });
+      doors.push({ ...cand.doorB, roomA: id, roomB: src.id });
+      boss = id;
     }
+    if (boss >= 0) break;
   }
-  if (boss < 0 || bossDepth < 0) return { depth: -1 };
-  rooms[boss].kind = 'boss';
-  growRoom(rooms[boss], params.bossSize, mask, owner, w, h, at, inBounds, carve);
+  if (boss < 0) return { depth: -1 };
 
   // --- step 6/8: classification + critical path -----------------------------
+  const graph = adjacency(rooms.length, doors);
+  const depths = bfsDepths(graph, 0);
+  const bossDepth = depths[boss];
+  if (!(bossDepth > 0)) return { depth: -1 };
   const criticalPath = bfsPath(graph, 0, boss);
   pickTreasure(rooms, graph, criticalPath, params.treasure, encounterRnd);
 
@@ -400,6 +556,10 @@ function tryGenerate(rank, params, enemies, seed) {
 
   // --- step 10: decor anchors (decorRnd only) -------------------------------
   const decor = buildDecor(outRooms, outDoors, wallRuns, params, decorRnd);
+  // --- step 11: interior cover (coverRnd only) ------------------------------
+  // Runs after spawn points exist (step 9) because the placer has to keep them
+  // clear, and on its own stream so cover tuning cannot move a torch.
+  decor.cover = buildCover(outRooms, outDoors, params, coverRnd, boss);
 
   return {
     kind: 'crawl',
@@ -545,7 +705,7 @@ function tryLoop(rooms, doors, corridors, rnd, placeable, carve) {
     if (!cand) continue;
     if (!placeable(cand.rects, cand.allowed)) continue;
     for (const r of cand.rects) {
-      carve(r.gx, r.gz, r.gw, r.gd, -2);
+      carve(r.gx, r.gz, r.gw, r.gd);
       corridors.push(r);
     }
     doors.push({ ...cand.doorA, roomA: A.id, roomB: B.id });
@@ -635,57 +795,6 @@ function loopCandidate(A, B, cw, rnd) {
 // (identified by whether it is the low-side room `low`).
 function aSide(room, low, lowDoor, highDoor) {
   return room === low ? lowDoor : highDoor;
-}
-
-// ---------------------------------------------------------------------------
-// boss re-stamp
-// ---------------------------------------------------------------------------
-
-// Grow the deepest room toward params.bossSize by annexing rock rows/columns.
-// A side refuses to grow when its new cells' 1-cell shell would touch any
-// floor that is not this room's own — corridor junctions sit in that shell, so
-// connected sides stay put and door geometry never moves. Growth can therefore
-// under-deliver on a crowded grid; that is accepted (the arena the fight needs
-// is "bigger than a regular room", not "exactly 9x7").
-function growRoom(room, size, mask, owner, w, h, at, inBounds, carve) {
-  const clearFor = (gx, gz, gw, gd) => {
-    for (let z = gz; z < gz + gd; z++) {
-      for (let x = gx; x < gx + gw; x++) {
-        if (!inBounds(x, z) || mask[at(x, z)]) return false;
-        for (let dz = -1; dz <= 1; dz++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const nx = x + dx;
-            const nz = z + dz;
-            if (nx < 0 || nz < 0 || nx >= w || nz >= h) continue;
-            if (mask[at(nx, nz)] && owner[at(nx, nz)] !== room.id) return false;
-          }
-        }
-      }
-    }
-    return true;
-  };
-  // Fixed side order, north (deeper into the dungeon) first.
-  const sides = ['n', 'w', 'e', 's'];
-  let guard = 32;
-  let grew = true;
-  while (grew && guard-- > 0 && (room.gw < size.w || room.gd < size.d)) {
-    grew = false;
-    for (const side of sides) {
-      if (side === 'n' && room.gd < size.d && clearFor(room.gx, room.gz - 1, room.gw, 1)) {
-        carve(room.gx, room.gz - 1, room.gw, 1, room.id);
-        room.gz -= 1; room.gd += 1; grew = true;
-      } else if (side === 's' && room.gd < size.d && clearFor(room.gx, room.gz + room.gd, room.gw, 1)) {
-        carve(room.gx, room.gz + room.gd, room.gw, 1, room.id);
-        room.gd += 1; grew = true;
-      } else if (side === 'w' && room.gw < size.w && clearFor(room.gx - 1, room.gz, 1, room.gd)) {
-        carve(room.gx - 1, room.gz, 1, room.gd, room.id);
-        room.gx -= 1; room.gw += 1; grew = true;
-      } else if (side === 'e' && room.gw < size.w && clearFor(room.gx + room.gw, room.gz, 1, room.gd)) {
-        carve(room.gx + room.gw, room.gz, 1, room.gd, room.id);
-        room.gw += 1; grew = true;
-      }
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -918,6 +1027,7 @@ function buildDecor(rooms, doors, wallRuns, params, rnd) {
 
   // Torch sconces: along every wall run, one per ~torchSpacing metres, phase
   // jittered per run so parallel corridor walls alternate instead of pairing.
+  const rawTorches = [];
   for (const run of wallRuns) {
     const len = Math.max(run.w, run.d);
     if (len < params.torchSpacing * 0.7) continue;
@@ -926,12 +1036,36 @@ function buildDecor(rooms, doors, wallRuns, params, rnd) {
     let s = params.torchSpacing * (0.3 + rnd() * 0.4);
     for (; s < len; s += params.torchSpacing) {
       const t = s - len / 2;
-      torches.push({
+      rawTorches.push({
         x: run.x + (along === 'x' ? t : 0),
         z: run.z + (along === 'z' ? t : 0),
         yaw,
       });
     }
+  }
+  // SPATIAL thinning, then a hard cap. Wave-3 rooms are ~5x the old area, so
+  // the raw run-walk now yields 120+ sconces where it used to yield ~50 — and
+  // the renderer's per-role cap took the FIRST n of them, which is scan order
+  // (every n-face run, then s, then e, then w). That put every sconce in one
+  // band of the dungeon and left whole rooms with none, which matters because
+  // the sconce anchors are what the 2-light pool retargets to: no anchor in
+  // the room means the room is lit by fill alone. Greedy min-gap keeps the
+  // survivors spread over the whole floor plan instead, and the even-stride
+  // backstop below preserves that spread if the cap still bites.
+  const gap2 = (params.torchMinGap || 0) ** 2;
+  for (const t of rawTorches) {
+    let clear = true;
+    for (const k of torches) {
+      if ((t.x - k.x) ** 2 + (t.z - k.z) ** 2 < gap2) { clear = false; break; }
+    }
+    if (clear) torches.push(t);
+  }
+  const cap = params.torchCap || 0;
+  if (cap > 0 && torches.length > cap) {
+    const strided = [];
+    for (let i = 0; i < cap; i++) strided.push(torches[Math.floor((i * torches.length) / cap)]);
+    torches.length = 0;
+    torches.push(...strided);
   }
 
   // Columns: room corners (1 m inset), plus one beside every 3rd door.
@@ -991,9 +1125,383 @@ function buildDecor(rooms, doors, wallRuns, params, rnd) {
     }
   }
 
-  // crystals/stalagmites are the cavern kind's slots — empty here so every
-  // consumer sees one decor shape regardless of kind.
-  return { torches, columns, props, alcoves, crystals: [], stalagmites: [] };
+  // crystals/stalagmites are the cavern kind's slots, cover is filled by
+  // buildCover off its own stream — empty here so every consumer sees one
+  // decor shape regardless of kind.
+  return { torches, columns, props, alcoves, crystals: [], stalagmites: [], cover: [] };
+}
+
+// ---------------------------------------------------------------------------
+// INTERIOR COVER — what makes a big room a fight instead of a walk.
+// ---------------------------------------------------------------------------
+// Wave 3 grew the rooms ~5.5x (see the DASH UNITS block at the top) because the
+// owner wanted dashing and dodging to mean something, "especially for the boss
+// room". Growing them alone did not deliver that. buildDecor above only ever
+// puts columns at the four room CORNERS, so a 38 x 38 m E boss chamber measured
+// 0 blocked cells out of 1296 on a 1 m grid at chest height, and 0 of 1500
+// random sightlines blocked, on every seed probed. An empty box is not an
+// arena: there is nothing to break line of sight on and nothing to dodge
+// behind, only more floor to cross.
+//
+// So every non-entry room now carries a seed-derived INTERIOR cover field,
+// generated here as pure numbers and rendered + registered by dungeon.js
+// _buildDressing. Three rules decide every constant below.
+//
+//   (a) COVER MUST BREAK LINE OF SIGHT AT THE HEIGHT BOLTS ACTUALLY FLY.
+//       Every projectile in the game travels in one horizontal plane at
+//       config.js PROJECTILE_Y (1.6 m) — see the BOLT PLANE block there — so a
+//       piece is only cover if its collision `top` clears it. COVER_MIN_TOP
+//       below is that rule as a number, and tools/dungeon-gen-test.mjs asserts
+//       every kind against it AND probes the built field's lineBlocked at
+//       exactly PROJECTILE_Y.
+//       This was the first pass's second hole: the field was designed and
+//       verified at feetY 1.2 while the boss fired from 2.4. rubble's top is
+//       1.75 — measured across one pile at 4.2 m each side, lineBlocked was
+//       TRUE at 1.2 and FALSE at 2.2 — so a third of the boss chamber's cover
+//       would still not have stopped a boss bolt even once the hit test was
+//       fixed. One plane, one number, one assert.
+//       Kerb-height clutter (crates/pots at top 0.4) deliberately does not
+//       clear it — which is precisely why the existing prop clusters never
+//       registered as cover at all.
+//   (b) COVER MUST LEAVE DASH LANES. dash = 7.5 m. `lane` is the guaranteed
+//       clear floor between any two pieces' world-aligned footprints; at 3.0 m
+//       the tightest gap in a room is ~6 body widths and 40% of a dash. With
+//       `wallInset` holding every piece 3.2 m off the walls, an unbroken
+//       perimeter ring survives in every room, so no roll can seal one. That
+//       is asserted, not assumed: tools/dungeon-gen-test.mjs flood-fills the
+//       real ObstacleField at body radius and requires 100% of each room's
+//       walkable floor to be one connected component.
+//   (c) COVER MUST NOT LAND ON WHAT THE GAME PUTS THERE LATER: door
+//       approaches, spawn points, the treasure chest, the boss's rise anchor,
+//       the exit portal. Each has a named clearance in params.cover.
+// Exported: dungeon.js _buildCover registers collision straight off this table
+// and tools/ probe it, so the footprint a test measures is the footprint the
+// player collides with — there is exactly one copy of these numbers.
+// Rule (a) as a number. A cover piece's collision `top` must clear the bolt
+// plane with margin: 1.6 + 0.1 = 1.7 m. The 0.1 m is not decoration — bolts are
+// a 0.3 m icosahedron tested at radius 0.25, so a piece whose top landed
+// exactly on the plane would clip bolts through its upper rim. rubble at 1.75
+// is the tightest kind and clears it by 5 cm; anything new that does not clear
+// COVER_MIN_TOP is scenery, not cover, and dungeon-gen-test fails it.
+export const COVER_MIN_TOP = PROJECTILE_Y + 0.1;
+
+export const COVER_KINDS = {
+  // Collision footprint half-extents in the piece's LOCAL frame (x = long
+  // axis) plus the collision top, sized from public/models/dungeonkit.json:
+  //   pillar  dungeon_pillar        0.75 x 2.00 x 0.75 (136 tris), drawn to
+  //           4 m via dungeon.js COLUMN_HEIGHT — full-height, always blocks
+  //   rubble  dungeon_rubble_large  4.06 x 1.75 x 1.59 (788 tris) — the
+  //           collapsed-wall pile; at 194 tris per metre of cover it is the
+  //           cheapest line-of-sight blocker in the kit, so it carries the
+  //           bulk of the field
+  //   stub    dungeon_wall_broken   2.00 x 2.00 x 0.50 (784 tris) — a standing
+  //           fragment of wall; only the boss colonnade uses it
+  // Every footprint is held just inside its model so a body never visibly
+  // clips the mesh it is hiding behind.
+  // 0.38 = the pillar's 0.375 m model half-width rounded up a hair, so a body
+  // stops a few millimetres short instead of visibly clipping the mesh.
+  pillar: { shape: 'circle', hx: 0.38, hz: 0.38, r: 0.38, top: Infinity },
+  rubble: { shape: 'box', hx: 1.95, hz: 0.75, top: 1.75, sx: 1, sy: 1, sz: 1 },
+  // The stub is STRETCHED, and the footprint below already includes it.
+  // dungeon_wall_broken is authored to the kit's 2 m storey; dropped 1:1 into a
+  // 38 m chamber under 4 m walls it read as a crate on the eye-level frame, not
+  // as the fragment of a wall that used to enclose the dais. 1.8 x 1.4 makes it
+  // 3.6 m wide and 2.8 m tall, which reads as ruined architecture from both the
+  // aerial and the player's camera. It costs nothing: same InstancedMesh, same
+  // 784 triangles, just a bigger matrix. Collision follows the visual —
+  // hx = 0.95 * 1.8 = 1.71 (held at 1.70), top = 2.0 * 1.4 = 2.8 — and depth is
+  // left at 1 so it stays a wall rather than becoming a block.
+  stub: { shape: 'box', hx: 1.70, hz: 0.25, top: 2.8, sx: 1.8, sy: 1.4, sz: 1 },
+};
+
+/**
+ * The boss's rise anchor: the chamber centre pushed a quarter of the room away
+ * from its door, so the rise reads from the entrance.
+ *
+ * Exported because TWO callers need the byte-identical point — Dungeon.bossSpawn
+ * places the boss on it at runtime, and buildCover below must keep it clear of
+ * scenery. Two copies of this formula would drift the first time either was
+ * tuned, and the symptom would be a boss rising inside a pillar.
+ * @returns {{x:number,z:number,dx:number,dz:number}} dx/dz = unit door->centre
+ */
+export function bossAnchor(room, door) {
+  const c = room.centre;
+  let dx = 0;
+  let dz = -1;
+  if (door) {
+    dx = c.x - door.x;
+    dz = c.z - door.z;
+    const len = Math.hypot(dx, dz) || 1;
+    dx /= len; dz /= len;
+  }
+  return {
+    x: Math.min(room.x + room.w - 1.5, Math.max(room.x + 1.5, c.x + dx * room.w * 0.25)),
+    z: Math.min(room.z + room.d - 1.5, Math.max(room.z + 1.5, c.z + dz * room.d * 0.25)),
+    dx,
+    dz,
+  };
+}
+
+/** Same contract for the walk-out exit portal: further along the same axis. */
+export function exitAnchor(room, door) {
+  const c = room.centre;
+  const { dx, dz } = bossAnchor(room, door);
+  return {
+    x: Math.min(room.x + room.w - 2.2, Math.max(room.x + 2.2, c.x + dx * room.w * 0.42)),
+    z: Math.min(room.z + room.d - 2.2, Math.max(room.z + 2.2, c.z + dz * room.d * 0.42)),
+    dx,
+    dz,
+  };
+}
+
+/**
+ * Build the interior cover field. coverRnd ONLY.
+ * @returns {Array<{x,z,yaw,kind,room,ex,ez}>} world metres; ex/ez are the
+ *   world-aligned footprint half-extents dungeon.js registers collision from.
+ */
+function buildCover(rooms, doors, params, rnd, bossRoomId) {
+  const cfg = params.cover;
+  const out = [];
+  if (!cfg) return out;
+
+  // World-aligned AABB half-extents of a yawed rect — the same
+  // |hx·cos| + |hz·sin| bound ObstacleField.build() computes. It over-estimates
+  // a diagonally yawed piece, and over-estimating can only WIDEN a lane, so
+  // the conservative direction is the safe one here.
+  const extents = (kind, yaw) => {
+    const k = COVER_KINDS[kind];
+    const c = Math.abs(Math.cos(yaw));
+    const s = Math.abs(Math.sin(yaw));
+    return { ex: k.hx * c + k.hz * s, ez: k.hx * s + k.hz * c };
+  };
+
+  for (const r of rooms) {
+    // The entry room is a deploy pad, not a fight room — the escort spawns
+    // there on arrival and the auto-walk intro crosses it. Keep it empty.
+    if (r.kind === 'entry') continue;
+    const isBoss = r.id === bossRoomId;
+    const placed = [];
+    const myDoors = r.doors.map((id) => doors[id]).filter(Boolean);
+    // Named keep-outs: points the GAME will occupy later, which the placer has
+    // no other way to know about.
+    const keepOut = [];
+    if (isBoss) {
+      const a = bossAnchor(r, myDoors[0] || null);
+      const e = exitAnchor(r, myDoors[0] || null);
+      keepOut.push({ x: a.x, z: a.z, r: cfg.bossClear });
+      keepOut.push({ x: e.x, z: e.z, r: cfg.exitClear });
+    }
+    if (r.kind === 'treasure') {
+      // encounters.js raises the weapon chest on the room centre and
+      // _placeShrine puts the statue up to 1.8 m off it.
+      keepOut.push({ x: r.centre.x, z: r.centre.z, r: cfg.centreClear });
+    }
+    // The boss chamber's dais: nothing but the colonnade itself inside this
+    // radius, so the fight always opens on clean floor.
+    const ringR = isBoss ? cfg.ringFrac * Math.min(r.w, r.d) * 0.5 : 0;
+
+    const tryPut = (x, z, yaw, kind, onRing = false) => {
+      const { ex, ez } = extents(kind, yaw);
+      // (b) perimeter ring: the footprint stays wallInset off every room wall.
+      if (x - ex < r.x + cfg.wallInset || x + ex > r.x + r.w - cfg.wallInset) return false;
+      if (z - ez < r.z + cfg.wallInset || z + ez > r.z + r.d - cfg.wallInset) return false;
+      // (c) door approach lanes — a piece parked in a doorway is a soft lock
+      // for a pack routed through it by the flow field.
+      const reach = Math.max(ex, ez);
+      for (const d of myDoors) {
+        if (Math.hypot(x - d.x, z - d.z) < cfg.doorClear + reach) return false;
+      }
+      // NOTE ON SPAWN POINTS. They are deliberately NOT a rejection test here.
+      // spawnPointsFor emits every open cell thinned to 2.4 m, so a 38 x 38 m
+      // boss chamber carries 110 of them — they blanket the floor, and treating
+      // each as a keep-out rejected 100% of candidates (measured: 1 piece over
+      // the whole E dungeon). They are a menu, not a set of fixed anchors. The
+      // invariant that actually matters — no enemy ever rises inside a rock —
+      // is enforced the other way round, by PRUNING the menu after the field is
+      // placed. See the prune pass at the end of this function.
+      for (const k of keepOut) {
+        if (Math.hypot(x - k.x, z - k.z) < k.r + reach) return false;
+      }
+      // The dais stays clear of scatter; ring pieces ARE the dais edge.
+      if (ringR && !onRing && Math.hypot(x - r.centre.x, z - r.centre.z) < ringR + cfg.lane) return false;
+      // (b) dash lanes between pieces.
+      for (const q of placed) {
+        if (Math.abs(q.x - x) < q.ex + ex + cfg.lane
+          && Math.abs(q.z - z) < q.ez + ez + cfg.lane) return false;
+      }
+      // `anchor` marks the boss chamber's designed pieces (colonnade + debris
+      // arc) as opposed to lattice scatter. The rubble cap below downgrades
+      // scatter first, so a busy gate can never quietly turn the boss arena's
+      // heavy cover into thin pillars — that arc IS the kite loop.
+      const rec = { x, z, yaw, kind, room: r.id, ex, ez, anchor: onRing };
+      placed.push(rec);
+      out.push(rec);
+      return true;
+    };
+
+    // --- boss chamber: a BROKEN COLONNADE ring, placed first ---------------
+    // The identity beat. A ring of alternating standing pillars and collapsed
+    // wall fragments at ringR draws the edge of a ruined rotunda around the
+    // dais the floor shader already tints paler (dungeon.js BOSS_FLOOR_MIX):
+    // the chamber reads as a place with a centre, and the ring gives the kite
+    // loop a shape to run — dash out through a gap, circle the outside, come
+    // back in through another. Slots are dropped on a roll (ringKeep), and the
+    // keep-out around the boss's own rise anchor drops the slots nearest it as
+    // a side effect, so the dais always opens toward where the boss stands up.
+    if (isBoss && ringR > 0) {
+      // Tangential yaw for a piece at polar angle `a`. THREE rotation.y = t
+      // maps local +X to world (cos t, -sin t); the ring tangent at `a` is
+      // (-sin a, cos a); solving gives t = -a - PI/2. Radial (t = a) would
+      // make the fragments read as spokes instead of an enclosing wall.
+      const tangent = (a) => -a - Math.PI / 2;
+      const phase = rnd() * Math.PI * 2;
+      for (let i = 0; i < cfg.ringSlots; i++) {
+        const keep = rnd() < cfg.ringKeep;   // fixed roll count per slot
+        const wobble = (rnd() - 0.5) * 0.9;  // metres, so no two rings match
+        if (!keep) continue;
+        const a = phase + (i / cfg.ringSlots) * Math.PI * 2;
+        const rr = ringR + wobble;
+        tryPut(r.centre.x + Math.cos(a) * rr, r.centre.z + Math.sin(a) * rr,
+          tangent(a), i % 2 === 0 ? 'stub' : 'pillar', true);
+      }
+      // Outer debris arc: `quadSlots` rubble piles on a second, wider ring.
+      // These are the boss chamber's guaranteed heavy cover — the ring itself
+      // is half pillars, and a 0.76 m pillar is thin cover, so seeds whose
+      // colonnade rolled pillar-heavy measured 18% of sightlines blocked
+      // against 44% for rubble-heavy ones. A fixed outer arc removes that
+      // lottery and is what actually gives the kite loop its shape: run the
+      // annulus between colonnade and debris, cut back in through a gap.
+      //
+      // FIXUP 1 WIDENED IT, 4 -> 7 (E) / 5 -> 8 (D). Measured over 40
+      // seeds/rank, the first pass left the boss chamber marginally WORSE
+      // dressed per unit area than an ordinary combat room (E 1.68% of cells
+      // blocked and 18.2% of 6-12 m sightlines stopped, against 1.83% / 20.4%
+      // for a normal room) — it only had more pieces because it is bigger. In
+      // the one room the ask named, that is backwards. The arc is the right
+      // lever because it is the only cover the chamber is GUARANTEED: at E
+      // seven piles on the quadR = 14.07 m circle sit 2*pi*14.07/7 = 12.6 m
+      // apart, so a 3.9 m pile every 12.6 m of the kite annulus — close enough
+      // that circling always crosses one, far enough that the 3.0 m dash lane
+      // between neighbours is never the binding constraint. Cost is 3 extra
+      // 788-tri piles on an InstancedMesh that already exists: +2,364
+      // triangles, +0 draw calls.
+      //   quadR = ringR + lane + rubble.hx
+      //         E: 9.12 + 3.0 + 1.95 = 14.07, usable half 19 - 3.2 = 15.8
+      //         D: 10.08 + 3.0 + 1.95 = 15.03, usable half 21 - 3.2 = 17.8
+      // so a broadside pile clears the wall band at both ranks by ~1 m.
+      const quadR = ringR + cfg.lane + COVER_KINDS.rubble.hx;
+      const quadPhase = rnd() * Math.PI * 2;
+      for (let i = 0; i < cfg.quadSlots; i++) {
+        const wobble = (rnd() - 0.5) * 1.2;
+        const a = quadPhase + (i / cfg.quadSlots) * Math.PI * 2;
+        const rr = quadR + wobble;
+        tryPut(r.centre.x + Math.cos(a) * rr, r.centre.z + Math.sin(a) * rr,
+          tangent(a), 'rubble', true);
+      }
+    }
+
+    // --- scatter: jittered lattice over the room's usable band -------------
+    // Density scales with area by construction — the lattice is sized in
+    // metres, so a 24 x 24 m E combat room offers 3 x 3 candidates and a
+    // 38 x 38 m boss chamber offers 5 x 5, before the clearance rules bite.
+    const usableW = r.w - 2 * cfg.wallInset;
+    const usableD = r.d - 2 * cfg.wallInset;
+    const nx = Math.max(1, Math.round(usableW / cfg.step));
+    const nz = Math.max(1, Math.round(usableD / cfg.step));
+    // A room narrower than two wall bands has no interior to scatter into.
+    // Not reachable at the shipped sizes (the smallest combat room is 24 m
+    // against a 6.4 m band) — but this only skips the SWEEP, never the spawn
+    // prune below, because the boss ring may already have placed pieces.
+    const sweep = (force) => {
+      if (usableW <= 0 || usableD <= 0) return;
+      for (let j = 0; j < nz; j++) {
+        for (let i = 0; i < nx; i++) {
+          // FIXED roll count per lattice point, drawn BEFORE any rejection —
+          // the cavern stalagmite loop's rule. Otherwise tuning one clearance
+          // shifts the stream for every later point in the room and the whole
+          // dungeon re-dresses itself.
+          const ox = (rnd() - 0.5) * 2 * cfg.jitter;
+          const oz = (rnd() - 0.5) * 2 * cfg.jitter;
+          const keep = rnd() < cfg.chance;
+          const kindRoll = rnd();
+          const yawRoll = rnd();
+          if (!keep && !force) continue;
+          const x = r.x + cfg.wallInset + (i + 0.5) * (usableW / nx) + ox;
+          const z = r.z + cfg.wallInset + (j + 0.5) * (usableD / nz) + oz;
+          // Quarter yaws only on the scatter: a 4 m rubble pile squared to the
+          // architecture reads as a collapsed wall, at 30 degrees it reads as
+          // a fallen log, and the AABB lane test is exact rather than
+          // conservative.
+          const yaw = Math.floor(yawRoll * 4) * (Math.PI / 2);
+          tryPut(x, z, yaw, kindRoll < cfg.rubbleShare ? 'rubble' : 'pillar');
+        }
+      }
+    };
+    sweep(false);
+    // Guaranteed floor. Over 200 seeds per rank, exactly one room in ~1100
+    // rolled its entire lattice away and came out empty — a 24 x 24 m fight
+    // room with nothing in it, which is the exact defect this system exists to
+    // remove. A second sweep over the SAME lattice with the keep roll forced
+    // fixes it; every clearance rule still applies, so a room can only stay
+    // thin if geometry (not luck) says so. The branch is a pure function of
+    // the first sweep's outcome, so determinism holds.
+    if (placed.length < cfg.minPieces) sweep(true);
+
+    // --- prune the spawn menu ---------------------------------------------
+    // Drop every spawn point the new field would rise an enemy inside of (or
+    // flush against). This is the enforcement side of rule (c): the pieces go
+    // where the room wants them, and the menu shrinks to what is still open.
+    // It cannot starve a room — every piece is >= wallInset off the walls and
+    // >= lane from its neighbours, so the perimeter ring alone holds dozens of
+    // points, and dungeon-gen-test asserts the surviving count.
+    if (placed.length) {
+      r.spawnPoints = r.spawnPoints.filter((p) => !placed.some((q) => (
+        Math.abs(p.x - q.x) < q.ex + cfg.spawnClear
+        && Math.abs(p.z - q.z) < q.ez + cfg.spawnClear
+      )));
+    }
+  }
+
+  // --- render budget, enforced by DOWNGRADE not truncation -----------------
+  // The 788-triangle rubble pile is the cover system's dominant render cost
+  // (pillar 136, stub 784 but boss-ring-only so <= 6 per gate). Measured over
+  // 400 seeds per rank the placer emits E <= 22 piles and D <= 30, and the
+  // worst D gate measured 29,256 cover triangles on top of a 93.2k shell —
+  // 122.5k against DUNGEON_SPEC's 130k, only 5.8% of headroom on a budget the
+  // rest of the frame is already straining. rubbleCap 24 drops that worst case
+  // to ~25.3k (each downgrade saves 788 - 136 = 652), i.e. ~118.6k / 8.8%.
+  //
+  // Overflow is turned into a PILLAR in the same slot, never deleted: a
+  // pillar's footprint is strictly smaller than the rubble the placer already
+  // validated there, so every clearance and dash lane still holds, and the
+  // room keeps a line-of-sight blocker instead of losing one. Even-stride
+  // selection is the torch cap's pattern above — it spreads the downgrades
+  // over the whole floor plan rather than gutting whichever room happens to
+  // sit last in scan order.
+  //
+  // ORDER MATTERS: scatter piles are downgraded before the boss chamber's own
+  // colonnade/debris-arc pieces (`anchor`). Those are the guaranteed heavy
+  // cover the kite loop is built from, and an even stride over the whole list
+  // would have quietly turned some of them into 0.76 m pillars on exactly the
+  // seeds that placed the most cover. Anchors are still eligible if scatter
+  // alone cannot pay the cap — the render budget stays hard.
+  const piles = out.filter((c) => c.kind === 'rubble');
+  if (cfg.rubbleCap > 0 && piles.length > cfg.rubbleCap) {
+    const drop = piles.length - cfg.rubbleCap;
+    const scatter = piles.filter((c) => !c.anchor);
+    const pool = scatter.concat(piles.filter((c) => c.anchor));
+    // Even stride over the PREFERRED prefix (scatter), widened to `drop` when
+    // scatter alone is too small to pay the cap. span >= drop always, so the
+    // stride is >= 1 and no piece is selected twice.
+    const span = Math.min(pool.length, Math.max(drop, scatter.length));
+    for (let i = 0; i < drop; i++) {
+      const c = pool[Math.min(pool.length - 1, Math.floor((i * span) / drop))];
+      c.kind = 'pillar';
+      c.ex = COVER_KINDS.pillar.hx;
+      c.ez = COVER_KINDS.pillar.hz;
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1233,12 +1741,20 @@ function tryGenerateCavern(rank, params, enemies, seed) {
   const zoneRc = params.zoneRadius / CELL;
   const entryRc = Math.min(discs[0].rc, 4.5);
   const entryC = { cx: discs[0].cx, cz: discs[0].cz };
-  // Interior candidates: full 5x5 floor neighbourhood (2 cells clear of rock,
-  // so the 9 m trigger disc and its spawn points have real floor around them),
-  // outside the boss grotto, the neck, and the entry chamber.
-  const open2 = (gx, gz) => {
-    for (let dz = -2; dz <= 2; dz++) {
-      for (let dx = -2; dx <= 2; dx++) {
+  // Interior candidates need FIGHTING ROOM, not just floor under the trigger.
+  // The old test was a 5x5 floor neighbourhood (2 cells = 4 m clear), and the
+  // soak found zone centres with as little as 5 m of open floor to the nearest
+  // rock — a "huge cavern" fight in a lobe you cannot dash out of. The test is
+  // now a clear DISC: openR(rc) demands every floor cell within rc cells, so
+  // rc = 6 cells gives 12 m in every direction = 24 m across = 3.2 dashes,
+  // the same bar the crawl's rooms have to clear. Tiers relax to 5 then 4
+  // cells only if the roll leaves too few candidates, so a cramped cavern
+  // degrades instead of failing outright.
+  const openR = (gx, gz, rc) => {
+    const r2 = rc * rc;
+    for (let dz = -rc; dz <= rc; dz++) {
+      for (let dx = -rc; dx <= rc; dx++) {
+        if (dx * dx + dz * dz > r2) continue;
         if (!isFloor(gx + dx, gz + dz)) return false;
       }
     }
@@ -1246,19 +1762,30 @@ function tryGenerateCavern(rank, params, enemies, seed) {
   };
   const inNeck = (gx, gz) => gx >= neckRect.gx - 1 && gx < neckRect.gx + neckRect.gw + 1
     && gz >= neckRect.gz - 1 && gz < neckRect.gz + neckRect.gd + 1;
-  const candidates = [];
-  for (let gz = 1; gz < h - 1; gz++) {
-    for (let gx = 1; gx < w - 1; gx++) {
-      const i = at(gx, gz);
-      if (!mask[i] || bfs[i] < 0) continue;
-      if (!open2(gx, gz)) continue;
-      if (inNeck(gx, gz)) continue;
-      const cx = gx + 0.5;
-      const cz = gz + 0.5;
-      if (Math.hypot(cx - neck.ccx, cz - neck.ccz) < bossRc + zoneRc * 0.5) continue;
-      if (Math.hypot(cx - entryC.cx, cz - entryC.cz) < entryRc + zoneRc * 0.6) continue;
-      candidates.push({ gx, gz, d: bfs[i] });
+  const gatherCandidates = (clearRc) => {
+    const out = [];
+    for (let gz = 1; gz < h - 1; gz++) {
+      for (let gx = 1; gx < w - 1; gx++) {
+        const i = at(gx, gz);
+        if (!mask[i] || bfs[i] < 0) continue;
+        if (!openR(gx, gz, clearRc)) continue;
+        if (inNeck(gx, gz)) continue;
+        const cx = gx + 0.5;
+        const cz = gz + 0.5;
+        if (Math.hypot(cx - neck.ccx, cz - neck.ccz) < bossRc + zoneRc * 0.5) continue;
+        if (Math.hypot(cx - entryC.cx, cz - entryC.cz) < entryRc + zoneRc * 0.6) continue;
+        out.push({ gx, gz, d: bfs[i] });
+      }
     }
+    return out;
+  };
+  // Deterministic tier walk: strictest clearance that still leaves candidates
+  // to spread over the depth range. `nz * 3` is the "enough to choose from"
+  // bar — fewer than that and the spread loop just clusters.
+  let candidates = [];
+  for (const clearRc of [6, 5, 4]) {
+    candidates = gatherCandidates(clearRc);
+    if (candidates.length >= nz * 3) break;
   }
   candidates.sort((a, b) => a.d - b.d || (a.gx + a.gz * w) - (b.gx + b.gz * w));
   // Spread the zones over the WHOLE BFS depth range (the "BFS-farthest chain"):
@@ -1268,7 +1795,12 @@ function tryGenerateCavern(rank, params, enemies, seed) {
   const maxD = candidates.length ? candidates[candidates.length - 1].d : 0;
   let zones = [];
   for (let relax = 0; relax < 3 && zones.length < params.rooms[0]; relax++) {
-    const spacing = (params.zoneSpacing / CELL) * (1 - relax * 0.25);
+    // The relax rungs may NOT fall below one zone radius: a zone centre inside
+    // another zone's trigger disc makes membership depend on record order, and
+    // the soak caught exactly that (two zones 8.2 m apart at radius 10) once
+    // the stricter clearance filter started pushing rolls onto the low rung.
+    const spacing = Math.max(zoneRc,
+      (params.zoneSpacing / CELL) * (1 - relax * 0.25));
     zones = [];
     for (let k = 1; k <= nz; k++) {
       const target = (maxD * k) / (nz + 0.35);   // last target short of the tip
@@ -1531,7 +2063,9 @@ function buildCavernDecor(rooms, doors, wallRuns, params, rnd, ctx) {
     }
   }
 
-  return { torches: [], columns: [], props: [], alcoves: [], crystals, stalagmites };
+  // `cover` stays empty for C: the stalagmite field above IS the cavern's
+  // cover (see the LAYOUT_PARAMS.C note), and every consumer reads one shape.
+  return { torches: [], columns: [], props: [], alcoves: [], crystals, stalagmites, cover: [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -1570,6 +2104,11 @@ export function layoutStats(layout) {
     alcoves: layout.decor.alcoves.length,
     crystals: (layout.decor.crystals || []).length,
     stalagmites: (layout.decor.stalagmites || []).length,
+    cover: (layout.decor.cover || []).length,
+    coverByKind: (layout.decor.cover || []).reduce((m, c) => {
+      m[c.kind] = (m[c.kind] || 0) + 1;
+      return m;
+    }, {}),
     meanRoomCentreZ: meanZ / layout.rooms.length,
     bounds: layout.bounds,
     radius: layout.radius,

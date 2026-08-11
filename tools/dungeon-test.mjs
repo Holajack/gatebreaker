@@ -61,6 +61,42 @@ const DRAW_BUDGET_CAVERN = 30;  // C adds dome, stalagmite/stalactite fields, cr
 const TRI_BUDGET_KIT = 130000;  // spec performance.triangleBudget, kit loaded
 const TRI_BUDGET_PROC = 45000;  // procedural-only bound (fallback phase F)
 
+// WHAT A FRAME ACTUALLY SUBMITS — the number this file used to be blind to.
+//
+// renderer.info.reset() runs AFTER WebGLShadowMap.render() inside
+// WebGLRenderer.render (three r169, three.module.js:29935 vs :29941), so with
+// info.autoReset at its default the key light's depth pass is ERASED from the
+// counters. Every draw/triangle figure this suite has ever printed was the
+// colour pass only: measured E 15 draws / 65,931 tris for a shell that submits
+// 20 / 109,008 in a live frame. DUNGEON_SPEC.risks names this assert as the
+// guard against "draw-call creep from dressing enthusiasm", and it was blind in
+// exactly the direction the wave-3-A2 cover field moved.
+//
+// So phase A now measures BOTH, and asserts both:
+//   colour pass       drawCalls / triangles   — the old semantics, old budget
+//   whole frame       frame.drawCalls / frame.triangles — colour + depth pass
+// The frame ceilings below are MEASURED, not aspirational, and each is a
+// regression guard rather than an endorsement. Instrument: the same delta this
+// phase already takes (built dungeon minus empty scene), with info.autoReset
+// false, the mounted city hidden (otherwise the dungeon's own key light runs a
+// depth pass over the CITY's casters and the delta stops being the dungeon's),
+// and updateShadowCamera fitted to the boss chamber.
+//
+// Sweep of 8 seeds per rank, this tree vs a clean `git archive HEAD`:
+//   E  HEAD 20-28 draws / 103,470-117,152 tris   now 19-22 / 103,675-123,965
+//   D  HEAD 32    draws / 171,584-183,896 tris   now 27-28 / 168,779-182,327
+// E is inside the spec's 24 / 130k on every seed sampled — which HEAD was NOT
+// (28 draws on its worst seed). D is over on both axes and always has been:
+// its dressing set (alcove niches, two pot rows, bookcases) is 19 colour-pass
+// draws before a single shadow. This wave LOWERS D on both axes; it does not
+// fix it. FRAME_BUDGET.D is therefore the measured ceiling plus headroom, and
+// bringing D to the E budget is a dressing pass of its own, not a number to
+// quietly widen again.
+const FRAME_BUDGET = {
+  E: { draws: 24, tris: 130000 },     // the spec budget, met on every seed
+  D: { draws: 30, tris: 190000 },     // measured 27-28 / 182,327 worst seed
+};
+
 const server = await ensureServer();
 const browser = await launchBrowser();
 const { page, errors } = await newPhonePage(browser);
@@ -70,11 +106,20 @@ try {
 
   // Prime the modules once; vite serves /src straight to the page.
   await page.evaluate(async () => {
-    const [{ Dungeon }, cfg] = await Promise.all([
+    const [{ Dungeon }, cfg, layout] = await Promise.all([
       import('/src/world/dungeon.js'),
       import('/src/game/config.js'),
+      import('/src/world/dungeonlayout.js'),
     ]);
-    window.__dt = { Dungeon, GATES: cfg.GATES };
+    window.__dt = {
+      Dungeon,
+      GATES: cfg.GATES,
+      // The bolt plane and the cover contract built against it — phase A probes
+      // the field at the height the game actually fires at, not a literal.
+      PROJECTILE_Y: cfg.PROJECTILE_Y,
+      COVER_KINDS: layout.COVER_KINDS,
+      COVER_MIN_TOP: layout.COVER_MIN_TOP,
+    };
   });
 
   const report = { ranks: {}, screenshots: [] };
@@ -91,9 +136,37 @@ try {
       // Explicit synchronous renders so the numbers are OURS: autoReset (the
       // default) zeroes info at the start of each render() and the game's own
       // RAF frame cannot interleave inside one evaluate.
+      //
+      // TWO numbers per sample. autoReset=false keeps the counters alive across
+      // WebGLShadowMap.render(), so `calls`/`tris` include the key light's depth
+      // pass — what the GPU is actually asked for. The second render with
+      // autoReset back on reproduces the historical colour-pass-only figure so
+      // the old budget keeps its old meaning. See FRAME_BUDGET above.
       const frame = () => {
+        r.info.autoReset = false;
+        r.info.reset();
         r.render(g.scene, g.camera);
-        return { calls: r.info.render.calls, tris: r.info.render.triangles };
+        const withShadow = { calls: r.info.render.calls, tris: r.info.render.triangles };
+        r.info.autoReset = true;
+        r.render(g.scene, g.camera);
+        return {
+          calls: r.info.render.calls,
+          tris: r.info.render.triangles,
+          frameCalls: withShadow.calls,
+          frameTris: withShadow.tris,
+        };
+      };
+      // The mounted city would otherwise be re-drawn by the DUNGEON's key light
+      // in the depth pass, putting city geometry inside a dungeon delta.
+      const cityGroup = g.world?.group || null;
+      const cityWasVisible = cityGroup ? cityGroup.visible : false;
+      if (cityGroup) cityGroup.visible = false;
+      // Fit the shadow camera the way the game does (extent 12, the default in
+      // Dungeon.updateShadowCamera) so the depth pass is a real one.
+      const aimShadow = (dd) => {
+        const c = dd.layout.rooms[dd.layout.bossRoom]?.centre || { x: 0, z: 0 };
+        dd.updateShadowCamera({ x: c.x, y: 0, z: c.z }, 12);
+        r.shadowMap.needsUpdate = true;
       };
       // Warm-up build+clear BEFORE the baseline snapshot: the first env build
       // ever lazily allocates the PMREM generator's persistent internals
@@ -113,11 +186,65 @@ try {
       };
       const base = frame();
 
+      // COVER A/B (wave 3-A2). The interior cover field is the one dressing
+      // system big enough to argue about, so its cost is MEASURED rather than
+      // estimated: the same gate and seed built once with params.cover nulled
+      // out (gate.crawl overrides LAYOUT_PARAMS in Dungeon.build) and once
+      // normally. The delta between the two is what cover actually costs this
+      // frame, and it lands in the report next to the budget.
+      {
+        const noCover = new Dungeon(g.scene, g.renderer, g.camera);
+        noCover.build({ ...gate, crawl: { ...(gate.crawl || {}), cover: null } }, seed);
+        aimShadow(noCover);
+        const nc = frame();
+        out.noCover = {
+          drawCalls: nc.calls - base.calls,
+          triangles: nc.tris - base.tris,
+          frameDrawCalls: nc.frameCalls - base.frameCalls,
+          frameTriangles: nc.frameTris - base.frameTris,
+        };
+        // The navgrid must come out BIT-IDENTICAL with and without cover.
+        // Cover registers nav:false on purpose (navgrid pads every blocker by
+        // ~1.38 m, which would close the 3 m dash lanes the placer guarantees),
+        // and "the flow field is untouched" is a claim worth proving rather
+        // than arguing: a hash of the baked blocked mask settles it.
+        const hash = (grid) => {
+          let hv = 0x811c9dc5;
+          for (let i = 0; i < grid.blocked.length; i++) {
+            hv ^= grid.blocked[i];
+            hv = Math.imul(hv, 0x01000193) >>> 0;
+          }
+          return `${grid.w}x${grid.h}:${hv.toString(16)}`;
+        };
+        out.noCover.navHash = hash(noCover.navGrid);
+        noCover.clear();
+        g.scene.remove(noCover.group);
+        r.render(g.scene, g.camera);
+      }
+      const base2 = frame();
+
       const d = new Dungeon(g.scene, g.renderer, g.camera);
       d.build(gate, seed);
+      aimShadow(d);
       const built = frame();
-      out.drawCalls = built.calls - base.calls;
-      out.triangles = built.tris - base.tris;
+      out.drawCalls = built.calls - base2.calls;
+      out.triangles = built.tris - base2.tris;
+      // What the GPU is actually asked for: colour pass + the key light's
+      // shadow-depth pass. See FRAME_BUDGET at the top of this file.
+      out.frame = {
+        drawCalls: built.frameCalls - base2.frameCalls,
+        triangles: built.frameTris - base2.frameTris,
+        shadowCasters: 0,
+        drawables: 0,
+      };
+      d.group.traverse((o) => {
+        if (!o.isMesh && !o.isPoints && !o.isLine) return;
+        out.frame.drawables++;
+        if (o.castShadow) out.frame.shadowCasters++;
+      });
+      // Every render that counts is done; the city goes back before the
+      // evidence shot and the later phases that expect it mounted.
+      if (cityGroup) cityGroup.visible = cityWasVisible;
 
       const L = d.layout;
       out.contract = {
@@ -223,12 +350,89 @@ try {
         if (d.roomAt(p.x, p.z) === 0 && p.y === 0) out.spawns.inEntry++;
       }
 
-      // bossSpawn inside the boss room, roomAt agreeing everywhere.
+      // bossSpawn inside the boss room, roomAt agreeing everywhere, and — new
+      // this wave — standing on floor rather than inside its own scenery.
       const bs = d.bossSpawn();
       out.boss = {
         inBossRoom: d.roomAt(bs.x, bs.z) === L.bossRoom,
         spawnPoints: d.spawnPointsFor(L.bossRoom).length,
+        anchorClear: !d.obstacleField.blocked(bs.x, bs.z, 0.45, 0.4, 0),
       };
+
+      // COVER, measured on the LIVE field the player collides with. The
+      // generator can claim anything; this is the number the "38 x 38 m empty
+      // box" regression is judged on, taken exactly as the adversarial probe
+      // took it: a 1 m lattice inset 1 m from the walls, plus the fraction of
+      // >= 6 m chords across the chamber a bolt cannot make.
+      //
+      // SAMPLED AT THE BOLT PLANE, config.PROJECTILE_Y. The first pass measured
+      // at 1.2 m while the boss fired from 2.4 m, so every cover number it
+      // published was taken at a height nothing in the game shot at. Now there
+      // is one plane and the probe uses it; `bossBoltPlaneAgrees` below fails
+      // loudly if game code ever moves it above rubble's 1.75 m top, which is
+      // the failure this probe could not previously see.
+      {
+        const room = L.rooms[L.bossRoom];
+        const boltY = window.__dt.PROJECTILE_Y;
+        let a = 0x9e3779b9 ^ seed;   // test-local stream; nothing downstream
+        const rnd = () => {
+          a |= 0; a = (a + 0x6d2b79f5) | 0;
+          let t = Math.imul(a ^ (a >>> 15), 1 | a);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+        const nx = Math.floor(room.w - 2);
+        const nz = Math.floor(room.d - 2);
+        let cells = 0;
+        for (let j = 0; j < nz; j++) {
+          for (let i = 0; i < nx; i++) {
+            if (d.obstacleField.blocked(room.x + 1.5 + i, room.z + 1.5 + j, 0, 0, boltY)) cells++;
+          }
+        }
+        let shots = 0;
+        let stopped = 0;
+        let guard = 0;
+        while (shots < 600 && guard++ < 12000) {
+          const ax = room.x + 1.5 + rnd() * (room.w - 3);
+          const az = room.z + 1.5 + rnd() * (room.d - 3);
+          const bx = room.x + 1.5 + rnd() * (room.w - 3);
+          const bz = room.z + 1.5 + rnd() * (room.d - 3);
+          if (Math.hypot(bx - ax, bz - az) < 6) continue;
+          shots++;
+          if (d.obstacleField.lineBlocked(ax, az, bx, bz, { feetY: boltY })) stopped++;
+        }
+        // EVERY cover kind must clear the bolt plane, and the plane must be one
+        // number. COVER_MIN_TOP is PROJECTILE_Y + 0.1 in dungeonlayout.js; a
+        // kind that only clears 1.2 is scenery a bolt flies over.
+        const kinds = window.__dt.COVER_KINDS;
+        out.cover = {
+          pieces: L.decor.cover.length,
+          bossPieces: L.decor.cover.filter((c) => c.room === L.bossRoom).length,
+          bossRoom: `${room.w}x${room.d}`,
+          blockedCells: cells,
+          totalCells: nx * nz,
+          losBlockedPct: shots ? +((100 * stopped) / shots).toFixed(1) : 0,
+          boltY,
+          minTop: window.__dt.COVER_MIN_TOP,
+          kindsClearBolt: Object.entries(kinds)
+            .filter(([, k]) => !(k.top >= window.__dt.COVER_MIN_TOP)).map(([n]) => n),
+          // The live field, probed across a real piece: a chord through the
+          // centre of one boss-chamber rubble pile must be stopped AT the bolt
+          // plane. `over` is the same chord 0.6 m higher, which rubble does not
+          // stop — recorded so the margin is visible rather than assumed.
+          throughPiece: (() => {
+            const pile = L.decor.cover.find((c) => c.room === L.bossRoom && c.kind === 'rubble');
+            if (!pile) return null;
+            const s = 4.2;
+            return {
+              at: d.obstacleField.lineBlocked(pile.x - s, pile.z, pile.x + s, pile.z, { feetY: boltY })
+                || d.obstacleField.lineBlocked(pile.x, pile.z - s, pile.x, pile.z + s, { feetY: boltY }),
+              over: d.obstacleField.lineBlocked(pile.x - s, pile.z, pile.x + s, pile.z, { feetY: boltY + 0.6 })
+                || d.obstacleField.lineBlocked(pile.x, pile.z - s, pile.x, pile.z + s, { feetY: boltY + 0.6 }),
+            };
+          })(),
+        };
+      }
       out.roomAt = {
         centresAgree: L.rooms.every((rm) => d.roomAt(rm.centre.x, rm.centre.z) === rm.id),
         tunnelIsNoRoom: d.roomAt(0, 0) === -1,
@@ -241,6 +445,15 @@ try {
       out.nav = {
         goalSet: d.navGrid.setGoal(entryC.x, entryC.z),
         bossReaches: false,
+        // Same hash as the no-cover build above; see the note there.
+        hash: (() => {
+          let hv = 0x811c9dc5;
+          for (let i = 0; i < d.navGrid.blocked.length; i++) {
+            hv ^= d.navGrid.blocked[i];
+            hv = Math.imul(hv, 0x01000193) >>> 0;
+          }
+          return `${d.navGrid.w}x${d.navGrid.h}:${hv.toString(16)}`;
+        })(),
       };
       if (out.nav.goalSet) out.nav.bossReaches = d.navGrid.flowAt(bossC.x, bossC.z, dir);
 
@@ -311,6 +524,18 @@ try {
     check(`${rank}: triangle delta ${res.triangles} <= ${triBudget} (kit ${res.dressing?.kitLoaded})`,
       res.triangles <= triBudget && res.triangles > 1000);
     {
+      // The number the old assert could not see. frame.* includes the key
+      // light's depth pass; see FRAME_BUDGET.
+      const fb = FRAME_BUDGET[rank];
+      const f = res.frame;
+      check(`${rank}: WHOLE-FRAME draw delta ${f.drawCalls} <= ${fb.draws} `
+        + `(${f.drawables} drawables, ${f.shadowCasters} of them shadow casters)`,
+      f.drawCalls <= fb.draws && f.drawCalls >= res.drawCalls);
+      check(`${rank}: WHOLE-FRAME triangle delta ${f.triangles} <= ${fb.tris} `
+        + `(colour pass alone ${res.triangles})`,
+      f.triangles <= fb.tris && f.triangles >= res.triangles);
+    }
+    {
       const roles = res.dressing?.roles || {};
       const wantAlways = ['archway', 'doorFrame', 'column', 'torch'];
       const missing = wantAlways.filter((k) => !(roles[k] > 0));
@@ -329,11 +554,130 @@ try {
     check(`${rank}: membrane sealed blocks`, res.membrane.sealedReported === true && res.membrane.sealedCrosses === false);
     check(`${rank}: membrane reopens`, res.membrane.reopenedCrosses === true && res.membrane.reopenedReported === false);
     check(`${rank}: randomSpawn stays in entry room ${res.spawns.inEntry}/${res.spawns.total}`, res.spawns.inEntry === res.spawns.total);
-    check(`${rank}: bossSpawn in boss room (${res.boss.spawnPoints} pts)`, res.boss.inBossRoom && res.boss.spawnPoints >= 4);
+    check(`${rank}: bossSpawn in boss room (${res.boss.spawnPoints} pts), on clear floor`,
+      res.boss.inBossRoom && res.boss.spawnPoints >= 4 && res.boss.anchorClear === true);
+    {
+      // Wave 3-A2: the boss chamber must not be an empty box. Before this wave
+      // the same probe read 0 blocked cells of 1296 and 0.0% of sightlines
+      // stopped on every seed measured; the 200-seed soak in
+      // tools/dungeon-gen-test.mjs puts the live floor at ~19% and the mean at
+      // ~36% (E) / ~39% (D), so 15% is a tripwire, not a target.
+      const cv = res.cover;
+      check(`${rank}: boss chamber ${cv.bossRoom} m carries cover — `
+        + `${cv.bossPieces} pieces, ${cv.blockedCells}/${cv.totalCells} cells blocked at the bolt plane `
+        + `(y ${cv.boltY}), ${cv.losBlockedPct}% of sightlines stopped`,
+      cv.bossPieces >= 5 && cv.blockedCells > 0 && cv.losBlockedPct >= 15);
+      check(`${rank}: every cover kind clears the bolt plane (top >= ${cv.minTop} m)`,
+        cv.kindsClearBolt.length === 0,
+        cv.kindsClearBolt.length ? `below the plane: ${cv.kindsClearBolt.join(',')}` : '');
+      check(`${rank}: live field stops a bolt across a boss-chamber rubble pile at y ${cv.boltY} `
+        + `(and passes it at y ${(cv.boltY + 0.6).toFixed(1)}, which is why the plane is a constant)`,
+      cv.throughPiece?.at === true && cv.throughPiece?.over === false);
+      check(`${rank}: cover costs +${res.frame.drawCalls - res.noCover.frameDrawCalls} draws / `
+        + `+${res.frame.triangles - res.noCover.frameTriangles} tris on the WHOLE frame `
+        + `(+${res.drawCalls - res.noCover.drawCalls} / +${res.triangles - res.noCover.triangles} colour pass), `
+        + `${cv.pieces} pieces gate-wide`,
+      // Two extra draw calls is the whole system's structural cost: `pillar`
+      // re-uses the existing column InstancedMesh, so only coverRubble and
+      // coverStub are new fields. More than that means a role leaked in — and
+      // it is asserted on the WHOLE-frame number now, because the first pass of
+      // this system cost 4 (both fields cast shadows, so each paid twice) while
+      // this assert, blind to the depth pass, reported 2 and passed.
+      res.frame.drawCalls - res.noCover.frameDrawCalls <= 2
+        && res.drawCalls - res.noCover.drawCalls <= 2
+        && res.frame.triangles <= FRAME_BUDGET[rank].tris);
+    }
     check(`${rank}: roomAt agrees`, res.roomAt.centresAgree && res.roomAt.tunnelIsNoRoom);
     check(`${rank}: nav flow reaches boss room`, res.nav.goalSet && res.nav.bossReaches);
+    check(`${rank}: cover leaves the navgrid bit-identical (${res.nav.hash})`,
+      res.nav.hash === res.noCover.navHash,
+      res.nav.hash === res.noCover.navHash ? '' : `no-cover ${res.noCover.navHash}`);
     check(`${rank}: no GPU leak (geo ${res.leak.geoBefore}->${res.leak.geoAfter}, tex ${res.leak.texBefore}->${res.leak.texAfter})`,
       res.leak.geoAfter <= res.leak.geoBefore + 2 && res.leak.texAfter <= res.leak.texBefore + 2);
+  }
+
+  // ------------------------------------------------------------- phase S
+  // Wave 3 "room to fight in" + "randomised enemy count", measured through the
+  // MOUNTED world rather than the pure generator (the gen soak covers the
+  // generator). Two claims:
+  //   1. Rooms are sized in DASH UNITS — config.js SKILLS.dash.distance is
+  //      7.5 m, combat rooms clear 3 dashes across their short axis, boss
+  //      chambers clear 5 on both axes.
+  //   2. gate.enemies is ROLLED per run inside the gate's band, varies across
+  //      seeds, is identical for a repeated seed (the context-loss rebuild
+  //      contract), and equals the sum of the room budgets the layout hands
+  //      the director — a mismatch would desync the HUD counter from the world.
+  {
+    const space = await page.evaluate(async ({ ranks }) => {
+      const { Dungeon, GATES } = window.__dt;
+      const g = window.__game;
+      const out = {};
+      for (const rank of ranks) {
+        const gate = GATES.find((x) => x.rank === rank);
+        const nominal = gate.enemies;
+        const rolls = [];
+        let dims = null;
+        let budgetSum = -1;
+        let repeat = null;
+        for (let i = 0; i < 10; i++) {
+          const seed = 4242 + i * 7919;
+          const d = new Dungeon(g.scene, g.renderer, g.camera);
+          d.build(gate, seed);
+          rolls.push(gate.enemies);
+          if (i === 0) {
+            const L = d.layout;
+            const fight = L.rooms.filter((r) => r.kind === 'combat' || r.kind === 'treasure');
+            const boss = L.rooms[L.bossRoom];
+            dims = {
+              rooms: fight.length,
+              shortMin: Math.min(...fight.map((r) => Math.min(r.w, r.d))),
+              longMax: Math.max(...fight.map((r) => Math.max(r.w, r.d))),
+              floor: fight.reduce((s, r) => s + r.w * r.d, 0),
+              bossW: boss.w, bossD: boss.d,
+              bossIsDisc: boss.radius > 0,
+            };
+            budgetSum = L.rooms.reduce((s, r) => s + r.budget, 0);
+            // Same gate, same seed, fresh Dungeon: the roll must repeat.
+            const d2 = new Dungeon(g.scene, g.renderer, g.camera);
+            d2.build(gate, seed);
+            repeat = gate.enemies;
+            d2.clear();
+            g.scene.remove(d2.group);
+          }
+          d.clear();
+          g.scene.remove(d.group);
+        }
+        out[rank] = {
+          band: gate.enemyBand, nominal, rolls, repeat, budgetSum, dims,
+        };
+      }
+      return out;
+    }, { ranks: ['E', 'D', 'C'] });
+    report.space = space;
+    const DASH = 7.5;
+    for (const rank of ['E', 'D', 'C']) {
+      const s = space[rank];
+      const d = s.dims;
+      // C's fight "rooms" are trigger discs in open cavern — the gen soak
+      // measures their free floor by ray march; here only the sealed boss
+      // grotto carries the 5-dash claim.
+      if (!d.bossIsDisc) {
+        check(`${rank}: combat rooms ${d.shortMin} m short axis = ${(d.shortMin / DASH).toFixed(2)} dashes >= 3`,
+          d.shortMin >= 3 * DASH, `${d.rooms} rooms, ${d.floor} m2 of fighting floor`);
+      }
+      check(`${rank}: boss chamber ${d.bossW}x${d.bossD} m = ${(Math.min(d.bossW, d.bossD) / DASH).toFixed(2)} dashes across >= 5`,
+        Math.min(d.bossW, d.bossD) >= 5 * DASH);
+      const lo = Math.min(...s.rolls);
+      const hi = Math.max(...s.rolls);
+      const distinct = new Set(s.rolls).size;
+      check(`${rank}: enemy count rolls ${lo}-${hi} inside band ${JSON.stringify(s.band)}, ${distinct} distinct over 10 seeds`,
+        Array.isArray(s.band) && lo >= s.band[0] && hi <= s.band[1] && distinct >= 3,
+        JSON.stringify(s.rolls));
+      check(`${rank}: same seed re-rolls the same count (${s.repeat})`,
+        s.repeat === s.rolls[0]);
+      check(`${rank}: room budgets sum ${s.budgetSum} = rolled gate.enemies ${s.rolls[0]}`,
+        s.budgetSum === s.rolls[0]);
+    }
   }
 
   // ------------------------------------------------------------- phase D
@@ -1054,7 +1398,12 @@ try {
     }
     const cz = pr0.z - 2.5;
     heal();
-    tp(cx, pr0.centre.z);
+    // 5 m south of the north wall, NOT the room centre. Wave-3 rooms are 24 m+
+    // deep, so centring the player put 16.5 m between them — past the caster's
+    // engage range, which meant the probe was measuring "too far to care"
+    // rather than "wall in the way". 5 m keeps the ~7.5 m separation this
+    // probe has always tested, with the same single wall run between them.
+    tp(cx, pr0.z + 5);
     // Stale bolts (a live boss volley would have expired by now, but be
     // airtight): the blocked assert is projectiles === 0 throughout.
     for (let i2 = g.projectiles.length - 1; i2 >= 0; i2--) g._removeProjectile(i2);

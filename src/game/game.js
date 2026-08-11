@@ -10,13 +10,14 @@ import {
 import { setPlayerBody as setPlayerBodyLook } from '../render/characters.js';
 import { makeAgent, steerAgent, separate, noteAttack } from './enemyai.js';
 import {
-  GATES, ENEMY_TYPES, BOSSES, SKILLS, derive, scaleEnemy, rankOf,
+  GATES, ENEMY_TYPES, BOSSES, SKILLS, derive, scaleEnemy, rankOf, PROJECTILE_Y,
 } from './config.js';
 import {
   grantXp, shadowFieldCapacity, extractionChance,
   MAX_EXTRACT_ATTEMPTS, CORPSE_WINDOW,
 } from './progression.js';
 import { ashForXp, grantAsh } from './shop.js';
+import { ensureEquipment } from '../core/save.js';
 import {
   autoDeploy, deployedRecords, addShadow, makeShadow, releaseWeakest,
   shadowCombat, rosterSummary,
@@ -24,6 +25,7 @@ import {
 import {
   rollDrop, equipWeapon, currentWeapon, setModelSource,
   serializeWeapon, deserializeWeapon, starterWeapon, buildWeaponMesh, rarityColor,
+  setStance, weaponStance, drawTime, STOW,
 } from './weapons.js';
 // Straight from the render module, not via entities.js: Bind summons a NAMED
 // creature off the roster, which is a call shape makeHumanoid cannot express.
@@ -61,8 +63,52 @@ const tierWeightOf = (e) => (e.isBoss ? 'boss' : TIER_WEIGHT[e.key] || 'trash');
 const SHADOW_WINDUP = 0.42;
 const SHADOW_STRIKE = 0.3;
 
+// ------------------------------------------------------------- entity LOD
+//
+// Rooms grew ~5.5x in area this wave and the live wave more than doubled with
+// them, so there are now several bodies on screen that are nowhere near the
+// player. A skinned body is not one cost but three: it is drawn into the main
+// pass, again into the key light's depth map, and its telegraph mote is drawn
+// again into the glow pass. Measured with tools/density-probe.mjs on the E
+// crawl, a body's contribution to renderer.info.render.triangles is ~2.7x its
+// own geometry, and switching the depth pass off for entity bodies alone
+// accounts for about 1x of that — the single biggest lever available without
+// touching how anything looks up close.
+//
+// 14 m because the interior camera sits 15.7 m up and 13.2 m back looking at
+// the player, and interior fog starts at 13 m: a contact shadow that far out is
+// a smudge inside fog, under a body about 40 px tall. The known cost of this is
+// that a SKINNED depth-material program compiles the first time a body crosses
+// INTO range rather than on the first shadow render of the gate — one compile
+// per material permutation per session, and the alternative is paying a whole
+// extra pass on every distant body for the entire run.
+const LOD_CAST_RANGE_SQ = 14 * 14;
+// The CPU half of the same problem: three uploads a bone texture per skeleton
+// per mixer tick, a per-instance per-FRAME cost that no resolution drop
+// touches. Past 22 m — beyond the far side of an E room — the rig ticks at
+// 20 Hz on accumulated dt instead of every frame. It still animates; it just
+// stops paying 60 Hz for a walk cycle nobody can read at that distance.
+const LOD_RIG_RANGE_SQ = 22 * 22;
+const LOD_RIG_INTERVAL = 1 / 20;
+
 const tmpV = new THREE.Vector3();
 const tmpV2 = new THREE.Vector3();
+
+// TWO SCRATCH VECTORS THAT ARE *NOT* GENERAL PURPOSE, and the reason is a bug
+// that shipped: tmpV was used both as the enemy loop's aim vector and inside the
+// helpers that loop calls. `const toPlayer = tmpV.copy(...)` in _updateEnemies is
+// a live ALIAS of tmpV, so the first _spawnProjectile / _damagePlayer call made
+// from inside that iteration overwrote the bearing the rest of the iteration was
+// still reading. The boss spread shot computed bolt i+1's angle off bolt i's
+// heading instead of off the player bearing, turning a symmetric fan into a
+// running sum: measured offsets from the true aim were
+// [-0.60,-0.96,-1.08,-0.96,-0.60,0.00] rad for n=6 and up to -2.40 rad (137
+// degrees) for n=9 — 5 of 6 (8 of 9) bolts flew into walls and exactly one
+// landed. The same alias also fed e.yaw on any frame the boss's slam dealt
+// damage. Giving the two roles their own vectors makes the aliasing
+// unrepresentable rather than fixed once; nothing else may touch either.
+const _aimDir = new THREE.Vector3();    // _updateEnemies' per-enemy bearing only
+const _projDir = new THREE.Vector3();   // _spawnProjectile's heading only
 
 // Reused steering context; steerAgent never retains it.
 const _steerCtx = {
@@ -324,8 +370,18 @@ export class Game {
   // re-derives everyone's gear instead of leaving stale statlines in saves.
 
   _restoreLoadout() {
-    this.weapon = deserializeWeapon(this.save.weapon) || starterWeapon();
+    // ensureEquipment is the migration and it is idempotent, so calling it on
+    // first contact here — the save.js ensureShopSave precedent — means a
+    // profile written before the eight-slot model existed simply arrives with
+    // its old single weapon already copied into equipment.weapon.
+    ensureEquipment(this.save);
+    const eq = this.save.equipment;
+    this.weapon = deserializeWeapon(eq.weapon) || deserializeWeapon(this.save.weapon) || starterWeapon();
     this.stash = (Array.isArray(this.save.stash) ? this.save.stash : [])
+      // Only weapons are playable this wave. An armour or trinket record from a
+      // future build is SKIPPED, not dropped: it stays in save.stash untouched
+      // so rolling forward again finds it.
+      .filter((d) => !d || !d.k || d.k === 'w')
       .map((d) => deserializeWeapon(d))
       .filter(Boolean)
       .slice(0, STASH_LIMIT);
@@ -333,8 +389,20 @@ export class Game {
   }
 
   _persistLoadout() {
-    this.save.weapon = serializeWeapon(this.weapon);
-    this.save.stash = this.stash.map((w) => serializeWeapon(w)).filter(Boolean);
+    ensureEquipment(this.save);
+    const rec = serializeWeapon(this.weapon);
+    // k:'w' marks the kind. Written explicitly rather than relying on the
+    // absent-means-weapon rule, because a save this build writes should not
+    // need the compatibility path to read correctly.
+    this.save.equipment.weapon = rec ? { k: 'w', ...rec } : null;
+    // THE MIRROR. save.weapon keeps being the old flat record so a build rolled
+    // back to the shipped version still finds the right sword instead of an
+    // empty fist — the same reason save.js leaves the v1 key in place.
+    this.save.weapon = rec;
+    this.save.stash = this.stash.map((w) => {
+      const r = serializeWeapon(w);
+      return r ? { k: 'w', ...r } : null;
+    }).filter(Boolean);
     this.onSave();
   }
 
@@ -359,6 +427,87 @@ export class Game {
     this.weapon = w;
     equipWeapon(this.player.mesh, w);
     this._persistLoadout();
+  }
+
+  /**
+   * Equip the stash entry at `index`, SWAPPING rather than pushing.
+   *
+   * equip() alone unconditionally unshifts the outgoing weapon and never
+   * removes the incoming one, so equipping something that CAME FROM the stash
+   * leaves a duplicate. At one slot and a 12-entry cap that self-heals by
+   * eviction; the moment the panel lets a player equip out of the stash on
+   * purpose it is a duplication exploit, so the removal happens FIRST and
+   * equip() then does the push.
+   */
+  equipFromStash(index) {
+    const w = this.stash[index];
+    if (!w) return null;
+    this.stash.splice(index, 1);
+    this.equip(w);
+    return w;
+  }
+
+  // --------------------------------------------------------- stow and draw
+  //
+  // Stance is transient and is NOT saved: a resumed profile re-derives it from
+  // where the player is standing and what is near him. Persisting it would be
+  // a third source of truth about what is in the hand, alongside
+  // save.equipment.weapon and mesh.userData.weapon.
+
+  /**
+   * Put the sword away, or take it out. Returns the stance actually applied.
+   *
+   * `manual` marks a deliberate player toggle, which suppresses the auto policy
+   * for a few seconds — otherwise showing the weapon off in the plaza would
+   * last exactly until the 3 s idle timer sheathed it again, and the button
+   * would look broken.
+   */
+  setStance(stance, { manual = false } = {}) {
+    const mesh = this.player?.mesh;
+    if (!mesh) return 'drawn';
+    // Never mid-swing: a weapon that vanishes from the fist during a chop
+    // desyncs the animation from the hitbox that is still live.
+    if (stance === 'sheathed' && this.player.swing > 0) return weaponStance(mesh);
+    const applied = setStance(mesh, stance);
+    if (manual) this._stanceHold = 6.0;
+    this._idleSince = 0;
+    return applied;
+  }
+
+  /**
+   * The auto policy, ticked once per frame from the player update.
+   *
+   * Sheathe in a safe place after 3 s of not fighting; draw the instant
+   * anything hostile is close, an attack is pressed, or the mode is not the
+   * city. Only the PLAYER stows — enemies, shadow soldiers, citizens and the
+   * companion spawn drawn and stay drawn, which is one less state to test and
+   * zero risk to the crowd budget.
+   */
+  _updateStance(dt) {
+    const mesh = this.player?.mesh;
+    // Nothing to put away, or an archetype with no place to put it.
+    if (!mesh || !this.weapon || !STOW[this.weapon.archetype]) return;
+    if (this._stanceHold > 0) { this._stanceHold -= dt; return; }
+
+    const inTown = this._mode?.name === 'city';
+    const hostileNear = !inTown || this.enemies.some(
+      (e) => e.alive !== false && e.pos && e.pos.distanceToSquared(this.player.pos) < 196,   // 14 m
+    );
+    const busy = this.player.swing > 0 || this.player.cds.attack > 0;
+    if (busy) this._idleSince = 0; else this._idleSince = (this._idleSince || 0) + dt;
+
+    const want = (!hostileNear && this._idleSince >= 3.0) ? 'sheathed' : 'drawn';
+    if (want === weaponStance(mesh)) return;
+    // A draw takes time proportional to mass — a greataxe player who let it
+    // sheath pays 0.35 s the moment something jumps him, a dagger player pays
+    // almost nothing. The delay is spent BEFORE the weapon reappears, so the
+    // cost is visible rather than a hidden stat.
+    if (want === 'drawn') {
+      this._drawTimer = (this._drawTimer || 0) + dt;
+      if (this._drawTimer < drawTime(this.weapon)) return;
+    }
+    this._drawTimer = 0;
+    setStance(mesh, want);
   }
 
   /** Shadows allowed on the field at once, clamped by the live quality tier. */
@@ -927,6 +1076,10 @@ export class Game {
   _tryAttack() {
     const p = this.player;
     if (p.cds.attack > 0 || p.swing > 0) return;
+    // Any attack input draws. A manual sheathe holds off the auto policy for a
+    // few seconds, and without this a player who put the sword away to look at
+    // the plaza would swing a bare fist at the first thing that jumped him.
+    if (weaponStance(p.mesh) === 'sheathed') { this._stanceHold = 0; this.setStance('drawn'); }
     // Chain into the next combo step if the window is still open.
     p.comboIndex = p.comboTimer > 0 ? (p.comboIndex % 3) + 1 : 1;
     p.comboTimer = 0.95;
@@ -1136,18 +1289,32 @@ export class Game {
     this.player.yaw = Math.atan2(d.x, d.z);
   }
 
+  /**
+   * Fire a bolt from `from` toward `target`.
+   *
+   * THE SPAWN HEIGHT IS NOT THE CALLER'S TO CHOOSE. The direction is flattened
+   * (`.setY(0)`) so a bolt keeps its birth height for its whole life, and the
+   * player hit test below is a 1.1 m sphere centred at y 1.2 — so a caller that
+   * spawns off the bolt plane fires a shot that can never connect at any range.
+   * That is exactly what the boss's spread shot did: it spawned at y 2.4, and
+   * 2.4 - 1.2 = 1.20 m > 1.1 m missed by 10 cm on every bolt, at every standoff
+   * from 4 to 14 m, in both ranks and both phases (measured: 0 damage over 10
+   * trials while 6-9 bolts flew per volley). Stamping config.PROJECTILE_Y here
+   * makes that class of bug unrepresentable rather than merely fixed once.
+   */
   _spawnProjectile(from, target, damage, color, speed = 16) {
     const mesh = new THREE.Mesh(
       new THREE.IcosahedronGeometry(0.3, 0),
       new THREE.MeshBasicMaterial({ color }),
     );
-    mesh.position.copy(from);
+    const pos = from.clone().setY(PROJECTILE_Y);
+    mesh.position.copy(pos);
     this.scene.add(mesh);
     const light = new THREE.PointLight(color, 2.2, 7);
     mesh.add(light);
     mesh.layers.enable(GLOW_LAYER);
-    const dir = tmpV.copy(target).sub(from).setY(0).normalize().clone();
-    this.projectiles.push({ mesh, pos: from.clone(), dir, speed, damage, life: 4, color });
+    const dir = _projDir.copy(target).sub(pos).setY(0).normalize().clone();
+    this.projectiles.push({ mesh, pos, dir, speed, damage, life: 4, color });
   }
 
   _removeProjectile(i) {
@@ -1185,6 +1352,10 @@ export class Game {
         step *= 0.35;
       }
       this._mode?.update(step, rawDt);
+      // ONE call site for both modes. CityMode runs its own player update and
+      // DungeonMode runs _updatePlayer, so putting the stow policy in either
+      // would leave the sword permanently drawn in the other half of the game.
+      this._updateStance(step);
     }
 
     if (this._mode) this._mode.updateCamera(dt);
@@ -1330,11 +1501,72 @@ export class Game {
     a.losT -= dt;
     if (a.losT <= 0) {
       a.losT = 0.4;
+      // feetY is the BOLT PLANE (config.PROJECTILE_Y), not an arbitrary torso
+      // height: the question this probe answers is "would my shot survive the
+      // trip", so it has to be asked at the height the shot travels at.
       a.losBlocked = dist <= a.range
         && Boolean(this.world.obstacleField?.lineBlocked(
-          e.pos.x, e.pos.z, this.player.pos.x, this.player.pos.z, { feetY: 1.2 }));
+          e.pos.x, e.pos.z, this.player.pos.x, this.player.pos.z, { feetY: PROJECTILE_Y }));
     }
     return a.losBlocked;
+  }
+
+  /**
+   * Distance LOD for one skinned entity (enemy, boss or bound shadow).
+   *
+   * Two decisions, both keyed on plan distance to the PLAYER rather than to the
+   * camera: the camera is rigidly anchored to the player indoors, and player
+   * distance is the number every other range in this file already uses.
+   *
+   * Returns the dt animateRig should be given, or 0 for "skip the rig this
+   * frame" — the caller must not fall back to its own dt, because the skipped
+   * time is being accumulated for the next tick.
+   *
+   * @param {object} e         entity with .pos and .mesh
+   * @param {number} dt         frame delta
+   * @param {boolean} canCast   false for bound shadows — characters.js already
+   *   builds a ghost body with castShadow off (a translucent silhouette casting
+   *   a hard shadow reads as a bug), and creatures.js did NOT, so the army was
+   *   half-casting depending on which pack backed it. This settles it on the
+   *   ghost's side for both, which is also one depth pass saved per soldier.
+   * @returns {number}   dt to animate with, or 0 to skip
+   */
+  _entityLod(e, dt, canCast = true) {
+    const dx = e.pos.x - this.player.pos.x;
+    const dz = e.pos.z - this.player.pos.z;
+    const dsq = dx * dx + dz * dz;
+
+    // Cache the shadow-casting meshes once. Traversing a 62-bone skinned root
+    // every frame to find its two meshes is exactly the kind of per-frame cost
+    // this method exists to remove.
+    if (!e._lodMeshes) {
+      const meshes = [];
+      e.mesh.traverse((o) => { if (o.isMesh && !o.isDecal) meshes.push(o); });
+      e._lodMeshes = meshes;
+      // The telegraph mote is a separate mesh AND a glow-layer draw, so it is
+      // two draw calls per body — the single most expensive 132 triangles in
+      // the game. It exists to be READ (eyes flaring = a strike is coming), and
+      // there is nothing to read at 14 m under fog that starts at 13, so it
+      // goes away with the shadow. rig.eyeL/eyeR both point at it (entities.js
+      // aliases them), and game.js's flare writes .scale, not .visible, so the
+      // two never fight.
+      e._lodMote = e.mesh.userData.character?.eyes || null;
+    }
+    // Written every frame rather than on change: setCharacterQuality rewrites
+    // castShadow across every live instance whenever the governor steps a tier,
+    // and a cached "already correct" flag would silently lose to it.
+    const near = e.isBoss || dsq < LOD_CAST_RANGE_SQ;
+    const cast = canCast && this.quality.current.shadows && near;
+    for (const m of e._lodMeshes) m.castShadow = cast;
+    if (e._lodMote) e._lodMote.visible = near;
+
+    e._rigLag = (e._rigLag || 0) + dt;
+    // The boss is never throttled: it is one body and it is the thing the
+    // player is reading.
+    if (!e.isBoss && dsq > LOD_RIG_RANGE_SQ && e._rigLag < LOD_RIG_INTERVAL) return 0;
+    const lag = e._rigLag;
+    e._rigLag = 0;
+    return lag;
   }
 
   _updateEnemies(dt) {
@@ -1342,7 +1574,20 @@ export class Game {
     // Crowd separation happens once for the whole field, BEFORE anyone moves.
     // Doing it per-enemy after the move loop (the old _separate) left mesh
     // positions a frame behind the separated pos.
-    separate(this.enemies, 1, 900);
+    //
+    // 1.8, not the old 1.0. radiusScale multiplies (a.radius + b.radius), so 1.0
+    // means "just barely not intersecting": two grunts (r 0.55) settle 1.1 m
+    // apart and a pack of six collapses into a ~3 m pillar on whichever side of
+    // the player it arrived from. That is what made the first density
+    // screenshots of this wave read as an EMPTY room with a clump in it — the
+    // enemies were there, they were just all standing in the same place.
+    //
+    // At 1.8 the same two grunts hold 2.0 m and six of them occupy a ~7 m arc:
+    // a ring rather than a pillar, with gaps a 7.5 m dash can actually go
+    // through, which is the whole reason the rooms were made dash-sized. Bosses
+    // benefit most — a scale-2.5 boss (r 1.5) now keeps its adds 3.7 m off, so
+    // it is never buried inside its own pack.
+    separate(this.enemies, 1.8, 900);
     for (const e of this.enemies) {
       if (e.spawning > 0) {
         e.spawning -= dt;
@@ -1361,7 +1606,7 @@ export class Game {
       }
       if (e.swing > 0) e.swing -= dt;
 
-      const toPlayer = tmpV.copy(p.pos).sub(e.pos).setY(0);
+      const toPlayer = _aimDir.copy(p.pos).sub(e.pos).setY(0);
       const dist = toPlayer.length();
       if (dist > 0.001) toPlayer.divideScalar(dist);
 
@@ -1452,13 +1697,18 @@ export class Game {
       let atkPhase = 0;
       if (e.telegraph > 0) atkPhase = Math.min(1, (e.telegraph + 0.3) / atkSpan);
       else if (e.swing > 0) atkPhase = e.swing / atkSpan;
-      animateRig(e.mesh, {
-        moving, speed: Math.hypot(e.vel.x, e.vel.z), t: this.time + e.pos.x,
-        attackPhase: atkPhase,
-        attackContact: (e.telegraphMax || 0.42) / atkSpan,
-        hurt: Math.max(0, e.hurt),
-        dt,
-      });
+      // LOD: shadow-cast decision plus the rig's own tick rate. rigDt is 0 when
+      // this distant body's mixer is being skipped for a frame.
+      const rigDt = this._entityLod(e, dt);
+      if (rigDt > 0) {
+        animateRig(e.mesh, {
+          moving, speed: Math.hypot(e.vel.x, e.vel.z), t: this.time + e.pos.x,
+          attackPhase: atkPhase,
+          attackContact: (e.telegraphMax || 0.42) / atkSpan,
+          hurt: Math.max(0, e.hurt),
+          dt: rigDt,
+        });
+      }
 
       // health bar billboard. A flat 5.6 for bosses put the bar across the
       // face of anything scaled past ~2.3 (a scale-3.4 boss is 7.3 m tall);
@@ -1475,7 +1725,7 @@ export class Game {
     const p = this.player;
     e.swing = 0.3;
     if (e.base.ai === 'ranged' && !e.isBoss) {
-      this._spawnProjectile(e.pos.clone().setY(1.6), p.pos.clone().setY(1.2), e.atk, e.base.glow, 14);
+      this._spawnProjectile(e.pos.clone().setY(PROJECTILE_Y), p.pos.clone().setY(1.2), e.atk, e.base.glow, 14);
       this.audio.tone({ freq: 700, type: 'triangle', gain: 0.1, decay: 0.2, sweep: 300 });
       return;
     }
@@ -1517,12 +1767,35 @@ export class Game {
         b._slam = true;
         this.fx.ring(b.pos, 0xff4d6d, 9, 0.75);
       } else if (b.pattern === 1) {
-        // Spread shot: a fan of projectiles.
-        const n = b.enraged ? 9 : 6;
+        // Spread shot: a fan of projectiles, ODD count in both phases.
+        //
+        // 7/9 rather than 6/9. An EVEN count has no bolt on the aim bearing, so
+        // the line straight back to the boss is a permanently safe corridor and
+        // the pattern stops being a threat past a fixed range. The arithmetic:
+        // bolts fly flat at PROJECTILE_Y 1.6 and the player hit test is a 1.1 m
+        // sphere centred at 1.2, so the LATERAL hit radius is
+        // sqrt(1.1^2 - 0.4^2) = 1.025 m; a bolt at angle t off the bearing
+        // passes the player at d*sin(t). With n=6 the innermost pair sits at
+        // +/-0.12 rad, which clears 1.025 m at d = 8.6 m — so a 6-bolt volley
+        // could not touch a stationary player at 10 or 14 m, in a chamber that
+        // is 38 m across. An odd count always puts one bolt on the bearing, so
+        // standing still is always punished and MOVING is the answer, which is
+        // the whole point of the bigger room. The spacing is unchanged at 0.24
+        // rad, so the fan still opens with range: at 4 m the two neighbours also
+        // connect (4*sin(0.24) = 0.95 m < 1.025), at 8 m only the centre does.
+        const n = b.enraged ? 9 : 7;
+        // Sampled ONCE, outside the loop. See the _aimDir comment at the top of
+        // this file: reading the bearing per bolt is what let a scratch-vector
+        // alias turn this fan into a running sum.
+        const aim = Math.atan2(toPlayer.x, toPlayer.z);
         for (let i = 0; i < n; i++) {
-          const a = Math.atan2(toPlayer.x, toPlayer.z) + (i - (n - 1) / 2) * 0.24;
-          tmpV2.set(Math.sin(a), 0, Math.cos(a)).multiplyScalar(20).add(b.pos).setY(1.4);
-          this._spawnProjectile(b.pos.clone().setY(2.4), tmpV2, b.atk * 0.6, b.base.glow, 15);
+          const a = aim + (i - (n - 1) / 2) * 0.24;
+          tmpV2.set(Math.sin(a), 0, Math.cos(a)).multiplyScalar(20).add(b.pos).setY(PROJECTILE_Y);
+          // Chest height on the PLAYER, not on the boss. A scale-2.5 boss could
+          // plausibly throw from 2.4 m, but the bolt flies flat and the player's
+          // hit sphere tops out at 2.3 — so a "correct" shoulder height is a
+          // pattern that cannot land. See _spawnProjectile.
+          this._spawnProjectile(b.pos.clone().setY(PROJECTILE_Y), tmpV2, b.atk * 0.6, b.base.glow, 15);
         }
         this.audio.skill();
       } else {
@@ -1629,12 +1902,15 @@ export class Game {
       let atkPhase = 0;
       if (s.telegraph > 0) atkPhase = Math.min(1, (s.telegraph + SHADOW_STRIKE) / atkSpan);
       else if (s.swing > 0) atkPhase = s.swing / atkSpan;
-      animateRig(s.mesh, {
-        moving, speed: Math.hypot(s.vel.x, s.vel.z), t: this.time + s.life,
-        attackPhase: atkPhase,
-        attackContact: (s.telegraphMax || SHADOW_WINDUP) / atkSpan,
-        dt,
-      });
+      const rigDt = this._entityLod(s, dt, false);
+      if (rigDt > 0) {
+        animateRig(s.mesh, {
+          moving, speed: Math.hypot(s.vel.x, s.vel.z), t: this.time + s.life,
+          attackPhase: atkPhase,
+          attackContact: (s.telegraphMax || SHADOW_WINDUP) / atkSpan,
+          dt: rigDt,
+        });
+      }
     }
   }
 

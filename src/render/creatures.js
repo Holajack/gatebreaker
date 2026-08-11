@@ -6,7 +6,10 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLOW_LAYER } from './glow.js';
 import { applyRim } from './rim.js';
 import { PROCEDURAL_HEIGHT } from './characters.js';
-import { Quality, TIERS } from '../core/quality.js';
+import {
+  Quality, TIERS,
+  skinnedBodyAvailable, acquireSkinnedBody, releaseSkinnedBody,
+} from '../core/quality.js';
 // One-way dependency: weapons.js pulls in nothing from render/ beyond glow.js,
 // so this cannot cycle. Needed for bound clones of creatures whose modelled
 // weapon lives in items.glb (alien dagger, tribal axe) — see the shadow branch
@@ -825,7 +828,7 @@ function eyeMaterial(glow) {
 // ------------------------------------------------------------- instances
 
 class CreatureInstance {
-  constructor(root, meshes, mixer, cast, template) {
+  constructor(root, meshes, mixer, cast, template, isShadow = false) {
     this.root = root;
     this.meshes = meshes;
     /** The representative mesh, for callers that expect exactly one. */
@@ -854,8 +857,15 @@ class CreatureInstance {
     this._armed = false;
     this._lastNow = -1;
     this._owned = [];          // per-instance materials/geometry to free
+    // Which side of quality.js's shared skinned-body ledger this instance sits
+    // on. Taken at CONSTRUCTION, not from the later applyShadowSkin block: the
+    // ledger is a claim on a slot, and the slot has to be claimed on the side
+    // the caller asked for or a shadow could be counted as an enemy for the
+    // rest of its life.
+    this.isShadow = Boolean(isShadow);
     _live.add(this);
     _liveInstances++;
+    acquireSkinnedBody(this.isShadow);
   }
 
   _clip(state) {
@@ -982,6 +992,7 @@ class CreatureInstance {
     _live.delete(this);
     _liveInstances = Math.max(0, _liveInstances - 1);
     if (this.isShadow) _shadowInstances = Math.max(0, _shadowInstances - 1);
+    releaseSkinnedBody(this.isShadow);
     try {
       this.mixer.stopAllAction();
       this.mixer.uncacheRoot(this.root);
@@ -1055,7 +1066,14 @@ export function makeCreature({
   shadow = false,
 } = {}) {
   if (!_loaded) return null;
+  // Two gates, and they mean different things. The per-module budget is this
+  // pack's own CPU ceiling on ENEMY monsters (shadows are excluded from it —
+  // see _shadowInstances). The shared ledger in quality.js is the ceiling on
+  // skinned bodies in the SCENE from every source at once, shadows very much
+  // included, because the whole point is that a full company has to trade
+  // against the wave rather than stack on top of it.
   if (!ignoreBudget && (_liveInstances - _shadowInstances) >= _quality.budget) return null;
+  if (!ignoreBudget && !skinnedBodyAvailable(_quality.tier, shadow)) return null;
 
   const cast = creature
     ? castForKey(creature, { archetype, rank })
@@ -1096,7 +1114,7 @@ export function makeCreature({
   if (cast.look.hover) root.position.y = cast.look.hover * scale;
 
   const mixer = new THREE.AnimationMixer(inst3d);
-  const inst = new CreatureInstance(root, meshes, mixer, cast, tpl);
+  const inst = new CreatureInstance(root, meshes, mixer, cast, tpl, shadow);
 
   // sockets
   inst3d.updateMatrixWorld(true);
@@ -1143,7 +1161,8 @@ export function makeCreature({
   // one traversal darkens the axe with the arm that swings it.
   if (shadow) {
     applyShadowSkin(inst3d, inst, glow);
-    inst.isShadow = true;
+    // inst.isShadow was already set by the constructor (it owns the ledger
+    // claim); this counter is the module's own, and stays here.
     _shadowInstances++;
   }
 

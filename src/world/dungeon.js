@@ -5,7 +5,9 @@ import { buildBiomeEnvironment } from '../render/env.js';
 import { GLOW_LAYER } from '../render/glow.js';
 import { ObstacleField } from './obstacles.js';
 import { buildNavGrid } from './navgrid.js';
-import { generateLayout, LAYOUT_PARAMS } from './dungeonlayout.js';
+import {
+  generateLayout, LAYOUT_PARAMS, COVER_KINDS, bossAnchor, exitAnchor,
+} from './dungeonlayout.js';
 import {
   cityKitLoaded, dungeonKitLoaded, cityMaterials, pieceBounds,
   pieceGeometryColored,
@@ -69,6 +71,16 @@ export const DUNGEON_MODULES = {
   statue: 'ruin_statue_fox',
   candles: 'dungeon_candle_triple',
   stalagmite: null,
+  // Interior cover (see dungeonlayout.js's INTERIOR COVER block). The third
+  // cover kind, `pillar`, deliberately has NO role of its own: it re-uses
+  // `column` above and therefore its InstancedMesh, so the whole cover system
+  // costs exactly TWO extra draw calls no matter how many pieces it places.
+  // Both picks are the cheapest line-of-sight blockers in dungeonkit.json per
+  // metre of cover: rubble_large 788 tris over 4.06 m = 194 tris/m,
+  // wall_broken 784 over 2.0 m = 392 tris/m (used only on the boss colonnade,
+  // where the architectural read is worth the premium).
+  coverRubble: 'dungeon_rubble_large',
+  coverStub: 'dungeon_wall_broken',
 };
 
 // Per-rank themed overlays on the base table (spec "tilesets": the optional
@@ -103,9 +115,58 @@ const DRESS_TINT = { E: 0xaab3d8, D: 0xdcc9a8, C: 0xbfe6f5 };  // C: deepglass c
 // "draw-call creep from dressing enthusiasm" as the failure mode — the caps
 // keep the worst-case D layout inside <= 24 draws / <= 130k tris with the kit
 // loaded, sized against performance.triangleBudget's per-role maxima.
+// torches 34 -> 40: dungeonlayout's buildDecor now hands over a spatially
+// thinned, already-capped list (torchMinGap + torchCap), and 40 is that cap —
+// so this stops being a truncation that silently strips whole rooms of their
+// light anchors and goes back to being the backstop it was meant to be. The
+// extra 6 sconces are +0 draw calls (one InstancedMesh per role); measured over
+// the whole wave-3 room change, D's triangle delta went 93,776 -> 95,010 and
+// its draw calls did not move at all (19), against 130k / 24.
+// cover 60: measured over 200 seeds per rank the placer emits E 18-40 pieces
+// per gate (mean 30) and D 32-57 (mean 43.5), so 60 is a backstop that never
+// bites in practice rather than a truncation that would silently strip the
+// last room in scan order of its cover. Worst-case triangles at that cap, with
+// D's measured mix (pillar 21.5 / rubble 18.8 / stub 3.2 scaled to 60):
+// 30*136 + 26*788 + 4*784 = 27.7k — the number to watch against the 130k
+// budget, and the reason `pillar` is the majority kind.
 const DRESS_LIMITS = {
-  archways: 12, columns: 20, torches: 34, clutter: 16, alcoves: 6, shelves: 3,
+  archways: 12, columns: 20, torches: 40, clutter: 16, alcoves: 6, shelves: 3,
+  cover: 60,
 };
+
+// WHICH DRESSING ROLES CAST SHADOWS — and why most of them no longer do.
+//
+// A shadow caster is not a cheap flag: the key light's depth pass is a SECOND
+// full submission of that InstancedMesh, so every casting role costs one extra
+// draw call and one extra copy of its triangles per frame. Nothing in this
+// project measured that until fixup 1, because renderer.info.reset() runs after
+// WebGLShadowMap.render() — with info.autoReset left at its default the shadow
+// pass is erased from the counters, which is exactly why tools/dungeon-test.mjs
+// reported E 15 draws / 65,931 tris for a shell that submits 26 / 129,592 in a
+// live frame. Measured on the live E gate at seed 0.42, the depth pass was
+// 61,868 of those 129,592 triangles: 48% of the whole shell budget, spent on
+// shadows nobody was looking at.
+//
+// The rule now: a role casts only if its shadow reads as ARCHITECTURE.
+//   cast     archway (3.6 m crown over a doorway), doorFrame, column (4 m,
+//            and the cover system's pillars ride this same field), alcove,
+//            bookcase, statue — tall pieces whose shadow lands metres away
+//            across floor the player fights on.
+//   no cast  torch sconces (wall-mounted at 1.75 m under a key light coming
+//            from above — the shadow lands on the wall behind the plate),
+//            crates/barrels/pots/candles (kerb height; the shadow never leaves
+//            the piece's own footprint), and coverRubble / coverStub, whose
+//            piles sit ON the floor for the same reason.
+// Measured on the live E gate at seed 0.42, before -> after (tools/
+// shell-breakdown.mjs, one renderer.render delta with info.autoReset false):
+// 26 draws / 129,592 tris -> 20 / 109,008, and the cover field's own frame cost
+// 4 draws / 17,304 tris -> 2 / 11,804. The cover triangle saving reads smaller
+// than half because the same change widened the boss debris arc (quadSlots
+// 4 -> 7), so there is more cover in that number, not less.
+// Everything still RECEIVES shadows, so nothing reads unlit.
+const DRESS_SHADOW_CASTERS = new Set([
+  'archway', 'doorFrame', 'column', 'alcove', 'bookcase', 'statue',
+]);
 
 // STEP 9 silhouette targets. The dungeon kit is authored to its 2 m storey
 // while the shell's walls run 4 m, so the structural dressing roles stretch
@@ -345,8 +406,18 @@ export class Dungeon {
     // absent means LAYOUT_PARAMS defaults, per spec config.js note.
     const baseParams = LAYOUT_PARAMS[gate.rank] || LAYOUT_PARAMS.E;
     const params = gate.crawl ? { ...baseParams, ...gate.crawl } : baseParams;
+    // How many enemies this RUN holds is a roll, not a constant (config.js
+    // GATES[].enemyBand). It is written back onto the gate object on purpose:
+    // gate.enemies is the number game.js meters spawns against and the number
+    // the HUD and the results rows print, and there is exactly one of them, so
+    // the roll has to land there or the counter would disagree with the world.
+    // Idempotent by construction — same gate + same seed = same number — so
+    // the context-loss repair path (world.build(this.gate, this.seed)) rebuilds
+    // the identical run instead of re-rolling under the player.
+    this.enemyTotal = rollEnemyCount(gate, seed);
+    gate.enemies = this.enemyTotal;
     const layout = generateLayout({
-      rank: gate.rank, seed, params, enemies: gate.enemies,
+      rank: gate.rank, seed, params, enemies: this.enemyTotal,
     });
     this.layout = layout;
     this.kind = layout.kind;
@@ -1255,6 +1326,37 @@ export class Dungeon {
       field.addCircle(c.x, c.z, 0.34, { nav: false, tag: 'column' });
     }
 
+    // INTERIOR COVER — the wave-3-A2 answer to "38 x 38 m of empty floor".
+    // The placer and every clearance rule live in dungeonlayout.js buildCover;
+    // this loop only materialises what it decided, reading the SAME COVER_KINDS
+    // footprint table the placer sized its dash lanes against, so what a test
+    // measures is what the player collides with.
+    //
+    // Collision, per spec collisionNav: solid enough to break line of sight
+    // (every `top` clears COVER_MIN_TOP = config.PROJECTILE_Y + 0.1 = 1.7 m,
+    // the plane EVERY bolt in the game flies at — that is the whole point),
+    // and nav:false like every other dressing record. nav:true is NOT
+    // an option here: navgrid pads each blocker by pad + 0.7072*cell = ~1.38 m,
+    // so a 3.9 m rubble pile would eat 6.7 x 4.3 m of flow field and close the
+    // 3.0 m dash lanes the placer just guaranteed. resolve() is authoritative
+    // for bodies; the flow field's job stays rooms and corridors.
+    for (const c of layout.decor.cover.slice(0, DRESS_LIMITS.cover)) {
+      const k = COVER_KINDS[c.kind];
+      if (!k) continue;
+      if (k.shape === 'circle') {
+        // Re-uses the `column` role's InstancedMesh: +0 draw calls.
+        put('column', c.x, 0, c.z, c.yaw, 1, colSy, 1);
+        field.addCircle(c.x, c.z, k.r, { nav: false, tag: 'cover' });
+      } else {
+        // sx/sy/sz come from COVER_KINDS so the drawn silhouette and the
+        // footprint the placer reserved can never disagree.
+        put(c.kind === 'rubble' ? 'coverRubble' : 'coverStub', c.x, 0, c.z, c.yaw,
+          k.sx ?? 1, k.sy ?? 1, k.sz ?? 1);
+        field.addBox(c.x, c.z, k.hx * 2, k.hz * 2, c.yaw,
+          { top: k.top, nav: false, tag: 'cover' });
+      }
+    }
+
     // Torch sconces under the shell's flame billboards (flame at wall +0.45,
     // y 1.8): the sconce head tops out just beneath the flame. The mounted
     // piece is authored plate-at-origin extending local +Z, and forward(yaw)
@@ -1363,7 +1465,9 @@ export class Dungeon {
       mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
       mesh.instanceMatrix.needsUpdate = true;
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-      mesh.castShadow = true;
+      // See DRESS_SHADOW_CASTERS: casting is per-role, because the depth pass
+      // re-submits the whole field and the budget cannot afford it for clutter.
+      mesh.castShadow = DRESS_SHADOW_CASTERS.has(role);
       mesh.receiveShadow = true;
       mesh.frustumCulled = false;
       this.group.add(mesh);
@@ -1737,23 +1841,21 @@ export class Dungeon {
   /**
    * Boss chamber anchor: the far-centre — pushed away from the room's first
    * door so the rise animation reads from the entrance.
+   *
+   * The formula moved to dungeonlayout.js bossAnchor when the chamber gained a
+   * cover field: the placer has to hold this exact point clear, and a second
+   * copy of the arithmetic would drift the first time either side was tuned —
+   * with a boss rising inside a pillar as the symptom.
    */
   bossSpawn() {
     const layout = this.layout;
     if (!layout) return new THREE.Vector3(0, 0, -10);
     const r = layout.rooms[layout.bossRoom];
-    const c = r.centre;
     const doorId = r.doors[0];
     const door = doorId !== undefined ? layout.doors[doorId] : null;
-    if (!door) return new THREE.Vector3(c.x, 0, c.z);
-    let dx = c.x - door.x;
-    let dz = c.z - door.z;
-    const len = Math.hypot(dx, dz) || 1;
-    dx /= len; dz /= len;
-    // Quarter-size push, clamped 1.5 m inside the room's walls.
-    const px = Math.min(r.x + r.w - 1.5, Math.max(r.x + 1.5, c.x + dx * r.w * 0.25));
-    const pz = Math.min(r.z + r.d - 1.5, Math.max(r.z + 1.5, c.z + dz * r.d * 0.25));
-    return new THREE.Vector3(px, 0, pz);
+    if (!door) return new THREE.Vector3(r.centre.x, 0, r.centre.z);
+    const a = bossAnchor(r, door);
+    return new THREE.Vector3(a.x, 0, a.z);
   }
 
   spawnPointsFor(roomId) {
@@ -1772,21 +1874,14 @@ export class Dungeon {
     const layout = this.layout;
     if (!layout) return null;
     const r = layout.rooms[layout.bossRoom];
-    const c = r.centre;
     // Back wall = away from the chamber's entrance, the same axis bossSpawn
-    // pushes along, extended further and clamped 2.2 m inside the walls.
+    // pushes along, extended further and clamped 2.2 m inside the walls. Shared
+    // with the cover placer via dungeonlayout.js exitAnchor for the same
+    // single-source reason as bossSpawn — a rubble pile on the exit portal
+    // would end a cleared run with the player walking into a rock.
     const doorId = r.doors[0];
     const door = doorId !== undefined ? layout.doors[doorId] : null;
-    let dx = 0;
-    let dz = -1;
-    if (door) {
-      dx = c.x - door.x;
-      dz = c.z - door.z;
-      const len = Math.hypot(dx, dz) || 1;
-      dx /= len; dz /= len;
-    }
-    const px = Math.min(r.x + r.w - 2.2, Math.max(r.x + 2.2, c.x + dx * r.w * 0.42));
-    const pz = Math.min(r.z + r.d - 2.2, Math.max(r.z + 2.2, c.z + dz * r.d * 0.42));
+    const { x: px, z: pz, dx, dz } = exitAnchor(r, door);
 
     const accent = new THREE.Color(this.biome?.accent ?? 0x7c5cff);
     const group = new THREE.Group();
@@ -1851,6 +1946,27 @@ const _bestIdx = [-1, -1, -1];
 // In sRGB the same call is the perceptual "make this dark navy a readable
 // stone" it reads as, and one threshold then behaves the same across six
 // biomes of wildly different hue.
+/**
+ * Roll this run's trash total from the gate's band.
+ *
+ * Its own forked mulberry32 constant, same family as the layout's three
+ * streams: retuning the count can never reshuffle a wall, and a layout tweak
+ * can never change the count. Falls back to the fixed `enemies` for gates with
+ * no band (B+ still mount the arena world) and for any malformed band.
+ * @param {object} gate config.js GATES row
+ * @param {number} seed per-run gate seed
+ * @returns {number}
+ */
+function rollEnemyCount(gate, seed) {
+  const band = gate.enemyBand;
+  if (!Array.isArray(band) || band.length !== 2) return gate.enemies;
+  const lo = Math.min(band[0], band[1]) | 0;
+  const hi = Math.max(band[0], band[1]) | 0;
+  if (!(hi >= lo) || lo < 1) return gate.enemies;
+  const rnd = mulberry32((seed ^ 0x632be59b) >>> 0);
+  return lo + Math.floor(rnd() * (hi - lo + 1));
+}
+
 const _hsl = { h: 0, s: 0, l: 0 };
 function lift(color, minL, desat = 0.22) {
   color.getHSL(_hsl, THREE.SRGBColorSpace);

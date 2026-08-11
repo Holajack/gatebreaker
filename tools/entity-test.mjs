@@ -10,7 +10,9 @@
 import { spawn } from 'node:child_process';
 import { chromium } from 'playwright';
 
-const PORT = Number(process.env.PORT || 4321);
+// GB_PORT is the repo-wide convention (tools/_harness.mjs); PORT is kept as an
+// alias so anything that used to set it still works.
+const PORT = Number(process.env.GB_PORT || process.env.PORT || 4321);
 const URL = `http://localhost:${PORT}/`;
 // GB_ITERATIONS raises the gate count. 3 is enough for the entity lifecycle,
 // but characters.js warms a 40-entry appearance cache and game.js now allocates
@@ -128,13 +130,83 @@ const result = await page.evaluate(async (iterations) => {
   // Warm the geometry/material caches. Archetypes are rolled at random, so
   // force one of every enemy kind plus the boss: an archetype that first
   // appears during a measured run would look exactly like a leak.
+  // EVERY MEASURED ITERATION MUST DO THE SAME WORK, so that any growth between
+  // them is a leak and nothing else. Two unseeded sources made them differ:
+  // game.js:607 mixes Math.random() into the gate seed, and _killEnemy rolls
+  // Math.random() to decide whether a kill drops a weapon — and a weapon drop
+  // uploads that weapon's own model geometry the first time it is drawn.
+  // Different seeds meant different weapons in different gates, which is why the
+  // series reached the SAME total (+13 both times) by different staircases:
+  // [0,8,8,13,13,13] and [0,7,10,10,10,13], one passing and one failing on
+  // identical code. A fresh stream from one constant per gate keeps the run
+  // varied but makes gate N a repeat of gate 1 — and warming under the SAME
+  // constant means gate 1's own drops are already resident.
+  const realRandom = Math.random;
+  const seededStream = (seed) => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const GATE_SEED = 0x5eed1234;
+
   noShadows();
+  Math.random = seededStream(GATE_SEED);
   g.startGate(0);
   const rnd = g.rnd;
-  for (const roll of [0.1, 0.5, 0.72, 0.95]) { g.rnd = () => roll; g._spawnEnemy(); }
+  const ROLLS = [0.1, 0.5, 0.72, 0.95];   // grunt, stalker, brute, caster at E
+
+  // Park a batch in front of the camera and render it. Spawns land 12+ m out and
+  // rise out of the floor, and three only counts a geometry in info.memory once
+  // it has actually been UPLOADED — i.e. RENDERED — so a body that warms
+  // off-camera warms nothing.
+  const showAndRender = async (bodies) => {
+    bodies.forEach((b, i) => {
+      const a = (i / Math.max(1, bodies.length)) * Math.PI * 2;
+      b.pos.set(g.player.pos.x + Math.cos(a) * 3.0, 0, g.player.pos.z + Math.sin(a) * 3.0);
+      b.spawning = 0;
+      b.mesh.position.copy(b.pos);
+      if (b.maxHp) b.hp = b.maxHp * 0.5;   // health bars visible too
+    });
+    await frames(6);
+  };
+
+  // EVERY APPEARANCE, RENDERED, BEFORE THE FIRST MEASURED GATE.
+  //
+  // entities.js gives each archetype APPEARANCE_VARIANTS = 4 looks and hands
+  // them out from a per-archetype spawn counter; characters.js merges one
+  // geometry per look and caches 40 of them. Combined with the upload rule
+  // above, WHICH looks are resident at gate N depends on which bodies happened
+  // to stand on camera in gates 1..N — and the leak series inherited that as
+  // pure run-to-run noise: back-to-back runs of this same tree produced
+  // [0,0,4,4,4,6] and [0,0,12,16,18,18], i.e. tail rates of 2 and of 0 for
+  // identical code. Cycling all four variants of all four E archetypes plus the
+  // shadow through the camera here makes the whole set resident before run 1,
+  // so anything the measured loop adds afterwards is the thing being hunted.
+  // Four bodies at a time, cleared between batches: makeCharacter refuses the
+  // skinned path once quality.js's live-body ledger is full, and a procedural
+  // fallback warms no merged geometry at all.
+  for (let variant = 0; variant < 4; variant++) {
+    for (const roll of ROLLS) { g.rnd = () => roll; g._spawnEnemy(); }
+    g.rnd = rnd;
+    await showAndRender(g.enemies);
+    g.clearEntities();
+    await frames(2);
+  }
+  for (let variant = 0; variant < 4; variant++) {
+    const s = g._spawnShadow(g.player.pos.clone());
+    if (!s) break;
+    await showAndRender(g.shadows);
+    g.clearEntities();
+    await frames(2);
+  }
+
+  // One of each again, plus the boss, so the corpse rig and the boss look warm.
+  for (const roll of ROLLS) { g.rnd = () => roll; g._spawnEnemy(); }
   g.rnd = rnd;
   g._spawnBoss();
   g._spawnShadow(g.player.pos.clone());
+  await showAndRender([...g.enemies, ...g.shadows]);
   await frames(20);
   // Kill everything so the corpse rig warms too.
   while (g.enemies.length) g._damageEnemy(g.enemies[0], g.enemies[0].maxHp * 4);
@@ -144,6 +216,7 @@ const result = await page.evaluate(async (iterations) => {
   out.warm = snapshot();
 
   for (let it = 0; it < iterations; it++) {
+    Math.random = seededStream(GATE_SEED);
     g.startGate(0);                 // E gate
     noShadows();
     await frames(30);
@@ -203,6 +276,87 @@ const result = await page.evaluate(async (iterations) => {
     g.quit();
     await frames(10);
     out.runs.push(snapshot());
+  }
+  Math.random = realRandom;
+
+  // --- SKINNED-CHARACTER COST -------------------------------------------------
+  // Nothing in this project measured it before, which is how a wave could land
+  // believing skinned bodies were 14k triangles each and 80% of the frame. They
+  // are not — but they ARE the entity cost that scales with live enemy count, so
+  // the number needs a home and a fence.
+  //
+  // DELIBERATELY AFTER THE MEASURED LOOP, in a gate of its own. It composes the
+  // worst honest frame this tool can build — a full live wave plus the field
+  // shadow army at its cap, all on camera — which means it RENDERS more distinct
+  // appearances than an ordinary gate does. Run inside iteration 0, as it first
+  // shipped, that landed straight in the middle of the geometry series the leak
+  // guard below reads, and turned a stable assert into a coin flip (tail rates
+  // of 0 and 2 measured on back-to-back runs of the same tree). Its own gate
+  // costs one extra world build and takes the interference to zero.
+  {
+    g.startGate(0);
+    noShadows();
+    await frames(20);
+    g.clearEntities();
+    const wave = g.gate.waveSize;
+    for (let i = 0; i < wave; i++) {
+      const a = (i / wave) * Math.PI * 2;
+      const at = g.player.pos.clone();
+      at.x += Math.cos(a) * 6.5;
+      at.z += Math.sin(a) * 6.5;
+      g._spawnEnemy(at, null);
+    }
+    let guard = 0;
+    while (g.shadows.length < g.fieldCapacity() && guard++ < 40) {
+      const at = g.player.pos.clone();
+      at.x += ((guard % 5) - 2) * 1.4;
+      at.z += (Math.floor(guard / 5) - 2) * 1.4;
+      if (!g._spawnShadow(at, true)) break;
+    }
+    for (const e of g.enemies) { e.spawning = 0; e.mesh.position.y = 0; }
+    await frames(6);
+
+    g.renderer.info.autoReset = false;
+    g.renderer.info.reset();
+    g.glow.render(g.scene, g.camera);
+    const composed = { calls: g.renderer.info.render.calls, triangles: g.renderer.info.render.triangles };
+    g.renderer.info.autoReset = true;
+
+    let skinnedMeshes = 0;
+    let skinnedBodies = 0;
+    let skinnedTris = 0;
+    const perBody = [];
+    g.scene.traverse((o) => {
+      if (!o.isSkinnedMesh) return;
+      for (let n = o; n; n = n.parent) if (!n.visible) return;
+      const geo = o.geometry;
+      const t = geo?.index ? geo.index.count / 3 : (geo?.attributes?.position?.count || 0) / 3;
+      skinnedMeshes++;
+      skinnedTris += t;
+      // The 132-triangle telegraph mote rides on the head socket as its own
+      // SkinnedMesh-parented mesh; it is not a body and counting it as one
+      // would double every census.
+      if (t > 400) { skinnedBodies++; perBody.push(Math.round(t)); }
+    });
+
+    out.skinned = {
+      tier: g.quality.current.name,
+      ceiling: g.quality.current.maxSkinnedBodies,
+      fieldCapacity: g.fieldCapacity(),
+      waveSize: wave,
+      enemies: g.enemies.length,
+      shadows: g.shadows.length,
+      meshes: skinnedMeshes,
+      bodies: skinnedBodies,
+      triangles: Math.round(skinnedTris),
+      perBody: perBody.sort((a, b) => b - a),
+      frameCalls: composed.calls,
+      frameTriangles: composed.triangles,
+    };
+    g.clearEntities();
+    await frames(4);
+    g.quit();
+    await frames(10);
   }
 
   // Same loop, shadows left alone, purely to quantify the world.js shadow-map
@@ -287,13 +441,30 @@ if (shadowLeak > 0) {
 //      a real leak (nothing ever freed) climbs by ~12 EVERY gate, forever.
 //   2. total growth never exceeds the cache cap. A leak is unbounded.
 // Verified: with characters.glb moved aside the series is flat at 0.
+//
+// THE TAIL IS A SLOPE OVER THREE GATES, NOT A DIFFERENCE BETWEEN TWO. A cache
+// that first renders a late variant produces a STEP — one gate up, then flat —
+// and a two-point tail that happens to straddle that step reports the step's
+// whole height as a rate. That is how a 50%-flaky leak guard reads on a tree
+// with no leak in it (series [0,0,4,4,4,6] scored 2/gate; [0,0,10,10,10,10]
+// scored 0, same code, same machine, minutes apart). Averaging the last three
+// gates keeps the discrimination that matters — a real leak frees nothing and
+// climbs ~12 EVERY gate, twelve times the bound — while a single step costs at
+// most half its height. The warm-up and the pinned per-gate random stream above
+// are the other half of the fix — they remove the steps rather than tolerate
+// them. Measured after all three changes, three consecutive runs on this tree:
+// series [0,7,7,7,7,7] every time, tail 0.0/gate. The +7 is iteration 0 paying
+// for its own draw-call measurement, once; every gate after it repeats gate 1.
 const GEO_CACHE_MAX = 40;
-const geoTail = geoGrowth.slice(-2);
-const tailRate = geoTail.length < 2 ? 0 : geoTail[1] - geoTail[0];
+const geoTail = geoGrowth.slice(-3);
+const tailRate = geoTail.length < 2
+  ? 0
+  : (geoTail[geoTail.length - 1] - geoTail[0]) / (geoTail.length - 1);
 const geoTotal = geoGrowth[geoGrowth.length - 1] ?? 0;
 check('geometry growth is a bounded cache converging, not a leak',
   tailRate <= 1 && geoTotal <= GEO_CACHE_MAX,
-  `tail rate ${tailRate}/gate (leak would be ~12), total +${geoTotal} of ${GEO_CACHE_MAX} cap, series=${JSON.stringify(geoGrowth)}`);
+  `tail rate ${tailRate.toFixed(1)}/gate over the last ${geoTail.length} gates `
+  + `(leak would be ~12), total +${geoTotal} of ${GEO_CACHE_MAX} cap, series=${JSON.stringify(geoGrowth)}`);
 check('textures do not grow between gate iterations', texGrowth.every((d) => d <= 0), `delta=${JSON.stringify(texGrowth)}`);
 check('base rig is <= 6 meshes per character', result.rigMeshes.every((n) => n <= 6), `max=${Math.max(...result.rigMeshes)}`);
 // Whole-pipeline cost, so it includes the glow pass on top of the main pass.
@@ -306,6 +477,49 @@ check(
   `${result.drawCalls.perCharacter}`,
 );
 check('camera near plane raised to 1.0', result.nearPlane === 1.0, `near=${result.nearPlane}`);
+
+// --- skinned-character cost -------------------------------------------------
+// The fence has to survive two different futures: someone raising waveSize
+// again, and someone swapping in a denser character pack. So it is asserted as
+// a COUNT against the tier's own ceiling and as a PER-BODY triangle cap, rather
+// than as one absolute total that stops meaning anything the moment the tier
+// changes.
+//
+// Exempt bodies: makeCharacter/makeCreature take ignoreBudget for exactly two
+// callers — the player and the boss — so the live count may legitimately sit
+// two over quality.js's ceiling and no further.
+const LEDGER_EXEMPT = 2;
+// 10,000 triangles per body. Measured on the shipped packs (tools/density-probe
+// and tools/creature-test, E and D): creature enemies 3.2k-7.6k, merged
+// characters 5.1k-7.3k, bosses 4.9k-7.4k, the player 8.45k — that last one is
+// the number this cap has headroom over (~18%). Deliberately per-BODY rather
+// than a total: a total stops meaning anything the moment the tier ceiling
+// changes, whereas this fails the day a pack lands whose bodies are twice as
+// dense, which is the silent doubling worth catching.
+const TRIS_PER_BODY_MAX = 10000;
+const sk = result.skinned;
+console.log('\n--- skinned-character cost (composed peak: full wave + field army) ---');
+if (!sk) {
+  check('skinned-character census was taken', false, 'result.skinned missing');
+} else {
+  console.log(`  tier ${sk.tier}, ledger ceiling ${sk.ceiling} bodies (+${LEDGER_EXEMPT} exempt: player, boss)`);
+  console.log(`  live: waveSize ${sk.waveSize} -> ${sk.enemies} enemies + ${sk.shadows} shadows`);
+  console.log(`  skinned meshes ${sk.meshes} (${sk.bodies} bodies + ${sk.meshes - sk.bodies} telegraph motes)`);
+  console.log(`  skinned triangles ${sk.triangles} of ${sk.frameTriangles} in the frame `
+    + `(${((sk.triangles / Math.max(1, sk.frameTriangles)) * 100).toFixed(1)}%), ${sk.frameCalls} draw calls`);
+  console.log(`  per body: ${JSON.stringify(sk.perBody)}`);
+
+  const maxBodies = (sk.ceiling || 10) + LEDGER_EXEMPT;
+  check('live skinned bodies stay under quality.js maxSkinnedBodies',
+    sk.bodies > 0 && sk.bodies <= maxBodies,
+    `${sk.bodies} bodies, ceiling ${sk.ceiling} + ${LEDGER_EXEMPT} exempt = ${maxBodies}`);
+  const heaviest = sk.perBody[0] || 0;
+  check(`no skinned body exceeds ${TRIS_PER_BODY_MAX} triangles`,
+    heaviest > 0 && heaviest <= TRIS_PER_BODY_MAX, `heaviest ${heaviest}`);
+  check('total skinned triangles stay inside ceiling x per-body cap',
+    sk.triangles <= maxBodies * TRIS_PER_BODY_MAX,
+    `${sk.triangles} of ${maxBodies * TRIS_PER_BODY_MAX}`);
+}
 
 console.log(`\n--- context loss / restore --- ${JSON.stringify({
   testable: result.contextTestable,
