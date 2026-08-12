@@ -26,7 +26,40 @@ import {
   rollDrop, equipWeapon, currentWeapon, setModelSource,
   serializeWeapon, deserializeWeapon, starterWeapon, buildWeaponMesh, rarityColor,
   setStance, weaponStance, drawTime, STOW,
+  // The swing state machine (RPG_SPEC step 1). game.js owns WHEN an attack is
+  // asked for and what a hit does to the world; weapons.js owns every number
+  // in between — timing, phase, movement, commitment, hit maths.
+  makeAttackState, startAttack, tickAttack, canAttack, consumeBuffer,
+  consumeLunge, cancelAttack, moveScale, isCommitted, attackAnim,
+  hitDamage, hitRange, hitArc, hitKnockback, hitStagger, isRadial, chargeMul,
+  npcStrikeWeapon, enemyWeaponKind,
+  // The bow (RPG_SPEC step 8): BOW is the family's ballistic contract (draw
+  // window, 22->46 m/s, g 9.0, soft-lock cone) and sharedItemGeometry is the
+  // pool's one window into the item pack for the Arrow mesh.
+  BOW, sharedItemGeometry,
+  // The staff (RPG_SPEC step 9): STAFF is the mana-and-ballistics contract.
+  // Its bolt shares the arrow's g = 9.0 and bends physics in EXACTLY the two
+  // ways the spec names (damage type/effect, bounded trajectory curvature) —
+  // see the table's own comment in weapons.js.
+  STAFF,
 } from './weapons.js';
+// Pooled projectiles (RPG_SPEC step 8): 16 preallocated records and meshes,
+// zero per-shot allocation, optional vy/g for arrow ballistics. The pool's
+// flat path is byte-identical to the loop it replaced — fight-test asserts it.
+import { ProjectilePool } from './projectiles.js';
+// Armour layer (RPG_SPEC steps 10-11). rollArmorDrop feeds the gate loot
+// path, serializeArmor writes the {k:'a'|'t',b,r,s,l} records, armorDerive is
+// folded into refreshDerived (the single computation site), and combinedDR is
+// the ONE stacking law _damagePlayer applies: multiplicative with vitality DR,
+// hard-clamped at 0.72 total.
+import { rollArmorDrop, serializeArmor, armorDerive, combinedDR } from './armor.js';
+// The legendary craft (RPG_SPEC step 14). game.js owns WHEN materials are
+// granted (boss/elite kills, seed-derived) and the equipped-weapon craft path;
+// ascension.js owns the ledger, the recipe and the refusal reasons.
+import {
+  ensureMaterials, grantEmberdust, grantSigil, ascend,
+  EMBERDUST_ELITE_CHANCE, EMBERDUST_MIN_RANK, SIGIL_LABEL,
+} from './ascension.js';
 // Straight from the render module, not via entities.js: Bind summons a NAMED
 // creature off the roster, which is a call shape makeHumanoid cannot express.
 import { makeCreature, creaturesReady, creatureFor } from '../render/creatures.js';
@@ -45,12 +78,29 @@ import './modes/citymode.js';
 // once step 11 lands, and this table moves there wholesale.
 const TIER_WEIGHT = { brute: 'elite', lancer: 'elite', howler: 'elite' };
 
-// How many spare weapons the save carries. Bounded because the whole profile
-// lives in one localStorage string.
-const STASH_LIMIT = 12;
+// How many spare items the save carries. Bounded because the whole profile
+// lives in one localStorage string. 12 -> 40 with the armour tables (RPG_SPEC
+// step 10): one D-rank dungeon can produce five armour pieces, so 12 filled in
+// a single run; 40 records x 5 short fields is nothing in localStorage.
+const STASH_LIMIT = 40;
 // Chance a trash kill leaves a weapon behind. Bosses always drop one.
 const WEAPON_DROP_CHANCE = 0.06;
+// Chance a trash kill leaves ARMOUR behind. Gates are armour's ONLY source
+// this wave — the Exchange does not sell it (RPG_SPEC openQuestions: a second
+// vendor is a later wave). 0.10 sizes to the spec's own pacing claim: a D-rank
+// run is 44-60 trash (mean 52), 52 x 0.10 ≈ 5 pieces per run.
+const ARMOR_DROP_CHANCE = 0.10;
 const tierWeightOf = (e) => (e.isBoss ? 'boss' : TIER_WEIGHT[e.key] || 'trash');
+
+// The hand axe's bleed (RPG_SPEC weaponFamilies.axe): every connecting axe hit
+// opens a 3 s damage-over-time that "does not stack past 3 applications".
+// Each application bleeds 30% of ITS OWN hit's damage, spread over the 3 s —
+// which is why AXE_COMBO's raw dmg shares sit below the sword's: a fourth
+// swing refreshes the clock but adds no fourth stack, so sustained axe output
+// converges on hits x 1.30 rather than climbing without bound.
+const BLEED_TIME = 3;
+const BLEED_MAX_STACKS = 3;
+const BLEED_FRACTION = 0.30;
 
 // Shadow-soldier attack timing — the same telegraph-to-contact shape enemies
 // got in Wave 1. WINDUP is how long the soldier stands planted winding up
@@ -109,6 +159,21 @@ const tmpV2 = new THREE.Vector3();
 // unrepresentable rather than fixed once; nothing else may touch either.
 const _aimDir = new THREE.Vector3();    // _updateEnemies' per-enemy bearing only
 const _projDir = new THREE.Vector3();   // _spawnProjectile's heading only
+// Bow-only scratch, same single-role rule as the pair above. The pool COPIES
+// spawn arguments, so handing it these is safe; handing it tmpV would put the
+// enemy loop's aim vector back inside projectile code, which is the exact
+// aliasing the boss spread shot shipped with.
+const _projFrom = new THREE.Vector3();  // _spawnProjectile's launch point only
+const _bowDir = new THREE.Vector3();    // bow aim heading only
+const _bowFrom = new THREE.Vector3();   // arrow launch point only
+const _bowTo = new THREE.Vector3();     // soft-lock candidate bearing only
+// Staff-only scratch, same single-role rule. The bolt homing pass and the
+// beam tick both run inside update loops, so they get their own vectors
+// rather than borrowing the bow's (which _camForward may be refreshing the
+// same frame a bolt steers).
+const _staffDir = new THREE.Vector3();  // staff aim / beam axis only
+const _staffFrom = new THREE.Vector3(); // bolt launch point only
+const _staffTo = new THREE.Vector3();   // homing bearing / beam-tick offsets only
 
 // Reused steering context; steerAgent never retains it.
 const _steerCtx = {
@@ -215,7 +280,63 @@ export class Game {
 
     this.enemies = [];
     this.shadows = [];
-    this.projectiles = [];
+    // The projectile pool (RPG_SPEC step 8). `this.projectiles` stays as an
+    // ALIAS of the pool's live array — same identity for the life of the Game
+    // — so every shipped reader (Nova's wipe, the fight suite's per-bolt
+    // probes, _removeProjectile's index loops) keeps working unchanged.
+    this.pool = new ProjectilePool(this.scene, {
+      max: 16,
+      glowLayer: GLOW_LAYER,
+      // Lazy: the item pack loads after the Game exists; the first arrow asks.
+      arrowGeometry: () => sharedItemGeometry('Arrow'),
+      // The shipped removal burst, for bolts only: arrows STICK (no pop), and
+      // a gate-transition clear was never a firework.
+      onRemove: (rec, reason) => {
+        if (rec.kind === 'bolt' && reason !== 'clear') {
+          this.fx.burst(rec.pos, 10, rec.color, { speed: 5, up: 2, life: 0.35 });
+        }
+        // Staff bolts ride the pool's ARROW branch (it owns the enemy torso
+        // test and the vy/g arc) but a magic bolt BURSTS where an arrow
+        // sticks — the one place every release path funnels through, so the
+        // impact cannot be missed by a reclaim cycle or a world cull.
+        if (rec.staff && reason !== 'clear') this._staffImpact(rec.pos);
+      },
+    });
+    // The staff bolt's shared look: one glow-tinted orb, swapped onto a
+    // pooled arrow record's mesh after spawn (spawn() re-stamps geometry and
+    // material per kind, so a later real arrow reclaims the mesh cleanly).
+    // Created ONCE — the pool ledger's zero-alloc assert stays honest because
+    // these never enter it. shared-flagged so no dispose walk can free them
+    // out from under a live bolt.
+    this._staffOrbGeo = new THREE.IcosahedronGeometry(0.20, 0);
+    this._staffOrbGeo.userData.shared = true;
+    this._staffOrbMat = new THREE.MeshBasicMaterial({ color: 0xb98bff });
+    this._staffOrbMat.userData.shared = true;
+    // The channelled-beam state (RPG_SPEC staff finisher). Null when idle;
+    // see _beginStaffBeam / _updateStaffBeam.
+    this._staffBeam = null;
+    this.projectiles = this.pool.live;
+    // Per-frame context for pool.update — built once, fields refreshed in
+    // _updateProjectiles, because update loops are a no-allocation zone.
+    this._projCtx = {
+      obstacleField: null,
+      worldRadius: 0,
+      playerPos: null,
+      enemies: null,
+      onHitPlayer: (rec) => this._damagePlayer(rec.damage, rec.pos),
+      onHitEnemy: (rec, e) => {
+        this._damageEnemy(e, rec.damage, {
+          knockback: rec.knock, stagger: rec.stagger, from: this.player.pos,
+        });
+        // GALESTING ASCENDANT (resource-flow verb): a FULL-DRAW arrow that
+        // kills its target banks a refund — the next draw starts full. Gated
+        // on the rule at impact time so swapping bows mid-flight pays nothing.
+        if (rec.kind === 'arrow' && rec.fullDraw && e.hp <= 0
+          && this.weapon?.rule?.fx.drawRefundOnKill && this._bowState) {
+          this._bowState.refund = true;
+        }
+      },
+    };
     this.corpses = [];
     this.pickups = [];
 
@@ -326,9 +447,17 @@ export class Game {
       yaw: 0,
       radius: 0.6,
       hp: 100, mp: 50,
-      attackCd: 0, comboIndex: 0, comboTimer: 0,
-      swing: 0, swingHitApplied: false,
+      // The swing state machine replaces the old p.swing / p.comboIndex /
+      // p.comboTimer / p.swingHitApplied quartet — weapons.js owns the timing
+      // and game.js only asks it questions. skillSwing is the one survivor: a
+      // purely visual arm-swing timer for skills (Ruin) that apply their own
+      // damage and never touch the weapon machine.
+      attack: makeAttackState(),
+      skillSwing: 0,
       dashTimer: 0, invuln: 0, hurt: 0,
+      // Time left in which an incoming (i-framed) hit counts as a PERFECT
+      // dodge; set by _tryDash from derived.dodgeWindow.
+      _dodgeT: 0,
       cds: { attack: 0, dash: 0, slash: 0, nova: 0, summon: 0 },
       alive: true,
       kills: 0,
@@ -338,6 +467,9 @@ export class Game {
     // Bound once: physics calls this every frame and an inline arrow here would
     // allocate a closure per entity per frame.
     this._arenaResolve = (pos, radius, vel) => this.world.resolve(pos, radius, vel);
+    // Same rule for the swing callbacks: tickAttack is handed one every frame.
+    this._onSwingHit = (step) => this._applySwingHit(step);
+    this._onNpcHit = (step, hitIndex, e) => this._enemyStrike(e);
     attachBody(this.player, { radius: 0.6, maxSpeed: this.derived.speed });
     this.player.body.setEnvironment(FLAT_GROUND, this._arenaResolve);
 
@@ -375,16 +507,30 @@ export class Game {
     // profile written before the eight-slot model existed simply arrives with
     // its old single weapon already copied into equipment.weapon.
     ensureEquipment(this.save);
+    // The materials ledger converges the same way on first contact — a save
+    // from before ascension existed simply arrives with an empty ledger.
+    ensureMaterials(this.save);
     const eq = this.save.equipment;
     this.weapon = deserializeWeapon(eq.weapon) || deserializeWeapon(this.save.weapon) || starterWeapon();
-    this.stash = (Array.isArray(this.save.stash) ? this.save.stash : [])
-      // Only weapons are playable this wave. An armour or trinket record from a
-      // future build is SKIPPED, not dropped: it stays in save.stash untouched
-      // so rolling forward again finds it.
+    const rawStash = Array.isArray(this.save.stash) ? this.save.stash : [];
+    this.stash = rawStash
+      // Weapons become live instances; armour/trinket records stay records in
+      // armorStash below — nothing equips them until the panel unlocks the
+      // slots (step 13), so deserialising them here would buy nothing.
       .filter((d) => !d || !d.k || d.k === 'w')
       .map((d) => deserializeWeapon(d))
       .filter(Boolean)
       .slice(0, STASH_LIMIT);
+    // Armour and trinket records ride as-is ({k,b,r,s,l}) — kept separate so
+    // the weapon-facing UI (g.stash) never sees a record it cannot swing.
+    this.armorStash = rawStash
+      .filter((d) => d && (d.k === 'a' || d.k === 't'))
+      .slice(0, STASH_LIMIT);
+    // refreshDerived (already run by the constructor, re-run here now that
+    // equipment is definitely ensured) is the single computation site for
+    // this._armorBonus — a second armorDerive call here was step 10's interim
+    // wiring and two computation sites is how a stat line drifts.
+    this.refreshDerived(true);
     equipWeapon(this.player.mesh, this.weapon);
   }
 
@@ -399,10 +545,14 @@ export class Game {
     // back to the shipped version still finds the right sword instead of an
     // empty fist — the same reason save.js leaves the v1 key in place.
     this.save.weapon = rec;
-    this.save.stash = this.stash.map((w) => {
+    const weapons = this.stash.map((w) => {
       const r = serializeWeapon(w);
       return r ? { k: 'w', ...r } : null;
     }).filter(Boolean);
+    // Weapons first, then the armour/trinket records, one shared cap. Armour
+    // yields the tail under pressure because a weapon is the thing a rolled-
+    // back build can still read.
+    this.save.stash = weapons.concat(this.armorStash || []).slice(0, STASH_LIMIT);
     this.onSave();
   }
 
@@ -419,6 +569,16 @@ export class Game {
   /** Equip `w`, sending whatever was held to the stash. */
   equip(w) {
     if (!w) return;
+    // Swapping away from a bow mid-draw must drop the draw — the new weapon
+    // has no string to release. Same for a staff mid-channel: no crystal, no
+    // beam.
+    if (this._bowState) { this._bowState.drawing = false; this._bowState.buffered = false; }
+    this._endStaffBeam();
+    // A swap mid-swing must also drop the MACHINE: the panel opens fine
+    // mid-step in a gate, and a stale state.index from a 5-step dagger combo
+    // indexes past a 1-step bow's table — tickAttack then crashes reading
+    // steps[4].charge. cancelAttack's own header names this exact case.
+    if (this.player?.attack) cancelAttack(this.player.attack);
     const old = currentWeapon(this.player.mesh) || this.weapon;
     if (old && old !== w) {
       this.stash.unshift(old);
@@ -427,6 +587,38 @@ export class Game {
     this.weapon = w;
     equipWeapon(this.player.mesh, w);
     this._persistLoadout();
+  }
+
+  /**
+   * ASCEND the equipped weapon (RPG_SPEC step 14, gate3): the epic in hand is
+   * CONSUMED — replaced in place, never stashed — and its seed becomes the
+   * legendary's seed, so the item the player loved is the item he keeps.
+   * ascension.ascend owns the recipe maths and the refusal reasons; this
+   * method owns the containers (hand, mesh, persistence), the same split
+   * shop.buy has with equip(). Returns ascend()'s {ok, reason, weapon}.
+   */
+  ascendEquipped() {
+    const held = this.weapon;
+    const r = ascend(this.save, held);
+    if (!r.ok) {
+      this.ui.toast(r.reason || 'CANNOT ASCEND', 'danger');
+      return r;
+    }
+    // In place, not equip(): equip() would push the consumed epic into the
+    // stash, resurrecting the exact duplication the craft's "consumed" clause
+    // forbids.
+    if (this._bowState) { this._bowState.drawing = false; this._bowState.buffered = false; }
+    this._endStaffBeam();
+    // Same mid-swing rule as equip(): the machine never crosses a swap.
+    if (this.player?.attack) cancelAttack(this.player.attack);
+    this.weapon = r.weapon;
+    equipWeapon(this.player.mesh, r.weapon);
+    this._persistLoadout();
+    this.ui.toast(`${r.weapon.name.toUpperCase()}  ·  ASCENDED`, 'gold');
+    this.fx.ring(this.player.pos, 0xffc24b, 6, 0.7);
+    this.fx.burst(this.player.pos.clone().setY(1.2), 40, 0xffc24b, { speed: 8, up: 7, life: 1.0 });
+    this.audio.levelUp?.();
+    return r;
   }
 
   /**
@@ -467,7 +659,9 @@ export class Game {
     if (!mesh) return 'drawn';
     // Never mid-swing: a weapon that vanishes from the fist during a chop
     // desyncs the animation from the hitbox that is still live.
-    if (stance === 'sheathed' && this.player.swing > 0) return weaponStance(mesh);
+    if (stance === 'sheathed'
+      && (this.player.attack.active || this.player.skillSwing > 0
+        || this._bowState?.drawing || this._staffBeam)) return weaponStance(mesh);
     const applied = setStance(mesh, stance);
     if (manual) this._stanceHold = 6.0;
     this._idleSince = 0;
@@ -493,7 +687,9 @@ export class Game {
     const hostileNear = !inTown || this.enemies.some(
       (e) => e.alive !== false && e.pos && e.pos.distanceToSquared(this.player.pos) < 196,   // 14 m
     );
-    const busy = this.player.swing > 0 || this.player.cds.attack > 0;
+    const busy = this.player.attack.active || this.player.attack.cd > 0
+      || this.player.skillSwing > 0 || Boolean(this._bowState?.drawing)
+      || Boolean(this._staffBeam);
     if (busy) this._idleSince = 0; else this._idleSince = (this._idleSince || 0) + dt;
 
     const want = (!hostileNear && this._idleSince >= 3.0) ? 'sheathed' : 'drawn';
@@ -510,15 +706,27 @@ export class Game {
     setStance(mesh, want);
   }
 
-  /** Shadows allowed on the field at once, clamped by the live quality tier. */
+  /** Shadows allowed on the field at once, clamped by the live quality tier.
+   *  The vigil 4pc (+2) joins inside progression's clamps — the quality tier
+   *  and the hard 12 still get the final word. */
   fieldCapacity() {
-    return shadowFieldCapacity(this.save, this.quality.current);
+    return shadowFieldCapacity(this.save, this.quality.current, this._armorBonus?.shadowFieldAdd || 0);
   }
 
   refreshDerived(fill = false) {
     const prevMaxHp = this.derived?.maxHp ?? 0;
     const prevMaxMp = this.derived?.maxMp ?? 0;
-    this.derived = derive(this.save);
+    // THE single computation site for the armour layer (RPG_SPEC step 11).
+    // ensureEquipment is idempotent and cheap; running it here means every
+    // caller — constructor, level-up, gate entry — reads a sane slot object
+    // rather than trusting whoever called first. armorDerive folds numeric
+    // 2/4-piece set bonuses itself; the 5-piece RULES only ride along in
+    // `rules`, and the map below is how the combat sites ask "is rule X live"
+    // without re-walking the equipment every hit.
+    ensureEquipment(this.save);
+    this._armorBonus = armorDerive(this.save.equipment, this.save.level);
+    this._rules = new Map(this._armorBonus.rules.map((r) => [r.key, r.bonus]));
+    this.derived = derive(this.save, this._armorBonus);
     if (fill) {
       this.player.hp = this.derived.maxHp;
       this.player.mp = this.derived.maxMp;
@@ -544,6 +752,20 @@ export class Game {
       this._mode.exit();
       this._mode = null;
     }
+    // A mode swap never carries a live swing across: CityMode runs its own
+    // player update and would leave the machine frozen mid-step forever, which
+    // reads to _updateStance as "busy" and pins the sword in the fist. The cd
+    // is zeroed for the same reason — nothing in the city ticks it down.
+    if (this.player?.attack) {
+      cancelAttack(this.player.attack);
+      this.player.attack.cd = 0;
+      this.player.skillSwing = 0;
+      this.player.cds.attack = 0;
+    }
+    // A half-drawn bowstring does not cross a mode boundary either — nothing
+    // in the city would ever release it. Nor does a lit beam.
+    if (this._bowState) { this._bowState.drawing = false; this._bowState.buffered = false; }
+    this._endStaffBeam();
     if (!name) return null;
     this._mode = createMode(name, this);
     this._mode.enter(payload);
@@ -565,10 +787,17 @@ export class Game {
    * crawl rank (DUNGEON_SPEC worldJsArenasFate — old tests and screenshot
    * baselines still exercise the arena through it).
    */
-  enterGate(rank, { forceBiome = null, forceOpen = false } = {}) {
+  enterGate(rank, { forceBiome = null, forceOpen = false, wild = false } = {}) {
     const index = Math.max(0, GATES.findIndex((g) => g.rank === rank));
     const resolved = GATES[index].rank;
     this.lastGateRank = resolved;
+    // Verge wild gates yield emberdust at ANY rank (RPG_SPEC gate3 recipe);
+    // stored on the Game because the mode payload sheds unknown keys. Default
+    // false on every entry path, so the flag can never leak between runs.
+    // citymode's portal prompt forwards wild:true for a Verge portal
+    // (citymode._updatePrompt stamps it from portal.wild; wired in the 3-B1
+    // integration pass).
+    this._wildRun = Boolean(wild);
     if (this.appState) return this.appState.go('run', { rank: resolved, gateIndex: index, forceBiome, forceOpen });
     return this.beginRun({ rank: resolved, gateIndex: index, forceBiome, forceOpen });
   }
@@ -618,7 +847,11 @@ export class Game {
     this.player.kills = 0;
     this.player.invuln = 1.2;
     this.player.hurt = 0;
-    this.player.swing = 0;
+    cancelAttack(this.player.attack);
+    this.player.attack.cd = 0;
+    this.player.skillSwing = 0;
+    if (this._bowState) { this._bowState.drawing = false; this._bowState.buffered = false; }
+    this._endStaffBeam();
     Object.keys(this.player.cds).forEach((k) => { this.player.cds[k] = 0; });
     this.refreshDerived(true);
 
@@ -626,6 +859,23 @@ export class Game {
     this.killed = 0;
     this.bossActive = false;
     this.boss = null;
+    // Set-rule per-run state (RPG_SPEC step 11). The ward starts ARMED — the
+    // arena has no rooms, so gate entry is its one "room entry"; in a crawl
+    // the room tracker in _updatePlayer re-arms it per room. The finisher
+    // counter is per-run by spec; the riposte charge dies with the run too.
+    this._wardRoomId = -1;
+    this._wardReady = true;
+    this._finisherCount = 0;
+    this._riposteCrit = false;
+    // Legendary-rule per-run state (RPG_SPEC step 14). The emberdust stream is
+    // its own FORK off the gate seed — 0xcc9e2d51 is murmur3's c1, colliding
+    // with none of the registered fork constants (0x9e3779b9 / 0x5f356495 /
+    // 0x1f123bb5 / 0x85ebca6b / 0x27d4eb2f / 0x632be59b / 0xc2b2ae35 /
+    // 0x5ade0f) — so per-elite material rolls can never perturb the main
+    // stream's enemy/loot draws, and a replayed seed yields the same dust.
+    this._emberRnd = mulberry32((this.seed ^ 0xcc9e2d51) >>> 0);
+    this._critRefunds = 0;      // WHISPERFANGS ASCENDANT: refunds this combo
+    this._crater = null;        // GRAVEMAUL ASCENDANT: the live slow zone
     this.runTime = 0;
     this.xpEarned = 0;
     this.ashEarned = 0;
@@ -659,13 +909,16 @@ export class Game {
   // meshes; scene.remove alone orphaned every geometry and material an entity
   // owned, which is what killed long S-rank runs on Android.
   clearEntities({ dispose = true } = {}) {
-    [...this.enemies, ...this.shadows, ...this.projectiles, ...this.corpses, ...this.pickups].forEach((e) => {
+    [...this.enemies, ...this.shadows, ...this.corpses, ...this.pickups].forEach((e) => {
       if (e.mesh) { this.scene.remove(e.mesh); if (dispose) disposeObject3D(e.mesh); }
       if (e.bar) { this.scene.remove(e.bar); if (dispose) disposeObject3D(e.bar); }
     });
     this.enemies.length = 0;
     this.shadows.length = 0;
-    this.projectiles.length = 0;
+    // Projectiles are POOLED: their meshes belong to the pool for the life of
+    // the Game and must never enter the dispose walk above — clear() hides
+    // them and hands every record back, silently (no removal bursts).
+    this.pool.clear();
     this.corpses.length = 0;
     this.pickups.length = 0;
   }
@@ -742,6 +995,18 @@ export class Game {
     });
     const spawned = this.enemies[this.enemies.length - 1];
     spawned.agent = makeAgent(spawned, base.ai);
+    // Enemy humanoids that CARRY a weapon (grunt/stalker/brute/lancer) swing it
+    // through the same state machine the player uses: a one-step pseudo-weapon
+    // whose windup is poked to steerAgent's telegraph per attack, active 0 so
+    // the blow lands on the exact frame the old countdown fired it, recovery
+    // 0.3 = the old follow-through. Casters and howlers have no weapon and no
+    // swing; the boss's attacks are patterns, not weapon steps, and stay owned
+    // by _bossBrain — the fairness telegraphs themselves still come from
+    // enemyai.js either way.
+    if (enemyWeaponKind(key)) {
+      spawned.attack = makeAttackState();
+      spawned.strikeW = npcStrikeWeapon();
+    }
     this.spawned++;
   }
 
@@ -896,12 +1161,22 @@ export class Game {
 
   // -------------------------------------------------------------- combat
   _damageEnemy(e, amount, opts = {}) {
-    if (e.hp <= 0) return;
-    const crit = Math.random() < this.derived.crit;
+    if (e.hp <= 0) return false;
+    // deepglass 5pc: a banked perfect dodge makes the next PLAYER hit a
+    // guaranteed crit — one charge, consumed here, never by a shadow's blow
+    // (they mark themselves with origin:'shadow').
+    const forced = this._riposteCrit === true && opts.origin !== 'shadow';
+    const crit = forced || Math.random() < this.derived.crit;
+    if (forced) this._riposteCrit = false;
     const dmg = Math.max(1, Math.round(amount * (crit ? 1.85 : 1)));
     e.hp -= dmg;
     e.hurt = 0.3;
     if (opts.stagger) e.stagger = Math.max(e.stagger, opts.stagger);
+    // Armour-layer leech (Thirsting affix + ember_ring trinket): player-origin
+    // hits only. 0 with nothing worn, so the shipped path is untouched.
+    if (opts.origin !== 'shadow' && this._armorBonus && this._armorBonus.leech > 0) {
+      this.player.hp = Math.min(this.derived.maxHp, this.player.hp + dmg * this._armorBonus.leech);
+    }
 
     tmpV.copy(e.pos).setY(1.4 * (e.base.scale || 1));
     this.fx.damageNumber(tmpV, dmg, crit ? 'crit' : '');
@@ -911,11 +1186,32 @@ export class Game {
     this.fx.addHitStop(crit ? 0.055 : 0.03);
 
     if (opts.knockback) {
-      tmpV2.copy(e.pos).sub(opts.from || this.player.pos).setY(0).normalize();
-      e.vel.addScaledVector(tmpV2, opts.knockback / (e.isBoss ? 6 : 1));
+      tmpV2.copy(e.pos).sub(opts.from || this.player.pos).setY(0);
+      const kbDist = tmpV2.length();
+      if (kbDist > 1e-4) tmpV2.divideScalar(kbDist);
+      let kb = opts.knockback / (e.isBoss ? 6 : 1);
+      if (kb < 0) {
+        // NEGATIVE knockback is the hand axe's hook (RPG_SPEC familyTable's
+        // -12 finisher): a pull TOWARD the attacker, not a value to clamp to
+        // zero. Enemy velocity damps at 7/s (see _updateEnemies), so an
+        // impulse v travels ~v/7 m — the table's 12 closes ~1.7 m. The cap
+        // keeps the pull from dragging a close target THROUGH the player:
+        // never pull more than would land it at arm's length (1.3 m).
+        kb = -Math.min(-kb, Math.max(0, (kbDist - 1.3) * 7));
+        // HOOKFANG ASCENDANT (tempo verb): the pull also staggers what it
+        // drags. Player-origin only — a bound shadow swinging an axe carries
+        // no rule.
+        const ps = opts.origin !== 'shadow' ? this.weapon?.rule?.fx.pullStagger : 0;
+        if (ps) e.stagger = Math.max(e.stagger, ps);
+      }
+      e.vel.addScaledVector(tmpV2, kb);
     }
 
     if (e.hp <= 0) this._killEnemy(e);
+    // Whether this application critted — _applySwingHit feeds it to the
+    // WHISPERFANGS refund. A boolean, not the damage: rules read tempo, never
+    // numbers (the legendary law).
+    return crit;
   }
 
   _killEnemy(e) {
@@ -932,6 +1228,50 @@ export class Game {
     this.fx.addShake(e.isBoss ? 1.0 : 0.2);
     this.audio.death();
 
+    // CINDERBITE ASCENDANT (resource-flow verb): a bleeding kill passes the
+    // REMAINING wound to the nearest enemy in range — nothing is amplified,
+    // the same dps and clock just change bodies.
+    const jump = this.weapon?.rule?.fx.bleedJump;
+    if (jump && e.bleedT > 0 && (e.bleedDps || 0) > 0) {
+      let heir = null; let heirD = jump;
+      for (const o of this.enemies) {
+        if (o === e || o.hp <= 0) continue;
+        const d = tmpV2.copy(o.pos).sub(e.pos).setY(0).length();
+        if (d < heirD) { heir = o; heirD = d; }
+      }
+      if (heir) {
+        heir.bleedDps = (heir.bleedDps || 0) + e.bleedDps;
+        heir.bleedT = Math.max(heir.bleedT || 0, e.bleedT);
+        heir.bleedStacks = Math.max(heir.bleedStacks || 0, e.bleedStacks || 1);
+        heir.bleedAcc = heir.bleedAcc || 0;
+        heir.bleedNumT = heir.bleedNumT ?? 0;
+        this.fx.burst(heir.pos.clone().setY(1.2), 8, 0xff6b4d, { speed: 4, up: 2, life: 0.35 });
+      }
+    }
+
+    // Ascension materials (RPG_SPEC step 14) — BEFORE gainXp, whose onSave()
+    // persists the whole save including the ledger this writes.
+    //
+    // Emberdust: only band-B-and-above gates (index >= 3) and Verge wild gates
+    // yield it. 1 guaranteed per boss; per ELITE (brute/lancer/howler — the
+    // same tier map extraction uses) a draw off the gate's own forked stream,
+    // never Math.random, so a replayed seed pays the same dust.
+    const dustEligible = (this.gateIndex ?? 0) >= EMBERDUST_MIN_RANK || this._wildRun;
+    if (dustEligible) {
+      const dust = e.isBoss ? 1
+        : (tierWeightOf(e) === 'elite' && this._emberRnd && this._emberRnd() < EMBERDUST_ELITE_CHANCE ? 1 : 0);
+      if (dust > 0) {
+        grantEmberdust(this.save, dust);
+        this.fx.damageNumber(tmpV.copy(e.pos).setY(2.6), '+1 EMBERDUST', 'crit');
+      }
+    }
+    // Family sigil: every named boss guards one family's sigil and ALWAYS
+    // drops it — six bosses, six families, no ambiguity about where to go.
+    if (e.isBoss && this.gate?.boss && SIGIL_LABEL[this.gate.boss]) {
+      grantSigil(this.save, this.gate.boss);
+      this.ui.toast(`${SIGIL_LABEL[this.gate.boss]} CLAIMED`, 'gold');
+    }
+
     this.gainXp(e.xp);
 
     // Drops: a steady trickle of healing is what makes long gates survivable.
@@ -944,10 +1284,15 @@ export class Game {
       // clearing a rank always moves your gear forward.
       this._spawnWeaponDrop(e.pos.clone());
     } else {
+      // One roll, adjacent windows. Armour's 0.10 window is INSERTED and the
+      // hp/mp windows shifted up by the same amount, so the healing trickle
+      // keeps its exact shipped probabilities (hp 0.20, mp 0.08) — long gates
+      // stay exactly as survivable as before armour existed.
       const roll = Math.random();
       if (roll < WEAPON_DROP_CHANCE) this._spawnWeaponDrop(e.pos.clone());
-      else if (roll < 0.26) this._spawnPickup(e.pos.clone(), 'hp');
-      else if (roll < 0.34) this._spawnPickup(e.pos.clone(), 'mp');
+      else if (roll < WEAPON_DROP_CHANCE + ARMOR_DROP_CHANCE) this._spawnArmorDrop(e.pos.clone());
+      else if (roll < 0.36) this._spawnPickup(e.pos.clone(), 'hp');
+      else if (roll < 0.44) this._spawnPickup(e.pos.clone(), 'mp');
     }
 
     // The Bound keep the figure of whatever died, so read WHICH creature this
@@ -999,12 +1344,71 @@ export class Game {
     }
   }
 
-  _damagePlayer(amount, from) {
+  /**
+   * The one place player damage resolves (RPG_SPEC step 11).
+   *
+   * Order of operations, and why it is this order:
+   *   1. i-frames — a dodged hit deals nothing, but a dodge inside the
+   *      dodgeWindow of the dash is a PERFECT dodge, which is where the
+   *      deepglass 5pc rule pays out (it needs the dodged hit's raw amount,
+   *      which only exists here).
+   *   2. combinedDR(dr, armorDR) — multiplicative stacking of vitality DR and
+   *      the armour slab, hard total clamp 0.72 (taken >= raw * 0.28). The
+   *      clamp lives in armor.combinedDR so the headless suite asserts the
+   *      exact function the game runs. NOTE: derive().dr was computed and
+   *      shown on the panel since v1 but never applied here; the spec's
+   *      stacking formula (`taken = raw * (1-dr) * (1-armorDR)`) makes both
+   *      layers real. A fresh save has dr 0, so the shipped numbers hold.
+   *   3. Set RULES that modify the amount — ossuary lowhp_bulwark (below 35%
+   *      HP, x0.80), issue first_hit_ward (first hit each room, x0.60). Both
+   *      multiply, so their order does not matter.
+   *   4. Stagger/knockback — staggerResist scales the hurt flinch (the
+   *      player's stagger term), knockTakenMul scales the shove distance, and
+   *      the bulwark makes trash (grunt/stalker) unable to do either while
+   *      low. `source` is the striking enemy when the caller has one; a bolt
+   *      carries none and casters are not trash anyway.
+   */
+  _damagePlayer(amount, from, source = null) {
     const p = this.player;
-    if (p.invuln > 0 || !p.alive) return;
-    const dmg = Math.max(1, Math.round(amount));
+    if (!p.alive) return;
+    if (p.invuln > 0) {
+      // Perfect dodge: this hit arrived inside the dodge window of the dash
+      // that granted the current i-frames. _dodgeT only ever starts at dash
+      // time, so spawn/level-up/post-hit invulnerability can never count.
+      const rip = p._dodgeT > 0 ? this._rules?.get('dodge_riposte') : null;
+      if (rip) {
+        // Refund rides EVERY perfectly dodged hit; the crit charge is one,
+        // unstackable, consumed by the next connecting hit (_damageEnemy).
+        p.mp = Math.min(this.derived.maxMp, p.mp + Math.max(1, Math.round(amount * rip.manaRefund)));
+        this._riposteCrit = true;
+        this.fx.ring(p.pos, 0x66e0ff, 3.2, 0.3);
+        this.audio.skill();
+      }
+      return;
+    }
+    const d = this.derived;
+    let raw = amount * (1 - combinedDR(d.dr, d.armorDR));
+    const bul = this._rules?.get('lowhp_bulwark');
+    const lowHp = Boolean(bul) && p.hp <= d.maxHp * bul.lowHpFrac;
+    if (lowHp) raw *= bul.lowHpDmgMul;
+    const ward = this._rules?.get('first_hit_ward');
+    if (ward && this._wardReady) {
+      // Consumed only by a hit that actually lands — a dodged hit returned
+      // above without touching it. Re-arms on room entry (_updatePlayer).
+      this._wardReady = false;
+      raw *= ward.firstHitMul;
+      this.fx.ring(p.pos, 0xffc24b, 2.6, 0.35);
+    }
+    const dmg = Math.max(1, Math.round(raw));
     p.hp -= dmg;
-    p.hurt = 0.35;
+    // RIFTEDGE ASCENDANT's other half: the whiff no longer rewinds the combo
+    // (tickAttack skips it under the rule), so TAKING A HIT is what does —
+    // the clause's own wording, and the only reset the rule leaves.
+    if (this.weapon?.rule?.fx.comboKeepOnWhiff) { p.attack.next = 0; p.attack.chain = 0; }
+    // Trash-tier per the spec's own naming: ENEMY_TYPES grunt/stalker only.
+    const trash = Boolean(source) && !source.isBoss && (source.key === 'grunt' || source.key === 'stalker');
+    const unstoppable = lowHp && trash; // ossuary 5pc: trash cannot stagger you
+    if (!unstoppable) p.hurt = 0.35 * (1 - d.staggerResist);
     p.invuln = 0.42;
 
     this.fx.damageNumber(tmpV.copy(p.pos).setY(2.2), dmg, 'player');
@@ -1013,9 +1417,11 @@ export class Game {
     this.flash.style.opacity = Math.min(0.42, dmg / this.derived.maxHp * 1.6);
     setTimeout(() => { this.flash.style.opacity = 0; }, 110);
 
-    if (from) {
+    if (from && !unstoppable) {
       tmpV2.copy(p.pos).sub(from).setY(0);
-      applyKnockback(p.body, tmpV2, p.body.impulseForDistance(1.6));
+      // 1.6 m is the shipped shove; knockTakenMul (feet secondary clamped at
+      // -50%, then ossuary 4pc x0.75) scales the DISTANCE the body solves for.
+      applyKnockback(p.body, tmpV2, p.body.impulseForDistance(1.6 * d.knockTakenMul));
     }
     if (p.hp <= 0) {
       p.hp = 0;
@@ -1036,7 +1442,11 @@ export class Game {
     // rather than at the kill site means every existing XP payer — trash,
     // bosses, the daily — pays ash too, with no second bookkeeping path to
     // fall out of sync.
-    this.ashEarned = (this.ashEarned || 0) + grantAsh(this.save, ashForXp(amount));
+    // ashMul is the armour layer's one payout hook: Ashen affix + ash_band
+    // trinket + the issue 2pc compound into a single multiplier (x1 naked, so
+    // grantAsh's own rounding reproduces the shipped integers exactly).
+    this.ashEarned = (this.ashEarned || 0)
+      + grantAsh(this.save, ashForXp(amount) * (this._armorBonus?.ashMul || 1));
     const fromLevel = this.save.level;
     // progression.grantXp owns the level loop: it is the only place that also
     // increments save.autoStats, and the +1-to-every-stat grant silently never
@@ -1075,50 +1485,583 @@ export class Game {
   // ------------------------------------------------------------- skills
   _tryAttack() {
     const p = this.player;
-    if (p.cds.attack > 0 || p.swing > 0) return;
+    const w = this.weapon;
+    if (!w) return;
+    // The staff costs MANA where every other family costs only time (RPG_SPEC
+    // staff identity; magic's bend #1 changes what a hit does, never its
+    // timing, so the cost sits on the resource rather than the clock). The
+    // gate fires only when this press would actually START a step — a
+    // mid-swing press still buffers normally, and the buffered retry
+    // re-enters here with a fresh mana read.
+    if (canAttack(p.attack, w)) {
+      const ns = w.combo[p.attack.next % w.combo.length];
+      const need = ns.bolt ? STAFF.boltMp : (ns.beam ? STAFF.beam.mpPerTick : 0);
+      if (need > 0 && p.mp < need) { this.ui.toast('NOT ENOUGH MANA'); return; }
+    }
     // Any attack input draws. A manual sheathe holds off the auto policy for a
     // few seconds, and without this a player who put the sword away to look at
     // the plaza would swing a bare fist at the first thing that jumped him.
     if (weaponStance(p.mesh) === 'sheathed') { this._stanceHold = 0; this.setStance('drawn'); }
-    // Chain into the next combo step if the window is still open.
-    p.comboIndex = p.comboTimer > 0 ? (p.comboIndex % 3) + 1 : 1;
-    p.comboTimer = 0.95;
-    p.swing = 0.34;
-    p.swingHitApplied = false;
-    p.cds.attack = SKILLS.attack.cd;
-    this._faceNearest(7);
+    // The machine answers "can this press start a step". A press that arrives
+    // mid-swing is buffered inside the state and re-attempted from
+    // _updatePlayer, so mashing never eats an input the cancel window would
+    // have honoured.
+    const step = startAttack(p.attack, w);
+    if (!step) return;
+    // WHISPERFANGS ASCENDANT's per-combo budget re-arms when a fresh combo
+    // opens — the opener is index 0 by the machine's own bookkeeping.
+    if (p.attack.index === 0) this._critRefunds = 0;
+    // Staff casts aim down the CAMERA line (soft-lock in _fireStaffBolt, yaw
+    // tracking during the beam) — snapping to the nearest melee body here
+    // would fight the line the player is actually looking down.
+    if (!step.bolt && !step.beam) this._faceNearest(7);
+    // The step's forward carry, in metres — the body solves the impulse that
+    // travels it, exactly as the dash does. This is what walks the daggers
+    // into the target and leans the heavies into their arcs.
+    const lunge = consumeLunge(p.attack);
+    if (lunge > 0 && p.body) {
+      const f = this._forward(p.yaw, tmpV);
+      const v0 = p.body.impulseForDistance(lunge);
+      p.body.addImpulse(f.x * v0, 0, f.z * v0);
+    }
+    // Mirror for the HUD wipe only — the machine's own cd is the gate.
+    p.cds.attack = p.attack.cd;
+    // state.next is already the human-readable step number (index + 1).
+    this._comboShown = p.attack.next;
     this.audio.swing();
-    this.ui.setCombo(p.comboIndex);
+    this.ui.setCombo(this._comboShown);
   }
 
-  _applySwingDamage() {
+  /**
+   * One damage application from tickAttack. All maths come from the hit
+   * helpers so game.js never has to remember whether the step or the rolled
+   * instance owns a factor. A common Riftedge through this path is numerically
+   * identical to the retired hardcoded three-chop — SWORD_COMBO is that sword,
+   * and tools/weapon-feel-test.mjs asserts the equality rather than trusting
+   * this comment.
+   */
+  _applySwingHit(step) {
     const p = this.player;
-    const finisher = p.comboIndex === 3;
-    // The equipped weapon's rolled multipliers ride on top of the existing
-    // hardcoded sword numbers, which weapons.js's SWORD_COMBO reproduces
-    // exactly — so a Common Riftedge is feel-identical to what shipped before
-    // and anything better is a real upgrade rather than a cosmetic one.
     const w = this.weapon;
-    const mult = SKILLS.attack.dmg * (finisher ? 1.85 : 1) * (1 + (p.comboIndex - 1) * 0.12)
-      * (w?.dmgMul ?? 1);
-    const range = (finisher ? 3.6 : 2.9) * (w?.reachMul ?? 1);
-    const arc = (finisher ? Math.PI * 0.85 : Math.PI * 0.62) * (w?.arcMul ?? 1);
-    const hits = this._coneTargets(p.pos, p.yaw, range, arc);
-    hits.forEach((e) => this._damageEnemy(e, this.derived.atk * mult, {
-      knockback: (finisher ? 9 : 2.5) * (w?.knockMul ?? 1),
-      stagger: finisher ? 0.45 : 0,
-      from: p.pos,
-    }));
-    if (finisher) {
-      this.fx.ring(p.pos, 0x9dd8ff, 4.5, 0.35);
-      this.fx.addShake(0.3);
+    // The staff's two steps produce no melee cone at all (RPG_SPEC: arc 0 on
+    // both rows) — the machine still owns the timing, but the HIT is a
+    // projectile or a channel opening, so it routes out before the cone maths.
+    if (step.bolt) return this._fireStaffBolt(w, step);
+    if (step.beam) return this._beginStaffBeam(w, step);
+    const range = hitRange(w, step);
+    const arc = hitArc(w, step);
+    // The maul pound is the one radial attack in the game: a ground slam has
+    // no front, so it takes everything in the circle instead of a cone.
+    const hits = isRadial(step)
+      ? this.enemies.filter((e) => tmpV2.copy(e.pos).sub(p.pos).setY(0).length() <= range + e.radius)
+      : this._coneTargets(p.pos, p.yaw, range, arc);
+    // chargeMul is 1 on every step without a charge clause (all shipped
+    // tables), so the sword's byte-equality contract is untouched. On the
+    // greatsword finisher it is 1 -> 2.1 with the hold.
+    const cMul = chargeMul(p.attack, step, w);
+    const dmg = hitDamage(w, step, this.derived.atk * SKILLS.attack.dmg) * cMul;
+    // DUSKREND ASCENDANT (tempo verb): a NEAR-FULL charge's stagger scales.
+    // "Near-full" is 90% of the charge span, so a frame of early release does
+    // not silently void the clause the player just paid 0.4 s for.
+    const charged = Boolean(step.charge) && cMul >= 1 + ((step.charge?.dmgMul || 1) - 1) * 0.9;
+    let stagger = hitStagger(w, step);
+    if (charged && w.rule?.fx.chargedStaggerMul) stagger *= w.rule.fx.chargedStaggerMul;
+    let crits = 0;
+    hits.forEach((e) => {
+      if (this._damageEnemy(e, dmg, {
+        knockback: hitKnockback(w, step),
+        stagger,
+        from: p.pos,
+      })) crits++;
+      // The axe opens a wound on every CONNECTING hit; a killing blow has
+      // nothing left to bleed.
+      if (step.bleed && e.hp > 0) this._applyBleed(e, dmg);
+      // VOIDGLAIVE ASCENDANT (positioning verb): wide-arc steps pull every
+      // target toward the arc's centre — never past arm's length of it. The
+      // velocity damps at 7/s (see _updateEnemies), so an impulse of d*7
+      // travels ~d metres.
+      const pull = w.rule?.fx.sweepPull;
+      if (pull && step.arc >= Math.PI * 0.5 && !isRadial(step) && e.hp > 0) {
+        tmpV2.copy(p.pos).addScaledVector(this._forward(p.yaw, tmpV), range * 0.5).sub(e.pos).setY(0);
+        const d = tmpV2.length();
+        if (d > 0.3) e.vel.addScaledVector(tmpV2.divideScalar(d), Math.min(pull, d - 0.3) * 7);
+      }
+    });
+    // WHISPERFANGS ASCENDANT (tempo verb): a crit refunds recovery time, at
+    // most critRefundMax per combo (counter reset when the opener starts).
+    const cr = w.rule?.fx.critRefund;
+    if (cr && crits > 0) {
+      const n = Math.min(crits, (w.rule.fx.critRefundMax || 3) - this._critRefunds);
+      if (n > 0) { p.attack.t += cr * n; this._critRefunds += n; }
     }
-    if (hits.length === 0) this.fx.burst(tmpV.copy(p.pos).addScaledVector(this._forward(p.yaw), 2).setY(1), 4, 0x9dd8ff, { speed: 3, up: 1, life: 0.25 });
+    if (step.finisher) {
+      // SUNDERAXE ASCENDANT (tempo verb): the finisher's stagger lands on
+      // everything in the arc AT HALF AGAIN THE REACH, hit or miss — the wind
+      // alone staggers. Stagger only: the damage cone above is untouched.
+      if (w.rule?.fx.staggerOnMiss && stagger > 0) {
+        for (const e of this._coneTargets(p.pos, p.yaw, range * 1.5, arc)) {
+          if (!hits.includes(e) && e.hp > 0) e.stagger = Math.max(e.stagger, stagger);
+        }
+      }
+      // VIGIL ASCENDANT (tempo verb): LANDING the thrust finisher resets Dash.
+      if (w.rule?.fx.finisherDashReset && hits.length > 0) {
+        this.player.cds.dash = 0;
+        this.fx.ring(p.pos, 0x9dd8ff, 2.2, 0.25);
+      }
+      // GRAVEMAUL ASCENDANT (positioning verb): the radial pound leaves a
+      // crater that slows everything inside. One zone at a time — a second
+      // pound MOVES the crater rather than stacking a field of them.
+      if (w.rule?.fx.craterSlow && isRadial(step)) {
+        this._crater = {
+          x: p.pos.x, z: p.pos.z, r: range * 0.7,
+          t: w.rule.fx.craterT || 3, slow: w.rule.fx.craterSlow,
+        };
+        this.fx.ring(p.pos, 0xc2703a, range * 0.7, 0.6);
+      }
+    }
+    // A released charge moves more air: scale the whiff-or-hit rumble with
+    // what the hold earned, so a full-charge release reads without a tooltip.
+    if (cMul > 1) this.fx.addShake(0.2 * (cMul - 1));
+    if (step.finisher) this.fx.ring(p.pos, 0x9dd8ff, 4.5, 0.35);
+    if (step.finisher) {
+      // emberfall 4pc: finishers leech 3% of damage DEALT — per connecting
+      // target, because dmg here is per-target.
+      const fl = this._armorBonus?.finisherLeech || 0;
+      if (fl > 0 && hits.length) {
+        p.hp = Math.min(this.derived.maxHp, p.hp + dmg * fl * hits.length);
+      }
+      // emberfall 5pc: every THIRD combo finisher detonates for 60% weapon
+      // damage in a 4 m ring. The counter is per-run (reset in _beginGate)
+      // and counts finishers THROWN, not landed — a ground burst goes off
+      // whether or not the swing connected. Existing fx.ring/addShake only,
+      // per the spec: no new VFX asset.
+      const det = this._rules?.get('third_finisher_detonate');
+      if (det) {
+        this._finisherCount = (this._finisherCount || 0) + 1;
+        if (this._finisherCount % 3 === 0) {
+          const r = det.detonateRadius;
+          // Snapshot: _damageEnemy splices the dead out of this.enemies.
+          [...this.enemies].forEach((e) => {
+            if (tmpV2.copy(e.pos).sub(p.pos).setY(0).length() <= r + e.radius) {
+              this._damageEnemy(e, dmg * det.detonateMul, { from: p.pos, knockback: 5 });
+            }
+          });
+          this.fx.ring(p.pos, 0xff6b2b, r * 1.1, 0.45);
+          this.fx.addShake(0.5);
+        }
+      }
+    }
+    // shake rides the step whether or not it connects (the air moves); the
+    // hit-stop only lands on contact — freezing time for a whiff reads as lag.
+    if (step.shake) this.fx.addShake(step.shake);
+    if (hits.length > 0) {
+      if (step.hitStop) this.fx.addHitStop(step.hitStop);
+    } else {
+      this.fx.burst(tmpV.copy(p.pos).addScaledVector(this._forward(p.yaw), 2).setY(1), 4, 0x9dd8ff, { speed: 3, up: 1, life: 0.25 });
+    }
+  }
+
+  /**
+   * One axe hit's bleed application. Stacks cap at BLEED_MAX_STACKS; a capped
+   * application still refreshes the clock (the wound is re-opened, not
+   * deepened). Fields live directly on the enemy record like hurt/stagger do —
+   * no allocation per application.
+   */
+  _applyBleed(e, hitDmg) {
+    if ((e.bleedStacks || 0) < BLEED_MAX_STACKS) {
+      e.bleedStacks = (e.bleedStacks || 0) + 1;
+      e.bleedDps = (e.bleedDps || 0) + (hitDmg * BLEED_FRACTION) / BLEED_TIME;
+    }
+    e.bleedT = BLEED_TIME;
+    e.bleedAcc = e.bleedAcc || 0;
+    e.bleedNumT = e.bleedNumT ?? 0;
+  }
+
+  // ------------------------------------------------------------- the bow
+  //
+  // RPG_SPEC step 8. Draw-hold-release on the SAME attack button: press starts
+  // the draw, holding deepens it (speed 22 -> 46 m/s and damage 0.55x -> 1.35x
+  // linearly across drawMin..drawFull), release looses. The melee swing
+  // machine never runs — the bow family's whole output is the projectile.
+
+  /** Per-frame bow input. Consumes the attack press so the melee path can't. */
+  _updateBow(dt, w, p) {
+    const b = this._bowState
+      || (this._bowState = { drawing: false, t: 0, heldT: 0, buffered: false, fullCued: false });
+    const held = this.input.isHeld('attack');
+    const pressed = this.input.consume('attack');
+    // STARPIERCER ASCENDANT (tempo verb): full draw arrives sooner. The whole
+    // draw-fraction ruler scales off this one effective value, so speed,
+    // damage and the full-draw cue all agree about what "full" means.
+    const drawFull = BOW.drawFull * (w.rule?.fx.drawFullMul || 1);
+    if (!b.drawing) {
+      if ((pressed || b.buffered) && p.attack.cd <= 0) {
+        b.drawing = true;
+        b.t = 0;
+        b.heldT = 0;
+        b.buffered = false;
+        b.fullCued = false;
+        // GALESTING ASCENDANT (resource-flow verb): a banked refund makes THIS
+        // draw start at full — the string remembers the kill that paid for it.
+        if (b.refund) {
+          b.refund = false;
+          b.t = drawFull;
+          b.heldT = drawFull;
+          b.fullCued = true;
+          this.fx.ring(p.pos, 0xffe2a8, 1.5, 0.22);
+          this.audio.tone({ freq: 1500, type: 'sine', gain: 0.05, decay: 0.08 });
+        }
+        // Any attack input draws the weapon — same policy as _tryAttack.
+        if (weaponStance(p.mesh) === 'sheathed') { this._stanceHold = 0; this.setStance('drawn'); }
+      } else if (pressed) {
+        // Press landed during recovery: buffer it, exactly as the melee
+        // machine buffers a too-early press, so mashing never eats an input.
+        b.buffered = true;
+      }
+      return;
+    }
+    b.t += dt;
+    // heldT is the time the button was actually DOWN — a release before
+    // drawMin still fires (the string must travel), but at minimum power.
+    if (held) b.heldT = b.t;
+    if (!b.fullCued && b.heldT >= drawFull) {
+      // Full-draw cue: the one non-numeric signal that the hold has bought
+      // everything it can. Ring + tick, no new VFX asset.
+      b.fullCued = true;
+      this.fx.ring(p.pos, 0xffe2a8, 1.5, 0.22);
+      this.audio.tone({ freq: 1500, type: 'sine', gain: 0.05, decay: 0.08 });
+    }
+    if (!held && b.t >= BOW.drawMin) {
+      b.drawing = false;
+      const f = Math.min(1, Math.max(0, (b.heldT - BOW.drawMin) / (drawFull - BOW.drawMin)));
+      this._fireBow(w, p, f);
+    }
+  }
+
+  /**
+   * Camera-forward, flattened — the axis the soft-lock cone hangs off. Falls
+   * back to the body's facing when the camera sits directly overhead.
+   */
+  _camForward(out) {
+    out.copy(this.player.pos).sub(this.camera.position).setY(0);
+    const len = out.length();
+    if (len < 1e-4) return this._forward(this.player.yaw, out);
+    return out.divideScalar(len);
+  }
+
+  /**
+   * The spec's recommended soft-lock: nearest live enemy within 25 degrees of
+   * camera-forward and inside `reach`. No new input mode and no new camera
+   * mode — the orbit camera was tuned for melee and stays. Shared by the bow
+   * (34 m) and the staff bolt (18 m); both families use the same 25-degree
+   * cone so "aiming" is ONE learned skill, not two. Scratch use is
+   * call-scoped: this runs only at release/fire time, never inside the enemy
+   * or projectile loops.
+   */
+  _bowTarget(w, reach = BOW.reach, coneCos = BOW.coneCos) {
+    this._camForward(_bowDir);
+    const p = this.player;
+    const maxD = reach * (w.reachMul || 1);
+    let best = null;
+    let bestD = maxD;
+    for (const e of this.enemies) {
+      if (e.hp <= 0) continue;
+      // The cone test is HORIZONTAL, so guard the vertical band a shot can
+      // actually mean — the underground-boss lesson a third time (the arrow
+      // hit test and the beam corridor both learned it): a body far below
+      // the floor can drift horizontally into the cone, and the arc solver
+      // will then dutifully compute an absurd vy to reach its "chest"
+      // (measured in the fight suite: a test-parked boss at y -500 wandered
+      // to point-blank horizontal range and solved vy 54 on an 18 m/s bolt).
+      if (e.pos.y < -1 || e.pos.y > 3) continue;
+      _bowTo.copy(e.pos).sub(p.pos).setY(0);
+      const d = _bowTo.length();
+      if (d < 1e-3 || d > bestD) continue;
+      if (_bowTo.dot(_bowDir) / d < coneCos) continue;
+      best = e;
+      bestD = d;
+    }
+    return best;
+  }
+
+  /** Loose one arrow at draw fraction `f` (0 = min draw, 1 = full). */
+  _fireBow(w, p, f) {
+    const speed = BOW.speedMin + f * (BOW.speedFull - BOW.speedMin);
+    const dmg = this.derived.atk * SKILLS.attack.dmg * w.dmgMul
+      * (BOW.dmgMin + f * (BOW.dmgFull - BOW.dmgMin));
+
+    // Soft-lock, validated with lineBlocked ONCE at release (the probe's own
+    // header forbids per-frame use). A blocked lock falls back to a free shot
+    // down the camera line rather than refusing to fire — the string is
+    // already loosed and cover is the wall's argument to win, not the UI's.
+    let target = this._bowTarget(w);
+    if (target && this.world.obstacleField?.lineBlocked(
+      p.pos.x, p.pos.z, target.pos.x, target.pos.z, { radius: 0.2, feetY: BOW.launchY },
+    )) target = null;
+
+    let vy;
+    if (target) {
+      _bowDir.copy(target.pos).sub(p.pos).setY(0);
+      const D = Math.max(0.5, _bowDir.length());
+      _bowDir.normalize();
+      // Flat-ish arc to the lock (RPG_SPEC launchElevation): horizontal speed
+      // is constant, so flight time is T = D / speed, and vy must both close
+      // the height gap to the target's chest and pre-pay the gravity drop:
+      // arrival y = y0 + vy*T - g*T^2/2, solve for vy.
+      const T = D / speed;
+      const chestY = 1.2 * (target.base?.scale || 1);
+      // Clamped: at legitimate ranges the solve stays within ~±5, but a
+      // point-blank lock divides by a tiny T and the hit sphere already
+      // covers the chest there — an arrow leaving near-vertically reads as
+      // a misfire, not an aim assist.
+      vy = Math.max(-8, Math.min(8, (chestY - BOW.launchY) / T + 0.5 * BOW.gravity * T));
+    } else {
+      // No lock: a gentle rise down the camera line. The drop numbers in
+      // weapons.BOW's comment are exactly what the player learns from here.
+      this._camForward(_bowDir);
+      vy = speed * BOW.riseVy;
+    }
+    p.yaw = Math.atan2(_bowDir.x, _bowDir.z);
+
+    // The spec's cap on live player projectiles: reclaim before refusing, so
+    // the newest shot always exists and the oldest arrow pays for it.
+    if (this.pool.countFlying('arrow') >= BOW.maxLive) this.pool.reclaimOldest('arrow');
+    _bowFrom.set(
+      p.pos.x + _bowDir.x * 0.45,
+      BOW.launchY,
+      p.pos.z + _bowDir.z * 0.45,
+    );
+    const rec = this.pool.spawn({
+      from: _bowFrom, dir: _bowDir, vy, g: BOW.gravity, speed,
+      damage: dmg, life: BOW.life, kind: 'arrow', color: 0xffe2a8,
+      knock: BOW.knock * (w.knockMul || 1), stagger: BOW.stagger,
+    });
+    // Records are reused: clear the staff stamps a previous life may carry,
+    // or a plain arrow would inherit homing and an arcane impact. fullDraw
+    // marks the shot for GALESTING ASCENDANT's refund-on-kill.
+    if (rec) { rec.staff = false; rec.staffTarget = null; rec.fullDraw = f >= 1 - 1e-6; }
+
+    // Recovery: the machine's cd is the shared gate the HUD already reads.
+    p.attack.cd = w.cd;
+    p.cds.attack = Math.min(w.cd, SKILLS.attack.cd);
+    this.fx.addShake(BOW.shake * (0.5 + f * 0.5));
+    // Release twang: pitch falls with draw depth, like a real string.
+    this.audio.tone({ freq: 1200 - f * 400, type: 'triangle', gain: 0.12, decay: 0.16, sweep: -300 });
+  }
+
+  // ------------------------------------------------------------- the staff
+  //
+  // RPG_SPEC step 9. The staff runs the SWING MACHINE (unlike the bow): a
+  // cast has a windup you commit to, not a string you hold. Step 1's contact
+  // frame fires the mana-costing bolt; step 2's opens the channelled beam.
+  // Magic bends physics in EXACTLY the two ways the spec names — damage
+  // type/effect, and bounded trajectory curvature — see weapons.STAFF.
+
+  /** The bolt: 18 m/s, the arrow's shared g = 9.0, steering capped at 90 deg/s. */
+  _fireStaffBolt(w, step) {
+    const p = this.player;
+    // The cast can outlive its funding: _tryAttack read the bar 0.28 s ago
+    // and a skill may have drained it since. A dry cast fizzles visibly
+    // instead of casting on credit.
+    if (p.mp < STAFF.boltMp) {
+      this.ui.toast('NOT ENOUGH MANA');
+      this.fx.burst(_staffFrom.copy(p.pos).setY(STAFF.launchY), 4, 0x9db0ff, { speed: 2, up: 1, life: 0.25 });
+      return;
+    }
+    p.mp -= STAFF.boltMp;
+
+    // Same soft-lock affordance as the bow at the staff's 18 m — one learned
+    // aiming skill, not two — validated with lineBlocked ONCE at cast (the
+    // probe's own header forbids per-frame use). A blocked lock falls back
+    // to a free shot down the camera line.
+    let target = this._bowTarget(w, STAFF.reach, STAFF.coneCos);
+    if (target && this.world.obstacleField?.lineBlocked(
+      p.pos.x, p.pos.z, target.pos.x, target.pos.z, { radius: 0.2, feetY: STAFF.launchY },
+    )) target = null;
+
+    const speed = STAFF.boltSpeed;
+    let vy;
+    if (target) {
+      _staffDir.copy(target.pos).sub(p.pos).setY(0);
+      const D = Math.max(0.5, _staffDir.length());
+      _staffDir.normalize();
+      // The arrow's solved arc (arrival y = y0 + vy*T - g*T^2/2). The slower
+      // bolt makes T longer, so the SAME shared g buys a visibly deeper arc
+      // — internally consistent magic, on screen rather than in a tooltip.
+      const T = D / speed;
+      const chestY = 1.2 * (target.base?.scale || 1);
+      // Same clamp as the bow's: the solve is honest at range and silly at
+      // point-blank, where the hit sphere already covers the chest.
+      vy = Math.max(-8, Math.min(8, (chestY - STAFF.launchY) / T + 0.5 * STAFF.gravity * T));
+    } else {
+      this._camForward(_staffDir);
+      vy = speed * STAFF.riseVy;
+    }
+    p.yaw = Math.atan2(_staffDir.x, _staffDir.z);
+
+    // The spec's cap on live player projectiles, shared with arrows — both
+    // ride the pool's 'arrow' branch (it owns the enemy torso test and the
+    // vy/g arc; a bolt must hit ENEMIES, which the 'bolt' branch never does).
+    if (this.pool.countFlying('arrow') >= STAFF.maxLive) this.pool.reclaimOldest('arrow');
+    _staffFrom.set(
+      p.pos.x + _staffDir.x * 0.5,
+      STAFF.launchY,
+      p.pos.z + _staffDir.z * 0.5,
+    );
+    const rec = this.pool.spawn({
+      from: _staffFrom, dir: _staffDir, vy, g: STAFF.gravity, speed,
+      damage: hitDamage(w, step, this.derived.atk * SKILLS.attack.dmg),
+      life: STAFF.boltLife, kind: 'arrow', color: 0xb98bff,
+      knock: hitKnockback(w, step), stagger: hitStagger(w, step),
+    });
+    if (rec) {
+      // Pooled records are REUSED, so the staff flags are stamped at every
+      // spawn site (here, _fireBow, _spawnProjectile) and never trusted from
+      // a record's previous life.
+      rec.staff = true;
+      rec.staffTarget = target || null;
+      // HOLLOWLIGHT ASCENDANT (positioning verb): the steering BOUND scales.
+      // Stamped at spawn — a bolt keeps the rule it left the crystal with.
+      rec.staffTurnMul = this.weapon?.rule?.fx.boltTurnMul || 1;
+      // spawn() stamped the Arrow mesh; a bolt is an orb. spawn() re-stamps
+      // geometry/material/scale per kind, so a later real arrow reclaims the
+      // mesh cleanly and nothing here leaks into other spawns.
+      rec.mesh.geometry = this._staffOrbGeo;
+      rec.mesh.material = this._staffOrbMat;
+      rec.mesh.scale.setScalar(1);
+    }
+    // Cast flash at the head (the atlas's stated cast-flash sprite) + note.
+    this.fx.flash(_staffFrom, 'magic_01', { size: 1.0, life: 0.22, color: w.tint });
+    if (step.shake) this.fx.addShake(step.shake);
+    this.audio.tone({ freq: 620, type: 'sine', gain: 0.10, decay: 0.18, sweep: 240 });
+  }
+
+  /** Arcane impact — the pool's onRemove funnels EVERY bolt death here. */
+  _staffImpact(pos) {
+    this.fx.burst(pos, 8, 0xb98bff, { speed: 4, up: 1.5, life: 0.3 });
+    this.fx.flash(pos, 'magic_04', { size: 1.3, life: 0.28, color: 0xb98bff });
+  }
+
+  /**
+   * The finisher's channel opens on the machine's own contact frame.
+   * familyTable: "roots to move 0.20 while held, up to 1.6 s, costing mana
+   * per tick". Tick 1 fires NOW with the finisher's full knock/stagger;
+   * later ticks are damage only, so the beam pins rather than juggles.
+   */
+  _beginStaffBeam(w, step) {
+    if (this.player.mp < STAFF.beam.mpPerTick) {
+      this.ui.toast('NOT ENOUGH MANA');
+      return;
+    }
+    this._staffBeam = { w, step, t: 0, tickT: 0, ticks: 0, cut: STAFF.beam.range };
+    this._staffBeamTick(true);
+    this.audio.tone({ freq: 240, type: 'sawtooth', gain: 0.08, decay: 0.3 });
+  }
+
+  /** One beam tick: mana, wall cut, corridor damage, impact FX. */
+  /** What the NEXT beam tick costs, honouring EMBERSTAVE ASCENDANT (resource-
+   *  flow verb): ticks past beamCheapT cost beamCostMul of the base — a long
+   *  channel is cheaper per second than a short one. Base cost on every
+   *  instance without the rule. */
+  _beamTickCost(b) {
+    const fx = b?.w?.rule?.fx;
+    if (fx?.beamCheapT != null && b.t > fx.beamCheapT) return STAFF.beam.mpPerTick * (fx.beamCostMul || 1);
+    return STAFF.beam.mpPerTick;
+  }
+
+  _staffBeamTick(first) {
+    const b = this._staffBeam;
+    const p = this.player;
+    if (!b) return;
+    p.mp -= this._beamTickCost(b);
+    b.ticks++;
+    // Beam axis is the player's facing — yaw tracks the camera while the
+    // channel holds (same rule as a drawn bowstring), so the beam goes where
+    // the player is looking.
+    this._forward(p.yaw, _staffDir);
+    // Wall cut: march blocked() out to range in 1 m steps at chest height.
+    // ~9 scalar broadphase checks, 5 times a second — nowhere near the
+    // per-frame use lineBlocked's header forbids.
+    const field = this.world?.obstacleField;
+    let cut = STAFF.beam.range;
+    if (field) {
+      for (let d = 1; d <= STAFF.beam.range; d += 1) {
+        if (field.blocked(p.pos.x + _staffDir.x * d, p.pos.z + _staffDir.z * d, 0.25, 0, STAFF.beam.feetY)) {
+          cut = d - 0.5;
+          break;
+        }
+      }
+    }
+    b.cut = cut;
+    const dmg = hitDamage(b.w, b.step, this.derived.atk * SKILLS.attack.dmg);
+    // Snapshot: _damageEnemy splices the dead out of this.enemies.
+    for (const e of [...this.enemies]) {
+      if (e.hp <= 0) continue;
+      // The corridor test is horizontal, so guard the vertical band the beam
+      // actually occupies — the arrow branch's underground-boss lesson (a
+      // test-parked body at y -500 must not eat a chest-height beam).
+      if (e.pos.y < -1 || e.pos.y > 3) continue;
+      _staffTo.copy(e.pos).sub(p.pos).setY(0);
+      const along = _staffTo.dot(_staffDir);
+      if (along < 0.5 || along > cut + e.radius) continue;
+      const px = _staffTo.x - _staffDir.x * along;
+      const pz = _staffTo.z - _staffDir.z * along;
+      if (Math.hypot(px, pz) > STAFF.beam.halfWidth + e.radius * 0.5) continue;
+      this._damageEnemy(e, dmg, {
+        knockback: first ? hitKnockback(b.w, b.step) : 0,
+        stagger: first ? hitStagger(b.w, b.step) : 0.05,
+        from: p.pos,
+      });
+    }
+    // Tick FX at the far end, where the beam lands.
+    _staffTo.copy(p.pos).addScaledVector(_staffDir, cut).setY(1.1);
+    this.fx.flash(_staffTo, 'spark_06', { size: 0.9, life: 0.18, color: 0xc9a6ff });
+    this.fx.burst(_staffTo, 3, 0xb98bff, { speed: 3, up: 1, life: 0.22, gravity: -3 });
+  }
+
+  /** Per-frame channel upkeep + the beam's visual. Called after tickAttack. */
+  _updateStaffBeam(dt) {
+    const b = this._staffBeam;
+    if (!b) return;
+    const p = this.player;
+    b.t += dt;
+    b.tickT += dt;
+    // Ends on release, on the 1.6 s ceiling, or when the NEXT due tick
+    // cannot be funded — the channel stops rather than overdrafting.
+    if (!this.input.isHeld('attack') || b.t >= STAFF.beam.maxT
+        || (b.tickT >= STAFF.beam.tick && p.mp < this._beamTickCost(b))) {
+      return this._endStaffBeam();
+    }
+    if (b.tickT >= STAFF.beam.tick) {
+      b.tickT -= STAFF.beam.tick;
+      this._staffBeamTick(false);
+    }
+    // Present: staff head to the wall cut, refreshed every frame (the fx
+    // beam auto-hides the frame this stops arriving).
+    this._forward(p.yaw, _staffDir);
+    _staffFrom.copy(p.pos).setY(STAFF.launchY).addScaledVector(_staffDir, 0.4);
+    _staffTo.copy(p.pos).addScaledVector(_staffDir, b.cut).setY(1.1);
+    this.fx.beam(_staffFrom, _staffTo, 0xb98bff);
+  }
+
+  _endStaffBeam() {
+    if (!this._staffBeam) return;
+    this._staffBeam = null;
+    this.fx.beamHide();
   }
 
   _tryDash() {
     const p = this.player;
     if (p.cds.dash > 0) return;
+    // Committed means committed: while the current step's lock window runs,
+    // the swing owns you and no escape is sold. This one refusal is most of
+    // what "weight" means — a greataxe's lock is its whole step, a dagger's
+    // is only its 0.075 s windup.
+    if (this.weapon && isCommitted(p.attack, this.weapon)) return;
+    // A dash is the channel's escape hatch: the beam's lock is only its
+    // step's 0.36 s, so once that clears the player may buy their way out of
+    // the root — the beam just stops paying out.
+    this._endStaffBeam();
     // sampleWorld, not sample: a dash aimed with the stick must go where the
     // stick points ON SCREEN, whatever the camera yaw happens to be.
     const mv = this.input.sampleWorld();
@@ -1131,7 +2074,11 @@ export class Game {
     p.yaw = Math.atan2(dir.x, dir.z);
     p.invuln = Math.max(p.invuln, SKILLS.dash.iframes);
     p.dashTimer = 0.26;
-    p.cds.dash = SKILLS.dash.cd;
+    // A hit i-framed within this window of the dash START is a PERFECT dodge
+    // (_damagePlayer's invuln branch) — derived.dodgeWindow finally consumed.
+    p._dodgeT = this.derived.dodgeWindow;
+    // derived.dashCd is SKILLS.dash.cd exactly until the issue 4pc (-0.25 s).
+    p.cds.dash = this.derived.dashCd;
     this.audio.dash();
     this.fx.burst(p.pos.clone().setY(0.7), 16, 0x9dd8ff, { speed: 4, up: 2, life: 0.4 });
   }
@@ -1142,10 +2089,13 @@ export class Game {
     if (p.cds.slash > 0) return;
     if (this.save.level < sk.unlockLevel) return this.ui.toast(`RUIN UNLOCKS AT LEVEL ${sk.unlockLevel}`);
     if (p.mp < sk.mp) return this.ui.toast('NOT ENOUGH MANA');
+    // A skill cast takes both hands; the channel ends first.
+    this._endStaffBeam();
     p.mp -= sk.mp;
     p.cds.slash = sk.cd;
-    p.swing = 0.3;
-    p.swingHitApplied = true; // this skill applies its own damage immediately
+    // Visual arm-swing only — the skill applies its own damage immediately and
+    // never enters the weapon machine.
+    p.skillSwing = 0.3;
     this._faceNearest(sk.range);
 
     const hits = this._coneTargets(p.pos, p.yaw, sk.range, sk.arc);
@@ -1172,6 +2122,8 @@ export class Game {
     if (p.cds.nova > 0) return;
     if (this.save.level < sk.unlockLevel) return this.ui.toast(`NOVA UNLOCKS AT LEVEL ${sk.unlockLevel}`);
     if (p.mp < sk.mp) return this.ui.toast('NOT ENOUGH MANA');
+    // A skill cast takes both hands; the channel ends first.
+    this._endStaffBeam();
     p.mp -= sk.mp;
     p.cds.nova = sk.cd;
 
@@ -1188,9 +2140,12 @@ export class Game {
         });
       }
     });
-    // Nova also wipes incoming projectiles — a genuine panic button.
+    // Nova also wipes incoming projectiles — a genuine panic button. Bolts
+    // only: the player's own arrows are not "incoming", and popping a stuck
+    // arrow out of the floor because you panicked reads as a bug.
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
-      if (this.projectiles[i].pos.distanceTo(p.pos) < r) this._removeProjectile(i);
+      const pr = this.projectiles[i];
+      if (pr.kind === 'bolt' && pr.pos.distanceTo(p.pos) < r) this._removeProjectile(i);
     }
 
     this.fx.ring(p.pos, 0x9dd8ff, r * 1.1, 0.55);
@@ -1230,6 +2185,9 @@ export class Game {
         tierWeight: c.tierWeight,
         secondsSinceDeath: CORPSE_WINDOW - c.life,
         attemptIndex: c.attempts,
+        // A worn Taker's Chain rides on the PER term — the trinket's one
+        // exotic effect (RPG_SPEC equipmentSlots.trinket).
+        extractAdd: this._armorBonus?.extractAdd || 0,
       });
       c.attempts++;
       if (Math.random() >= chance) {
@@ -1303,27 +2261,27 @@ export class Game {
    * makes that class of bug unrepresentable rather than merely fixed once.
    */
   _spawnProjectile(from, target, damage, color, speed = 16) {
-    const mesh = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(0.3, 0),
-      new THREE.MeshBasicMaterial({ color }),
-    );
-    const pos = from.clone().setY(PROJECTILE_Y);
-    mesh.position.copy(pos);
-    this.scene.add(mesh);
-    const light = new THREE.PointLight(color, 2.2, 7);
-    mesh.add(light);
-    mesh.layers.enable(GLOW_LAYER);
-    const dir = _projDir.copy(target).sub(pos).setY(0).normalize().clone();
-    this.projectiles.push({ mesh, pos, dir, speed, damage, life: 4, color });
+    // Pooled since RPG_SPEC step 8: no geometry, no material and — new — no
+    // PointLight per shot (twelve bolts used to be twelve dynamic lights; the
+    // glow layer carries the read now). The pool COPIES both vectors, so the
+    // per-shot dir.clone() the old code paid is gone too. Trajectory maths are
+    // otherwise untouched: flat dir, g = 0, vy = 0, which the pool integrates
+    // byte-identically to the loop this replaced.
+    _projFrom.copy(from).setY(PROJECTILE_Y);
+    _projDir.copy(target).sub(_projFrom).setY(0).normalize();
+    const rec = this.pool.spawn({
+      from: _projFrom, dir: _projDir, speed, damage, color, life: 4, kind: 'bolt',
+    });
+    // Records are reused: an enemy bolt must not inherit a previous staff
+    // bolt's homing target or arcane impact stamp.
+    if (rec) { rec.staff = false; rec.staffTarget = null; }
   }
 
   _removeProjectile(i) {
-    const p = this.projectiles[i];
-    this.fx.burst(p.pos, 10, p.color, { speed: 5, up: 2, life: 0.35 });
-    this.scene.remove(p.mesh);
-    p.mesh.geometry.dispose();
-    p.mesh.material.dispose();
-    this.projectiles.splice(i, 1);
+    // The pool's onRemove hook plays the shipped removal burst; the record and
+    // its mesh go back to the pool instead of being disposed (disposal per
+    // removal is the shader-recompile tax the pool exists to end).
+    this.pool.releaseAt(i, 'manual');
   }
 
   // --------------------------------------------------------------- loop
@@ -1387,6 +2345,8 @@ export class Game {
     if (!p.alive) {
       // Dead: only the Death clip still runs (animateRig routes a dead skinned
       // character straight to its mixer; the procedural rig ignores this).
+      // A channel does not survive its caster.
+      this._endStaffBeam();
       animateRig(p.mesh, { moving: false, speed: 0, t: this.time, dt });
       return;
     }
@@ -1394,31 +2354,76 @@ export class Game {
 
     // cooldowns
     for (const k of Object.keys(p.cds)) if (p.cds[k] > 0) p.cds[k] = Math.max(0, p.cds[k] - dt);
-    if (p.comboTimer > 0) { p.comboTimer -= dt; if (p.comboTimer <= 0) { p.comboIndex = 0; this.ui.setCombo(0); } }
     if (p.invuln > 0) p.invuln -= dt;
     if (p.hurt > 0) p.hurt -= dt;
     if (p.dashTimer > 0) p.dashTimer -= dt;
+    if (p._dodgeT > 0) p._dodgeT -= dt;
+    if (p.skillSwing > 0) p.skillSwing = Math.max(0, p.skillSwing - dt);
+
+    // issue 5pc: the ward re-arms on ROOM ENTRY, which is a room-id change —
+    // the dungeon's roomAt is the same lookup the encounter director runs per
+    // frame, and the arena world has no roomAt so the whole gate is one room
+    // (armed once, by _beginGate). Corridors return -1 and change nothing, so
+    // stepping out and back into the SAME room does not re-arm it.
+    if (this._rules?.size && this._rules.has('first_hit_ward') && this.world?.roomAt) {
+      const rid = this.world.roomAt(p.pos.x, p.pos.z);
+      if (rid >= 0 && rid !== this._wardRoomId) {
+        this._wardRoomId = rid;
+        this._wardReady = true;
+      }
+    }
 
     // regen
     p.hp = Math.min(d.maxHp, p.hp + d.hpRegen * dt);
     p.mp = Math.min(d.maxMp, p.mp + d.mpRegen * dt);
 
-    // input
-    if (this.input.consume('attack') || (this.input.isHeld('attack') && p.swing <= 0 && p.cds.attack <= 0)) this._tryAttack();
+    // input. A fresh press always goes in (startAttack buffers it if the step
+    // is not cancelable yet); a held button or a ripe buffer only fires once
+    // the machine says the next step would actually start.
+    const w = this.weapon;
+    // The bow has NO melee arc at all (RPG_SPEC weaponFamilies.bow): the same
+    // attack button becomes draw-hold-release and the swing machine stays
+    // idle. No new input, no new camera mode — the spec's soft-lock answer.
+    const ranged = Boolean(w?.arch?.ranged);
+    if (ranged) {
+      this._updateBow(dt, w, p);
+    } else if (this._staffBeam) {
+      // The held button IS the channel. Eat any press edge so a release and
+      // re-press inside one frame cannot double-start a step while the beam
+      // is still deciding whether it ended.
+      this.input.consume('attack');
+    } else {
+      // Live hold flag for chargeable steps (the greatsword finisher):
+      // refreshed every frame BEFORE tickAttack so the machine sees this
+      // frame's truth. Steps without a charge clause ignore it entirely.
+      p.attack.charging = this.input.isHeld('attack');
+      if (this.input.consume('attack')
+        || ((this.input.isHeld('attack') || p.attack.buffered) && w && canAttack(p.attack, w))) {
+        consumeBuffer(p.attack);
+        this._tryAttack();
+      }
+    }
     if (this.input.consume('dash')) this._tryDash();
     if (this.input.consume('slash')) this._trySlash();
     if (this.input.consume('nova')) this._tryNova();
     if (this.input.consume('summon')) this._trySummon();
 
-    // swing timing
-    if (p.swing > 0) {
-      const before = p.swing;
-      p.swing -= dt;
-      if (!p.swingHitApplied && before > 0.17 && p.swing <= 0.17) {
-        p.swingHitApplied = true;
-        this._applySwingDamage();
-      }
-      if (p.swing <= 0) p.swing = 0;
+    // swing timing — the machine advances phases and fires _applySwingHit once
+    // per damage application (the dagger finisher makes two).
+    if (w) tickAttack(p.attack, w, dt, this._onSwingHit);
+    // The staff's channel outlives its machine step by design — the step is
+    // the CAST, the channel is what the hold buys after it.
+    this._updateStaffBeam(dt);
+    // HUD mirror for the skill-button wipe; the machine's cd is the real gate.
+    // Clamped to SKILLS.attack.cd because ui.js divides by that constant for
+    // the wipe height — a maul's 1.05 s cd would scale the wipe to 2.6x the
+    // button. A heavy weapon's wipe therefore sits full a moment longer
+    // instead of overflowing, which is the honest read at a glance anyway.
+    p.cds.attack = Math.min(p.attack.cd, SKILLS.attack.cd);
+    // Combo readout clears when the chain window lapses back to the opener.
+    if (this._comboShown && !p.attack.active && p.attack.next === 0) {
+      this._comboShown = 0;
+      this.ui.setCombo(0);
     }
 
     // movement — the body owns integration, collision and ground contact
@@ -1431,9 +2436,33 @@ export class Game {
     // invert the controls. With the camera untouched this is (x, -y) exactly.
     const mv = this.input.sampleWorld();
     const moving = Math.abs(mv.x) > 0.01 || Math.abs(mv.z) > 0.01;
-    body.move(mv.x, mv.z, p.swing > 0 ? 0.35 : 1);
+    // moveScale is the per-step movement penalty (a maul finisher nearly roots
+    // you at 0.04); idle it returns the instance's own moveMul, so a light
+    // weapon's mobility bonus is finally a real number rather than a tooltip.
+    // A drawn bowstring overrides both: the familyTable's 0.45 is absolute
+    // ("0.45 while drawing, 0.85 otherwise") — the draw is the commitment
+    // this family pays instead of a lock window.
+    const drawing = Boolean(this._bowState?.drawing);
+    // The staff's channel roots harder than any step: familyTable's "roots
+    // to move 0.20 while held" is absolute, like the bow's 0.45 while
+    // drawing — the root is the commitment this finisher charges.
+    const channeling = Boolean(this._staffBeam);
+    body.move(mv.x, mv.z,
+      channeling ? STAFF.beam.move
+        : drawing ? BOW.moveDrawing : (w ? moveScale(p.attack, w) : 1));
 
-    if (moving && p.swing <= 0) {
+    if (drawing || channeling) {
+      // Aiming is LOOKING: while the string is back (or the beam is lit) the
+      // body tracks the camera bearing, so the shot leaves along what the
+      // player sees and the soft-lock cone is centred on the same line.
+      const aim = drawing ? _bowDir : _staffDir;
+      this._camForward(aim);
+      const targetYaw = Math.atan2(aim.x, aim.z);
+      let diff = targetYaw - p.yaw;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      p.yaw += diff * Math.min(1, dt * 12);
+    } else if (moving && !p.attack.active) {
       // Turn toward the stick, shortest way around.
       const targetYaw = Math.atan2(mv.x, mv.z);
       let diff = targetYaw - p.yaw;
@@ -1461,17 +2490,29 @@ export class Game {
     p.mesh.position.copy(p.pos);
     p.mesh.rotation.y = p.yaw;
     p.mesh.visible = !(p.invuln > 0 && p.dashTimer <= 0 && Math.floor(this.time * 22) % 2 === 0);
+    // attackAnim hands over everything the pose needs: phase 1 -> 0 across the
+    // step, the contact frame at the REAL windup fraction (0.17/0.34 = 0.5 for
+    // the sword opener — the exact number the old hardcoded 0.5 encoded), and
+    // the archetype's shoulder curve so an axe winds further back than a
+    // dagger. The Ruin skill's visual swing rides the same channel when the
+    // machine is idle.
+    const anim = w ? attackAnim(p.attack, w) : null;
+    const machineSwinging = Boolean(anim && anim.phase > 0);
     animateRig(p.mesh, {
       moving, speed: sp, t: this.time,
-      attackPhase: p.swing > 0 ? p.swing / 0.34 : 0,
-      // Damage lands when the swing timer crosses 0.17 of 0.34 — half way —
-      // and the skinned rig warps its slash clip so the blade connects on
-      // exactly that frame. Change the 0.17 in the swing-timing block above
-      // and this must follow.
-      attackContact: 0.5,
+      attackPhase: machineSwinging ? anim.phase : (p.skillSwing > 0 ? p.skillSwing / 0.3 : 0),
+      // The skinned rig warps its slash clip so the blade connects on exactly
+      // the frame tickAttack applies the damage.
+      attackContact: machineSwinging ? anim.windup : 0.5,
+      // Procedural box-man swing curve, per archetype. Defaults inside
+      // animateRig reproduce the old hardcoded sword arc exactly.
+      swingContact: machineSwinging ? anim.windup : 0.3,
+      swingLo: anim?.lo, swingHi: anim?.hi, swingTwist: anim?.twist,
+      twoHand: anim?.twoHand ?? false,
+      mirror: anim?.mirror ?? false,
       // The combo step picks the clip (slash restart-offsets, punches and
       // kicks alternate) so mashing does not replay one pose from frame 0.
-      combo: p.comboIndex,
+      combo: p.attack.active ? p.attack.index + 1 : (this._comboShown || 0),
       // Dash is dressed as the pack's Roll; the 0.26 matches p.dashTimer's
       // start value in _tryDash. Purely visual — i-frames are p.invuln's.
       dashPhase: p.dashTimer > 0 ? p.dashTimer / 0.26 : 0,
@@ -1571,6 +2612,8 @@ export class Game {
 
   _updateEnemies(dt) {
     const p = this.player;
+    // GRAVEMAUL ASCENDANT: the crater decays here, once, whatever spawned it.
+    if (this._crater && (this._crater.t -= dt) <= 0) this._crater = null;
     // Crowd separation happens once for the whole field, BEFORE anyone moves.
     // Doing it per-enemy after the move loop (the old _separate) left mesh
     // positions a frame behind the separated pos.
@@ -1588,6 +2631,36 @@ export class Game {
     // benefit most — a scale-2.5 boss (r 1.5) now keeps its adds 3.7 m off, so
     // it is never buried inside its own pack.
     separate(this.enemies, 1.8, 900);
+    // Axe bleed ticks in their own REVERSE indexed pass, before the main
+    // for..of below: a bleed tick can kill, _killEnemy splices this.enemies,
+    // and splicing the current element out from under a live for..of iterator
+    // silently skips the next enemy for a frame.
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const e = this.enemies[i];
+      if (!(e.bleedT > 0)) continue;
+      e.bleedT -= dt;
+      e.bleedAcc += e.bleedDps * dt;
+      // Whole points only, banked until they exist — hp stays integer-ish and
+      // the numbers popup never shows a 0.
+      if (e.bleedAcc >= 1) {
+        const n = Math.floor(e.bleedAcc);
+        e.bleedAcc -= n;
+        e.hp -= n;
+        e.bleedShown = (e.bleedShown || 0) + n;
+        e.hurt = Math.max(e.hurt, 0.15);
+      }
+      // Throttled readout: one small number per half second per bleeder, not
+      // one per tick — sixty popups a second is noise, not information.
+      e.bleedNumT = (e.bleedNumT || 0) - dt;
+      if (e.bleedNumT <= 0 && (e.bleedShown || 0) > 0 && e.hp > 0) {
+        tmpV.copy(e.pos).setY(1.1 * (e.base.scale || 1));
+        this.fx.damageNumber(tmpV, e.bleedShown, '');
+        e.bleedShown = 0;
+        e.bleedNumT = 0.5;
+      }
+      if (e.bleedT <= 0) { e.bleedT = 0; e.bleedStacks = 0; e.bleedDps = 0; e.bleedAcc = 0; }
+      if (e.hp <= 0) this._killEnemy(e);
+    }
     for (const e of this.enemies) {
       if (e.spawning > 0) {
         e.spawning -= dt;
@@ -1600,11 +2673,35 @@ export class Game {
       if (e.hurt > 0) e.hurt -= dt;
       if (e.stagger > 0) { e.stagger -= dt; }
       if (e.attackCd > 0) e.attackCd -= dt;
-      if (e.telegraph > 0) {
-        e.telegraph -= dt;
-        if (e.telegraph <= 0) this._enemyStrike(e);
+      if (e.attack) {
+        // Armed humanoids swing through the state machine (npcStrikeWeapon:
+        // windup = the steerAgent telegraph, active 0, recovery 0.3), which
+        // fires _enemyStrike on the exact frame the old countdown did. The
+        // telegraph/swing fields stay maintained as MIRRORS because everything
+        // downstream — eye flare, movement gating, yaw freeze, the animation
+        // span, the fight suite — reads them, and none of that should care how
+        // the clock is kept. Deliberately unconditional, like the old
+        // decrement: stagger interrupts steering, not a strike already wound.
+        tickAttack(e.attack, e.strikeW, dt, this._onNpcHit, e);
+        if (e.attack.active) {
+          const st = e.strikeW.combo[0];
+          e.telegraph = Math.max(0, st.windup - e.attack.t);
+          e.swing = e.attack.t >= st.windup ? Math.max(0, st.windup + st.recovery - e.attack.t) : 0;
+        } else {
+          e.telegraph = 0;
+          // Leave e.swing to its own decay: the shadow-aggro swipe below sets
+          // it directly without entering the machine.
+          if (e.swing > 0) e.swing -= dt;
+        }
+      } else {
+        // Unarmed (casters, howlers) and the boss keep the plain countdown —
+        // a cast and a boss pattern are not weapon swings.
+        if (e.telegraph > 0) {
+          e.telegraph -= dt;
+          if (e.telegraph <= 0) this._enemyStrike(e);
+        }
+        if (e.swing > 0) e.swing -= dt;
       }
-      if (e.swing > 0) e.swing -= dt;
 
       const toPlayer = _aimDir.copy(p.pos).sub(e.pos).setY(0);
       const dist = toPlayer.length();
@@ -1638,13 +2735,28 @@ export class Game {
         moveX = steer.moveX; moveZ = steer.moveZ;
         e.vel.x += steer.impulseX; e.vel.z += steer.impulseZ;
         if (steer.wantAttack && e.attackCd <= 0) {
-          e.telegraph = steer.telegraph;
-          // Remembered so the attack CLIP can start its windup at telegraph
-          // start and land its blow on the exact frame _enemyStrike fires —
-          // the fairness timing itself is untouched.
-          e.telegraphMax = steer.telegraph;
-          e.attackCd = e.base.attackCd + Math.random() * (steer.attackKind === 'ranged' ? 0.6 : 0.4);
-          noteAttack(e.agent);
+          // The fairness window is still enemyai.js's number — armed humanoids
+          // just pour it into the machine's windup instead of a bare timer.
+          // startAttack can refuse (recovery of the previous blow still
+          // running); a refused ask charges no cooldown, matching the old
+          // code's behaviour where attackCd alone gated and never overlapped
+          // a live swing.
+          let began = true;
+          if (e.attack) {
+            e.strikeW.combo[0].windup = steer.telegraph;
+            began = Boolean(startAttack(e.attack, e.strikeW));
+            if (began) e.telegraph = steer.telegraph;   // mirror for this frame's readers
+          } else {
+            e.telegraph = steer.telegraph;
+          }
+          if (began) {
+            // Remembered so the attack CLIP can start its windup at telegraph
+            // start and land its blow on the exact frame _enemyStrike fires —
+            // the fairness timing itself is untouched.
+            e.telegraphMax = steer.telegraph;
+            e.attackCd = e.base.attackCd + Math.random() * (steer.attackKind === 'ranged' ? 0.6 : 0.4);
+            noteAttack(e.agent);
+          }
         }
 
         // Shadows pull aggro: if one is much closer, fight it instead.
@@ -1655,7 +2767,12 @@ export class Game {
           if (dS > 0.001) toS.divideScalar(dS);
           if (dS > e.base.range) { e.vel.addScaledVector(toS, e.speed * 9 * dt); moveX = 0; moveZ = 0; }
           else if (e.attackCd <= 0) {
-            near.s.hp -= e.atk * 0.6;
+            // vigil 5pc: bound shadows inherit 15% of the OWNER's armorDR.
+            // (The rule's other half — inheriting the active 2-piece bonus —
+            // is the vigil 2pc +12% shadow damage, which _shadowStrike already
+            // pays to every soldier; 4pc/5pc are explicitly not inherited.)
+            const inh = this._rules?.get('shadow_inherit');
+            near.s.hp -= e.atk * 0.6 * (inh ? 1 - inh.inheritDrFrac * this.derived.armorDR : 1);
             e.attackCd = e.base.attackCd;
             e.swing = 0.3;
             this.fx.burst(near.s.pos.clone().setY(1), 6, 0x35e6ff, { speed: 4, up: 2, life: 0.3 });
@@ -1671,7 +2788,13 @@ export class Game {
       if (e.telegraph <= 0 && !staggered) e.yaw = Math.atan2(toPlayer.x, toPlayer.z);
 
       e.vel.multiplyScalar(1 - Math.min(0.95, 7 * dt));
-      e.pos.addScaledVector(e.vel, dt);
+      // GRAVEMAUL ASCENDANT (positioning verb): bodies inside the crater cover
+      // ground at craterSlow of their speed. The POSITION advance is scaled,
+      // not the velocity — leaving the zone restores full speed the same
+      // frame, and knockback impulses still land at full strength.
+      const cr = this._crater;
+      const crSlow = (cr && Math.hypot(e.pos.x - cr.x, e.pos.z - cr.z) <= cr.r) ? cr.slow : 1;
+      e.pos.addScaledVector(e.vel, dt * crSlow);
       this.world.resolve(e.pos, e.radius, e.vel);
 
       e.mesh.position.copy(e.pos);
@@ -1734,7 +2857,9 @@ export class Game {
     if (d.length() < range) {
       const fwd = this._forward(e.yaw);
       if (d.normalize().dot(fwd) > 0.2) {
-        this._damagePlayer(e.atk, e.pos);
+        // The striker rides along so the damage pipeline can ask its tier —
+        // the ossuary 5pc cares whether this was trash (grunt/stalker).
+        this._damagePlayer(e.atk, e.pos, e);
       }
     }
     this.fx.burst(tmpV.copy(e.pos).addScaledVector(this._forward(e.yaw), 1.2).setY(1.2), 8, e.base.glow, {
@@ -1809,7 +2934,7 @@ export class Game {
     if (b._slam && b.telegraph <= 0) {
       b._slam = false;
       const r = 11;
-      if (this.player.pos.distanceTo(b.pos) < r) this._damagePlayer(b.atk * 1.4, b.pos);
+      if (this.player.pos.distanceTo(b.pos) < r) this._damagePlayer(b.atk * 1.4, b.pos, b);
       this.fx.ring(b.pos, 0xff4d6d, r * 1.1, 0.5);
       this.fx.burst(b.pos.clone().setY(0.6), 60, b.base.glow, { speed: 16, up: 4, life: 0.9, spread: 2 });
       this.fx.addShake(1.0);
@@ -1934,33 +3059,64 @@ export class Game {
     }
     if (!target) return;
     // s.atk already carries grade, owner level and INT via shadowCombat;
-    // the old extra level multiplier here double-dipped.
+    // the old extra level multiplier here double-dipped. The vigil 2pc's
+    // +12% is the ARMOUR part of shadowDmgMul only (x1 naked) — the INT part
+    // is already inside s.atk, and multiplying derived.shadowDmgMul here
+    // would double-count it. origin:'shadow' keeps a soldier's blow from
+    // eating the player's banked riposte crit.
     const before = target.hp;
-    this._damageEnemy(target, s.atk);
+    this._damageEnemy(target, s.atk * (this._armorBonus?.shadowDmgMul || 1), { origin: 'shadow' });
     if (before > 0 && target.hp <= 0) s.kills++;
   }
 
   _updateProjectiles(dt) {
-    for (let i = this.projectiles.length - 1; i >= 0; i--) {
-      const pr = this.projectiles[i];
-      pr.life -= dt;
-      pr.pos.addScaledVector(pr.dir, pr.speed * dt);
-      pr.mesh.position.copy(pr.pos);
-      pr.mesh.rotation.x += dt * 9;
-      pr.mesh.rotation.y += dt * 7;
-      // DUNGEON_SPEC EDIT 4: a bolt dies on the first solid it enters. feetY
-      // is the projectile's own height, so kerb-height props with real tops do
-      // not eat bolts; walls are top-Infinity and always block. The radius+2
-      // disc cull stays as the outer bound in both worlds.
-      if (pr.life <= 0 || Math.hypot(pr.pos.x, pr.pos.z) > this.world.radius + 2
-          || this.world.obstacleField?.blocked(pr.pos.x, pr.pos.z, 0.25, 0, pr.pos.y)) {
-        this._removeProjectile(i);
-        continue;
-      }
-      if (pr.pos.distanceTo(tmpV.copy(this.player.pos).setY(1.2)) < 1.1) {
-        this._damagePlayer(pr.damage, pr.pos);
-        this._removeProjectile(i);
-      }
+    // The whole loop lives in the pool now (RPG_SPEC step 8) — integration,
+    // the DUNGEON_SPEC EDIT 4 own-height wall cull, the 1.1 m player sphere
+    // for bolts, and the new arrow branch (gravity, ground/wall stick, enemy
+    // torso test). The ctx object is reused every frame; only its fields move.
+    // Staff-bolt steering — magic's bend #2, BOUNDED (RPG_SPEC
+    // magicMayBendExactlyTwoThings): the HORIZONTAL heading rotates toward
+    // the locked target at up to STAFF.turnRate (90 deg/s); the vertical
+    // channel stays gravity's alone, because a bolt may steer but may not
+    // ignore gravity, and it never exceeds its launch speed. At 18 m/s that
+    // bound is an 11.5 m turn radius — a sprinting target still escapes.
+    // Runs BEFORE pool.update so the frame integrates the steered heading.
+    for (let i = 0; i < this.pool.live.length; i++) {
+      const pr = this.pool.live[i];
+      if (!pr.staff || pr.stuck) continue;
+      const t = pr.staffTarget;
+      if (!t || t.hp <= 0) { pr.staffTarget = null; continue; }
+      _staffTo.copy(t.pos).sub(pr.pos).setY(0);
+      if (_staffTo.lengthSq() < 1e-6) continue;
+      const want = Math.atan2(_staffTo.x, _staffTo.z);
+      const cur = Math.atan2(pr.dir.x, pr.dir.z);
+      let diff = want - cur;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      // staffTurnMul: 1 on every bolt without HOLLOWLIGHT ASCENDANT's stamp.
+      // The bound doubles; the vertical channel stays gravity's either way.
+      const maxTurn = STAFF.turnRate * (pr.staffTurnMul || 1) * dt;
+      if (diff > maxTurn) diff = maxTurn;
+      else if (diff < -maxTurn) diff = -maxTurn;
+      const yaw = cur + diff;
+      // dir stays a flat unit vector, exactly as launched — vy carries the
+      // vertical channel, so the pool's arrow integration is untouched.
+      pr.dir.set(Math.sin(yaw), 0, Math.cos(yaw));
+    }
+    const ctx = this._projCtx;
+    ctx.obstacleField = this.world?.obstacleField || null;
+    ctx.worldRadius = this.world?.radius ?? 0;
+    ctx.playerPos = this.player.pos;
+    ctx.enemies = this.enemies;
+    this.pool.update(dt, ctx);
+    // A magic bolt BURSTS where an arrow sticks. The pool's arrow branch has
+    // just parked any record that met a wall or the ground; an arrow parked
+    // there is scenery, but a glowing orb parked there is a bug — so staff
+    // records are released the same frame, and the 'cull' reason routes the
+    // arcane impact through onRemove like every other bolt death.
+    for (let i = this.pool.live.length - 1; i >= 0; i--) {
+      const pr = this.pool.live[i];
+      if (pr.staff && pr.stuck) this.pool.releaseAt(i, 'cull');
     }
   }
 
@@ -1972,15 +3128,55 @@ export class Game {
     const w = rollDrop(this.rnd || Math.random, {
       rankIndex: this.gateIndex ?? 0,
       level: this.save.level,
-      // Perception is the stat that already governs what you notice; letting
-      // it nudge rarity gives it a second, visible job.
-      luck: Math.min(0.6, (this.save.stats?.per || 0) * 0.01),
+      luck: this._dropLuck(),
     });
     if (!w) return;
     this._spawnPickup(pos, 'weapon', w);
   }
 
+  // Perception is the stat that already governs what you notice; letting it
+  // nudge rarity gives it a second, visible job. A worn Fortune trinket adds
+  // its rolled magnitude on top — the spec's "luck feeds rollDrop's existing
+  // parameter" contact point. Same 0.6 ceiling over the combined value.
+  _dropLuck() {
+    return Math.min(0.6, (this.save.stats?.per || 0) * 0.01 + (this._armorBonus?.luckAdd || 0));
+  }
+
+  /**
+   * Roll an armour piece (or trinket) for this gate and drop it. Same seeded
+   * stream as the weapon drops, so a replayed seed hands out the same loot.
+   */
+  _spawnArmorDrop(pos) {
+    const a = rollArmorDrop(this.rnd || Math.random, {
+      rankIndex: this.gateIndex ?? 0,
+      level: this.save.level,
+      luck: this._dropLuck(),
+    });
+    if (!a) return;
+    this._spawnPickup(pos, 'armor', a);
+  }
+
   _spawnPickup(pos, kind = 'hp', weapon = null) {
+    if (kind === 'armor' && weapon) {
+      // Armour has no worn mesh this wave (the look is step 12's part swap),
+      // so the floor drop is the generic pickup shape in the RARITY tint —
+      // grey/green/blue/purple/gold is already the loot language the weapon
+      // beams taught, and it separates cleanly from hp red / mp cyan.
+      const armor = weapon;
+      const tint = rarityColor(armor.rarity);
+      const mesh = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.4, 0),
+        new THREE.MeshBasicMaterial({ color: tint }),
+      );
+      mesh.position.copy(pos).setY(1.05);
+      mesh.add(new THREE.PointLight(tint, 3.0, 6));
+      this.scene.add(mesh);
+      this.pickups.push({
+        mesh, pos: mesh.position, kind: 'armor', armor,
+        life: 45, t: Math.random() * 6,
+      });
+      return;
+    }
     if (kind === 'weapon' && weapon) {
       // The drop is the weapon itself — the same mesh that ends up in the hand,
       // so what you see on the floor is literally what you pick up.
@@ -2017,7 +3213,7 @@ export class Game {
       it.life -= dt;
       it.t += dt;
       it.mesh.rotation.y += dt * 2.4;
-      it.mesh.position.y = (it.kind === 'weapon' ? 1.05 : 0.9) + Math.sin(it.t * 3) * 0.16;
+      it.mesh.position.y = (it.kind === 'weapon' || it.kind === 'armor' ? 1.05 : 0.9) + Math.sin(it.t * 3) * 0.16;
 
       const d = it.mesh.position.distanceTo(p.pos);
       // Magnet: drift toward the player once they're close, so you never have
@@ -2031,6 +3227,15 @@ export class Game {
           this._takeWeapon(it.weapon);
           this.fx.burst(it.mesh.position.clone(), 18, rarityColor(it.weapon.rarity), { speed: 5, up: 4, life: 0.5 });
           this.audio.tone({ freq: 520, type: 'triangle', gain: 0.14, decay: 0.35, sweep: 1500 });
+          this.scene.remove(it.mesh);
+          disposeObject3D(it.mesh);
+          this.pickups.splice(i, 1);
+          continue;
+        }
+        if (it.kind === 'armor') {
+          this._takeArmor(it.armor);
+          this.fx.burst(it.mesh.position.clone(), 18, rarityColor(it.armor.rarity), { speed: 5, up: 4, life: 0.5 });
+          this.audio.tone({ freq: 440, type: 'triangle', gain: 0.14, decay: 0.35, sweep: 1200 });
           this.scene.remove(it.mesh);
           disposeObject3D(it.mesh);
           this.pickups.splice(i, 1);
@@ -2074,6 +3279,27 @@ export class Game {
       this._persistLoadout();
       this.ui.toast(`STASHED  ${w.name.toUpperCase()}`);
     }
+  }
+
+  /**
+   * Armour goes STRAIGHT to the stash as a serialized record — never
+   * auto-equipped. Worn armour is fully live now (step 11 folds armorDerive
+   * into refreshDerived), which is exactly why a drop must not equip itself:
+   * silently changing a slot the panel still renders locked would silently
+   * change the player's combat numbers. Equipping stays a deliberate act and
+   * arrives with the panel's armour slots (step 13).
+   */
+  _takeArmor(a) {
+    if (!a) return;
+    const rec = serializeArmor(a);
+    if (!rec) return;
+    this.armorStash = this.armorStash || [];
+    this.armorStash.unshift(rec);
+    // The persisted stash shares one 40-record cap with the weapons; trim the
+    // in-memory list too so it cannot grow past what will ever be written.
+    if (this.armorStash.length > STASH_LIMIT) this.armorStash.length = STASH_LIMIT;
+    this._persistLoadout();
+    this.ui.toast(`STASHED  ${a.name.toUpperCase()}  ·  ${a.rarityName}`, a.rarity === 'legendary' || a.rarity === 'epic' ? 'gold' : undefined);
   }
 
   _updateCorpses(dt) {

@@ -21,7 +21,7 @@
 // markup sink is a markup sink whatever you believe about its inputs today.
 
 import { shopStock, buy, ensureShopSave } from '../game/shop.js';
-import { rarityColor, RARITIES } from '../game/weapons.js';
+import { rarityColor, RARITIES, ARCHETYPES } from '../game/weapons.js';
 
 const CSS = `
 /* .screen is z-index 20 and #cityUi is 40, so without this the district
@@ -183,8 +183,11 @@ export class ShopUI {
     const name = el('b', null, row.weapon ? row.weapon.name : row.name);
     if (row.weapon) name.style.color = hex(rarityColor(row.rarity));
     meta.appendChild(name);
+    // Locked rows carry the FAMILY beside the unlock reason: with eight
+    // archetypes on the ladder, "Gatecleaver — D-GRADE HUNTERS ONLY" answers
+    // "locked what?" while an unlock condition alone does not.
     const sub = el('small', null, row.locked
-      ? row.reason
+      ? `${ARCHETYPES[row.archetype]?.name || ''}  ·  ${row.reason}`
       : `${RARITIES[row.rarity]?.name || ''} ${row.weapon.arch.name}  ·  x${row.weapon.dmgMul.toFixed(2)} power`);
     meta.appendChild(sub);
     btn.appendChild(meta);

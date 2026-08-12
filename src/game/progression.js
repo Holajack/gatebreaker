@@ -104,10 +104,17 @@ export function shadowRosterCapacity(save) {
  * How many shadows may stand on the field AT ONCE. Separate from roster size
  * because this one is a draw-call budget, not a progression axis — the quality
  * tier gets the final word.
+ *
+ * `fieldAdd` is the vigil 4-piece set bonus (+2, RPG_SPEC step 11). It joins
+ * the EARNED term, so it is still clamped by both the quality tier's ceiling
+ * and the hard Math.min(12) — on a low graphics tier the bonus does nothing,
+ * and the panel says so rather than lying. Defaults to 0, so every pre-armour
+ * caller computes the identical number.
  */
-export function shadowFieldCapacity(save, qualityTier) {
+export function shadowFieldCapacity(save, qualityTier, fieldAdd = 0) {
   const tierCap = qualityTier?.maxFieldShadows ?? 12;
-  const earned = 2 + Math.floor(save.level / 8) + Math.floor(effectiveStat(save, 'int') / 40);
+  const earned = 2 + Math.floor(save.level / 8) + Math.floor(effectiveStat(save, 'int') / 40)
+    + Math.max(0, Math.floor(fieldAdd));
   return Math.max(2, Math.min(12, tierCap, earned));
 }
 
@@ -115,13 +122,16 @@ export function shadowFieldCapacity(save, qualityTier) {
  * Odds one extraction attempt takes. Free to attempt — the cost is the corpse
  * decaying and the three-attempt limit, not mana.
  */
-export function extractionChance(save, { enemyLevel = 1, tierWeight = 'trash', secondsSinceDeath = 0, attemptIndex = 0 } = {}) {
+export function extractionChance(save, { enemyLevel = 1, tierWeight = 'trash', secondsSinceDeath = 0, attemptIndex = 0, extractAdd = 0 } = {}) {
   if (attemptIndex >= MAX_EXTRACT_ATTEMPTS || attemptIndex < 0) return 0;
   const w = typeof tierWeight === 'number' ? tierWeight : (TIER_WEIGHTS[tierWeight] ?? TIER_WEIGHTS.trash);
   const levelFactor = clamp(1 + (save.level - enemyLevel) * 0.03, 0.4, 1.6);
   const decay = Math.max(0.25, 1 - Math.max(0, secondsSinceDeath) / CORPSE_WINDOW);
   const attemptPenalty = 1 - attemptIndex * 0.18;
-  const raw = w * levelFactor * decay * attemptPenalty + effectiveStat(save, 'per') * 0.004;
+  // extractAdd rides beside the PER term: it is the extraction trinket's whole
+  // contribution (RPG_SPEC step 10), flat like perception's, defaulting to 0
+  // so every pre-armour caller computes the identical number.
+  const raw = w * levelFactor * decay * attemptPenalty + effectiveStat(save, 'per') * 0.004 + extractAdd;
   return clamp(raw, 0.04, 0.95);
 }
 

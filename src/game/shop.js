@@ -151,7 +151,14 @@ export function shopStock(save) {
     // rows already on the shelf, and `sold` stays a meaningful key for the
     // whole band. Crossing into a new band re-seeds and re-rolls everything,
     // which is the intended reward.
-    const rarity = rollRarity(rnd, band * 0.75);
+    let rarity = rollRarity(rnd, band * 0.75);
+    // THE SHOP CEILING (RPG_SPEC gate2_shopCeiling): the Exchange NEVER sells
+    // legendary. At high bands the luck term above makes legendary genuinely
+    // likely, and letting ash buy the top rung turns a ladder into a slot
+    // machine — a legendary is CRAFTED at the ascension counter instead.
+    // Clamp AFTER the draw so the stream is consumed identically and every
+    // non-clamped row keeps its shipped rarity, seed and price row-for-row.
+    if (rarity === 'legendary') rarity = 'epic';
     const seed = (rnd() * 0xffffffff) >>> 0;
     const rankLocked = base.minRank > band;
     const levelLocked = base.reqLevel > level;

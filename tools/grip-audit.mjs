@@ -24,6 +24,10 @@ import { launchBrowser, newPhonePage, ensureServer, gotoGame, shotPath, OUT } fr
 const PLAYER_CASES = [
   ['sword-common', 'riftedge', 'common'],
   ['sword-golden', 'dawnbrand', 'legendary'],
+  ['greatsword', 'gatecleaver', 'common'],
+  ['greatsword-golden', 'duskrend', 'legendary'],
+  ['axe', 'hookfang', 'common'],
+  ['axe-golden', 'cinderbite', 'epic'],
   ['greataxe', 'sunderaxe', 'common'],
   ['maul', 'gravemaul', 'common'],
   ['daggers', 'whisperfangs', 'common'],
@@ -54,6 +58,10 @@ await page.evaluate(() => {
   // The city camera controller would fight every camera write below.
   if (g.mode) g.mode.updateCamera = () => {};
   g._updateCamera = () => {};
+  // The plaza auto-sheath (no hostile within 14 m, 3 s idle) would put every
+  // case on the character's BACK a few shots in — stance is this audit's own
+  // controlled variable (st.stance), so the policy is frozen for the session.
+  g._updateStance = () => {};
   // Fixed hour: a difference between two runs should be a grip change, not a
   // change in where the sun is.
   g.worldClock?.setHours?.(13.0);

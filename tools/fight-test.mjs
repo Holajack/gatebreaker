@@ -47,12 +47,139 @@
 // g.update(1/60) is stepped by hand, so the numbers are frame-exact and the
 // suite does not race a compositor.
 
+import * as THREE from 'three';
 import { ensureServer, launchBrowser, newPhonePage, gotoGame, evalGame, writeReport } from './_harness.mjs';
+import { ProjectilePool } from '../src/game/projectiles.js';
 
 const fails = [];
 function check(name, ok, detail = '') {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  ${detail}` : ''}`);
   if (!ok) fails.push(name);
+}
+
+// ---------------------------------------------------------------------------
+// THE POOL'S CONTRACT, PROVEN IN NODE BEFORE A BROWSER EXISTS (RPG_SPEC step 8
+// verify clause). Two claims, both about what pooling must NOT change:
+//
+//   1. A g=0, vy=0 projectile's position sequence is FLOAT-IDENTICAL to the
+//      shipped integration (pos.addScaledVector(dir, speed*dt)) over 240
+//      steps. Enemy caster bolts and boss spread shots ride this path, and
+//      the spec's wording is "assert that byte-equality in the test rather
+//      than assuming it".
+//   2. Firing 200 arrows creates ZERO new geometries, materials or meshes —
+//      the pool's whole reason to exist. Counted at the allocation ledger the
+//      pool keeps, which a reclaim cycle cannot forge.
+// ---------------------------------------------------------------------------
+{
+  const scene = { add() {}, remove() {} };
+  const pool = new ProjectilePool(scene, { max: 16 });
+  const from = new THREE.Vector3(3.2, 1.6, -7.1);
+  const flatDir = new THREE.Vector3(0.6, 0, 0.8).normalize();
+  const rec = pool.spawn({ from, dir: flatDir, speed: 15, damage: 1, life: 999, kind: 'bolt' });
+  const ref = from.clone();
+  const ctx = { obstacleField: null, worldRadius: Infinity, playerPos: null, enemies: null };
+  const dt = 1 / 60;
+  let identical = true;
+  let divergedAt = -1;
+  for (let i = 0; i < 240; i++) {
+    pool.update(dt, ctx);
+    ref.addScaledVector(flatDir, 15 * dt);
+    if (rec.pos.x !== ref.x || rec.pos.y !== ref.y || rec.pos.z !== ref.z) {
+      identical = false;
+      divergedAt = i;
+      break;
+    }
+  }
+  check('pool: g=0/vy=0 integration float-identical to the shipped loop over 240 steps',
+    identical, identical ? '' : `diverged at step ${divergedAt}`);
+
+  // Warm both kinds so lazy material/geometry creation is behind the marker,
+  // then cycle 200 arrows through a 16-record pool.
+  pool.spawn({ from, dir: flatDir, speed: 46, vy: 2, g: 9, life: 2.5, kind: 'arrow' });
+  const before = pool.stats();
+  for (let i = 0; i < 200; i++) {
+    pool.spawn({ from, dir: flatDir, speed: 46, vy: 2, g: 9, life: 2.5, kind: 'arrow' });
+    pool.update(dt, ctx);
+  }
+  const after = pool.stats();
+  check('pool: 200 arrow spawns allocate nothing '
+    + `(meshes ${before.meshes}->${after.meshes}, geometries ${before.geometries}->${after.geometries}, `
+    + `materials ${before.materials}->${after.materials})`,
+  before.meshes === after.meshes && before.geometries === after.geometries
+    && before.materials === after.materials);
+  check(`pool: record count is capped at 16 (live ${after.live} + free ${after.free})`,
+    after.live + after.free === 16 && after.live <= 16);
+
+  // Gravity is real when asked for: same spawn with vy/g rises then falls.
+  pool.clear();
+  const arc = pool.spawn({ from, dir: flatDir, speed: 22, vy: 2.64, g: 9, life: 2.5, kind: 'arrow' });
+  let maxY = from.y;
+  let lastY = from.y;
+  for (let i = 0; i < 120 && pool.live.includes(arc); i++) {
+    pool.update(dt, ctx);
+    lastY = arc.pos.y;
+    if (arc.pos.y > maxY) maxY = arc.pos.y;
+  }
+  check(`pool: a vy=2.64/g=9 arrow arcs — rises to ${maxY.toFixed(2)} then falls to ${lastY.toFixed(2)}`,
+    maxY > from.y + 0.3 && lastY < maxY - 0.3);
+  pool.dispose();
+}
+
+// ---------------------------------------------------------------------------
+// THE STAFF'S CONTRACT, PROVEN IN NODE (RPG_SPEC step 9). Three claims:
+//
+//   1. INTERNAL CONSISTENCY: the bolt flies under the arrow's EXACT gravity
+//      (STAFF.gravity === BOW.gravity === 9.0), its steering is bounded at
+//      the spec's 90 deg/s, and its launch speed is the spec's 18 m/s —
+//      magic bends physics in exactly two named ways and gravity is not one
+//      of them.
+//   2. The family's combo carries the familyTable's numbers: two steps, the
+//      opener a bolt, the finisher a beam rooted at move 0.20.
+//   3. The staff BUILDS AND READS AS A STAFF with the pack ABSENT (the
+//      step's own verify clause): setModelSource(null), procedural head.
+// ---------------------------------------------------------------------------
+{
+  const W = await import('../src/game/weapons.js');
+  check('staff: bolt gravity IS the arrow gravity (9.0 shared, the internal-consistency law)',
+    W.STAFF.gravity === 9 && W.STAFF.gravity === W.BOW.gravity,
+    `staff g ${W.STAFF.gravity}, bow g ${W.BOW.gravity}`);
+  check('staff: steering bounded at the spec\'s 90 deg/s and launch speed at 18 m/s',
+    Math.abs(W.STAFF.turnRate - Math.PI / 2) < 1e-12 && W.STAFF.boltSpeed === 18);
+  const sc = W.WEAPONS.emberstave.combo;
+  check('staff: two steps — bolt opener, beam finisher rooted at move 0.20 (familyTable)',
+    sc.length === 2 && sc[0].bolt === true && !sc[0].finisher
+      && sc[1].beam === true && sc[1].finisher === true && sc[1].move === 0.20
+      && sc[0].windup === 0.28 && sc[0].lock === 0.34 && sc[0].range === 18);
+  check('staff: the family costs mana (bolt and beam tick both priced above zero)',
+    W.STAFF.boltMp > 0 && W.STAFF.beam.mpPerTick > 0 && W.STAFF.beam.maxT === 1.6);
+  check('staff: both bases enter the drop/Exchange ladder (archetype staff, distinct tiers)',
+    W.WEAPONS.emberstave.archetype === 'staff' && W.WEAPONS.hollowlight.archetype === 'staff'
+      && W.WEAPONS.emberstave.tier !== W.WEAPONS.hollowlight.tier);
+
+  // Pack-absent build: the verify clause's own wording.
+  W.setModelSource(null);
+  const staff = W.buildWeaponMesh(W.rollWeapon('emberstave', 1, { rarity: 'common', level: 1 }));
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let maxR = 0;
+  let parts = 0;
+  let headParts = 0;
+  staff.updateMatrixWorld(true);
+  staff.traverse((o) => {
+    if (!o.isMesh) return;
+    parts++;
+    const y = o.getWorldPosition(new THREE.Vector3()).y;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    if (y > 1.0) headParts++;
+    maxR = Math.max(maxR, Math.abs(o.position.x), Math.abs(o.position.z));
+  });
+  check('staff: builds with the pack ABSENT and reads as a staff — tall thin haft, '
+    + `head cluster at the top (${parts} parts, y ${minY.toFixed(2)}..${maxY.toFixed(2)}, `
+    + `radial spread ${maxR.toFixed(2)})`,
+  parts >= 5 && (maxY - minY) > 1.4 && maxY > 1.2 && headParts >= 2 && maxR < 0.4);
+  check('staff: archetype tagged for the STOW table and stows on the back',
+    staff.userData.archetype === 'staff' && W.STOW.staff?.socket === 'back');
 }
 
 const server = await ensureServer();
@@ -365,6 +492,453 @@ try {
           if (out.caster.covered) break;
         }
       }
+
+      // --- armed melee humanoid through the swing machine --------------------
+      // Wave 3-B step 1 routed armed humanoids (grunt/stalker/brute/lancer)
+      // through weapons.js's swing state machine instead of the bare
+      // telegraph countdown. The fairness contract this trial pins down: the
+      // blow still lands EXACTLY telegraphMax after the wind-up starts (the
+      // eye-flare window players learned), and it still lands at all. A
+      // machine that drifted the strike frame by even a couple of frames
+      // would shrink or stretch every dodge window in the game silently.
+      {
+        for (const e of [...g.enemies]) if (!e.isBoss) g._killEnemy(e);
+        const mx = bossRoom.centre.x;
+        const mz = bossRoom.centre.z;
+        g._spawnEnemy(new V(mx, 0, mz + 1.4), 'grunt');
+        const m = g.enemies.find((q) => !q.isBoss);
+        m.spawning = 0;
+        m.attackCd = 0;
+        resetDamage();
+        // startFrame tracks the wind-up of the attack that LANDS, not the
+        // first one asked for: an attackCd forced to 0 makes the grunt swing
+        // on its spawn frame before the yaw update has faced it at the player
+        // (a quirk the old countdown had identically), and that first blow
+        // whiffs behind it.
+        let startFrame = -1;
+        let strikeFrame = -1;
+        let telMax = 0;
+        let prevTel = 0;
+        for (let i = 0; i < 600 && strikeFrame < 0; i++) {
+          g.player.invuln = 0;
+          g.player.pos.set(mx, 0, mz);
+          g.player.body?.reset?.(mx, 0, mz);
+          g.player.hp = g.derived.maxHp;
+          m.pos.set(mx, 0, mz + 1.4);
+          m.vel.set(0, 0, 0);
+          m.hp = m.maxHp;
+          m.stagger = 0;
+          const hitsBefore = hits;
+          g.update(1 / 60);
+          if (m.telegraph > 0 && prevTel <= 0) { startFrame = i; telMax = m.telegraphMax; }
+          prevTel = m.telegraph;
+          if (hits > hitsBefore) strikeFrame = i;
+        }
+        out.melee = {
+          usesMachine: Boolean(m.attack),
+          startFrame,
+          strikeFrame,
+          telMax,
+          windupFrames: strikeFrame - startFrame,
+          wantFrames: Math.ceil(telMax * 60),
+          hits,
+          damage: Math.round(hpLost),
+        };
+        for (const q of [...g.enemies]) if (!q.isBoss) g._killEnemy(q);
+      }
+
+      // --- the bow: draw-hold-release, soft-lock, arc, stick (step 8) --------
+      // E rank only: one gate's geometry is enough to prove ballistics, and the
+      // D pass should keep measuring the game with the SHIPPED melee loadout.
+      if (gateIndex === 0) {
+        const W = await import('/src/game/weapons.js');
+        const bow = { shots: 0, hits: 0, hitDistM: -1, targetMovedM: 0 };
+        out.bow = bow;
+        g.equip(W.rollWeapon('galesting', 7, { rarity: 'common', level: 40 }));
+        bow.family = g.weapon?.archetype;
+        bow.mainHand = g.weapon?.arch?.mainHand;
+        for (const q of [...g.enemies]) if (!q.isBoss) g._killEnemy(q);
+        for (let i = g.projectiles.length - 1; i >= 0; i--) g._removeProjectile(i);
+
+        const cx = bossRoom.centre.x;
+        const cz = bossRoom.centre.z;
+        g.player.pos.set(cx, 0, cz);
+        g.player.body?.reset?.(cx, 0, cz);
+        // Camera-forward IS the soft-lock axis, so the trial reads it off the
+        // live camera, exactly as the aim solver will — and it must find a
+        // bearing whose 15 m line is CLEAR at arrow height, because the boss
+        // chamber deliberately contains cover (a blocked lock is refused by
+        // design, and that refusal is a different test). Rotate the real orbit
+        // input until the live camera looks down a clear lane.
+        let camF = null;
+        let ex = cx;
+        let ez = cz;
+        for (let k = 0; k < 24 && !camF; k++) {
+          g.input.look.yaw = (k / 24) * Math.PI * 2;
+          for (let i = 0; i < 16; i++) { g.player.invuln = 1; g.update(1 / 60); }
+          const cf = g.player.pos.clone().sub(g.camera.position).setY(0).normalize();
+          const tx = cx + cf.x * 15;
+          const tz = cz + cf.z * 15;
+          if (field.lineBlocked(cx, cz, tx, tz, { feetY: 1.4 })) continue;
+          if (field.blocked(tx, tz, 0.45, 0, 0.2)) continue;
+          camF = cf;
+          ex = tx;
+          ez = tz;
+        }
+        bow.lineClear = Boolean(camF);
+        if (!camF) { camF = g.player.pos.clone().sub(g.camera.position).setY(0).normalize(); }
+
+        // The target: a live grunt, AI on, free to move. It is PINNED at 15 m
+        // until the release frame so the claim "hits at 15 m" is measured, then
+        // freed — it spends the whole arrow flight running, which is the moving
+        // part of "hits a moving enemy".
+        g._spawnEnemy(new V(ex, 0, ez), 'grunt');
+        const tgt = g.enemies.find((q) => !q.isBoss);
+        tgt.spawning = 0;
+        tgt.attackCd = 9e9;
+
+        let arrowHits = 0;
+        let hitDist = -1;
+        bow.dbg = [];
+        const realDamageEnemy = g._damageEnemy.bind(g);
+        g._damageEnemy = (e, amount, opts) => {
+          arrowHits++;
+          hitDist = Math.hypot(e.pos.x - g.player.pos.x, e.pos.z - g.player.pos.z);
+          if (bow.dbg.length < 5) {
+            bow.dbg.push({
+              key: e.key, boss: Boolean(e.isBoss), y: +e.pos.y.toFixed(1),
+              amount: Math.round(amount), origin: opts?.origin || null,
+              stack: new Error('x').stack.split('\n').slice(2, 5).join(' | '),
+            });
+          }
+          realDamageEnemy(e, amount, opts);
+        };
+
+        // Draw-hold-release through the real input object: press on frame 0 of
+        // each 75-frame cycle, hold 45 frames (past the 0.55 s full draw),
+        // release, then leave 30 frames for the flight.
+        let tracked = null;
+        let freeFrame = -1;
+        const flightY = [];
+        for (let i = 0; i < 750 && arrowHits === 0; i++) {
+          const phase = i % 75;
+          if (phase === 0) {
+            g.input.pressed.add('attack');
+            g.input.held.add('attack');
+            freeFrame = -1;
+          }
+          if (phase < 45) {
+            tgt.pos.set(ex, 0, ez);
+            tgt.vel.set(0, 0, 0);
+            tgt.body?.reset?.(ex, 0, ez);
+            tgt.hp = tgt.maxHp;
+          } else if (phase === 45) {
+            g.input.held.delete('attack');
+            freeFrame = i;
+          }
+          g.player.invuln = 1;
+          g.player.pos.set(cx, 0, cz);
+          g.player.body?.reset?.(cx, 0, cz);
+          g.update(1 / 60);
+          for (const pr of g.projectiles) {
+            if (pr.kind !== 'arrow') continue;
+            if (tracked !== pr) {
+              tracked = pr;
+              bow.shots++;
+              bow.spawnVy = +pr.vy.toFixed(3);
+              bow.gravity = pr.g;
+              bow.speed = +pr.speed.toFixed(1);
+              flightY.length = 0;
+            }
+            flightY.push(+pr.pos.y.toFixed(3));
+          }
+          if (freeFrame >= 0 && arrowHits > 0) {
+            bow.targetMovedM = +Math.hypot(tgt.pos.x - ex, tgt.pos.z - ez).toFixed(2);
+          }
+        }
+        g._damageEnemy = realDamageEnemy;
+        g.input.held.delete('attack');
+        bow.hits = arrowHits;
+        bow.hitDistM = +hitDist.toFixed(1);
+        bow.lockedFlightY = flightY.slice(0, 24);
+
+        // Free shot (no target): full arc down the camera line, ground stick.
+        for (const q of [...g.enemies]) if (!q.isBoss) g._killEnemy(q);
+        for (let i = g.projectiles.length - 1; i >= 0; i--) g._removeProjectile(i);
+        const statsBefore = g.pool.stats();
+        g.input.pressed.add('attack');
+        g.input.held.add('attack');
+        let free = null;
+        let maxY = 0;
+        let lastY = 0;
+        for (let i = 0; i < 300; i++) {
+          if (i === 20) g.input.held.delete('attack');   // ~0.33 s: partial draw
+          g.player.invuln = 1;
+          g.update(1 / 60);
+          for (const pr of g.projectiles) {
+            if (pr.kind !== 'arrow') continue;
+            if (free !== pr) { free = pr; bow.freeSpawnVy = +pr.vy.toFixed(2); }
+            lastY = pr.pos.y;
+            if (pr.pos.y > maxY) maxY = pr.pos.y;
+          }
+          if (free?.stuck) break;
+        }
+        bow.freeShot = free ? {
+          spawnVy: bow.freeSpawnVy,
+          maxY: +maxY.toFixed(2),
+          endY: +lastY.toFixed(2),
+          stuck: Boolean(free.stuck),
+          meshVisible: Boolean(free.mesh?.visible),
+        } : null;
+        const statsAfter = g.pool.stats();
+        bow.poolDelta = {
+          meshes: statsAfter.meshes - statsBefore.meshes,
+          geometries: statsAfter.geometries - statsBefore.geometries,
+          materials: statsAfter.materials - statsBefore.materials,
+        };
+
+        // Hand the melee loadout back so nothing downstream measures a bow.
+        g.equipFromStash(0);
+        for (const q of [...g.enemies]) if (!q.isBoss) g._killEnemy(q);
+        for (let i = g.projectiles.length - 1; i >= 0; i--) g._removeProjectile(i);
+      }
+
+      // --- the staff: machine-timed bolt, homing bound, mana, beam (step 9) --
+      // E rank only, same reasoning as the bow. The trial drives the REAL
+      // input and the REAL camera: press casts through the swing machine, the
+      // bolt homes inside its 90 deg/s budget at a target that MOVES, and the
+      // held finisher channels the beam against a pinned grunt.
+      if (gateIndex === 0) {
+        const W = await import('/src/game/weapons.js');
+        const S = W.STAFF;
+        const st = {};
+        out.staff = st;
+        g.equip(W.rollWeapon('emberstave', 7, { rarity: 'common', level: 40 }));
+        st.family = g.weapon?.archetype;
+        for (const q of [...g.enemies]) if (!q.isBoss) g._killEnemy(q);
+        for (let i = g.projectiles.length - 1; i >= 0; i--) g._removeProjectile(i);
+
+        const cx = bossRoom.centre.x;
+        const cz = bossRoom.centre.z;
+        g.player.pos.set(cx, 0, cz);
+        g.player.body?.reset?.(cx, 0, cz);
+        // Clear lane at bolt height, found off the live camera like the
+        // bow's — but the staff trial's target DODGES 2 m sideways
+        // mid-flight, so the DODGE spot's line must be clear too (the first
+        // run of this trial had the bolt steer correctly into a rubble pile
+        // sitting on the un-validated dodge line and die there, which is the
+        // cover system working, not the homing failing). Checked at feetY
+        // 1.2, conservative against the bolt's whole 1.0-1.9 arc band;
+        // either sidestep direction is accepted, and the chosen sign rides
+        // out to the sidestep below.
+        let camF = null;
+        let ex = cx;
+        let ez = cz;
+        let sideSign = 1;
+        for (let k = 0; k < 24 && !camF; k++) {
+          g.input.look.yaw = (k / 24) * Math.PI * 2;
+          for (let i = 0; i < 16; i++) { g.player.invuln = 1; g.update(1 / 60); }
+          const cf = g.player.pos.clone().sub(g.camera.position).setY(0).normalize();
+          const tx = cx + cf.x * 12;
+          const tz = cz + cf.z * 12;
+          if (field.lineBlocked(cx, cz, tx, tz, { feetY: S.launchY })) continue;
+          if (field.blocked(tx, tz, 0.45, 0, 0.2)) continue;
+          for (const sgn of [1, -1]) {
+            const dx = tx + (-cf.z) * 2 * sgn;
+            const dz = tz + cf.x * 2 * sgn;
+            if (field.lineBlocked(cx, cz, dx, dz, { feetY: 1.2 })) continue;
+            if (field.blocked(dx, dz, 0.45, 0, 0.2)) continue;
+            camF = cf;
+            ex = tx;
+            ez = tz;
+            sideSign = sgn;
+            break;
+          }
+        }
+        st.lineClear = Boolean(camF);
+        if (!camF) camF = g.player.pos.clone().sub(g.camera.position).setY(0).normalize();
+
+        g._spawnEnemy(new V(ex, 0, ez), 'grunt');
+        const tgt = g.enemies.find((q) => !q.isBoss);
+        tgt.spawning = 0;
+        tgt.attackCd = 9e9;
+        // The probe hunter is level 40 against an E grunt: one blow KILLS,
+        // and _killEnemy splices the body out of g.enemies — which would end
+        // the trial by deleting its own target. An effectively-infinite
+        // health bar keeps the subject on the field; the wrap still counts
+        // every blow.
+        tgt.maxHp = 1e9;
+        tgt.hp = 1e9;
+
+        let boltHits = 0;
+        let hitDist = -1;
+        const realDamageEnemy = g._damageEnemy.bind(g);
+        g._damageEnemy = (e, amount, opts) => {
+          boltHits++;
+          hitDist = Math.hypot(e.pos.x - g.player.pos.x, e.pos.z - g.player.pos.z);
+          realDamageEnemy(e, amount, opts);
+        };
+
+        // BOLT + HOMING BOUND. The grunt is pinned at 12 m until the bolt
+        // exists, then SIDESTEPS 2 m and holds — a clean mid-flight dodge
+        // the steering must close inside its 90 deg/s budget (9.5 deg of
+        // correction against ~61 deg of budget over the flight). A freed,
+        // sprinting target was tried first and the bolt missed by 8 cm —
+        // which is the SPEC's own promise ("a fast-moving target can still
+        // outrun a homing bolt"), so the deterministic dodge is the honest
+        // test of the steering claim, and the bound assert below proves the
+        // budget was never exceeded to make it. Per-frame bearing deltas are
+        // measured off the record's own dir.
+        const statsBefore = g.pool.stats();
+        g.player.hp = g.derived.maxHp;
+        g.player.mp = g.derived.maxMp;
+        const mp0 = g.player.mp;
+        let bolt = null;
+        let stepped = false;
+        let maxTurnPerFrame = 0;
+        let totalTurn = 0;
+        let prevBearing = null;
+        const sideX = -camF.z * sideSign;
+        const sideZ = camF.x * sideSign;
+        for (let i = 0; i < 240 && boltHits === 0; i++) {
+          if (i === 0) { g.input.pressed.add('attack'); g.input.held.add('attack'); }
+          if (i === 2) g.input.held.delete('attack');
+          if (!bolt) {
+            tgt.pos.set(ex, 0, ez);
+            tgt.vel.set(0, 0, 0);
+            tgt.body?.reset?.(ex, 0, ez);
+          } else {
+            stepped = true;
+            tgt.pos.set(ex + sideX * 2, 0, ez + sideZ * 2);
+            tgt.body?.reset?.(tgt.pos.x, 0, tgt.pos.z);
+            tgt.vel.set(0, 0, 0);
+          }
+          tgt.hp = tgt.maxHp;
+          g.player.invuln = 1;
+          g.player.pos.set(cx, 0, cz);
+          g.player.body?.reset?.(cx, 0, cz);
+          g.update(1 / 60);
+          if (bolt) {
+            // Diagnostics the report keeps: closest approach to the chest
+            // sphere and the bolt's eventual fate.
+            const chest = 1.2 * (tgt.base?.scale || 1);
+            const dd = Math.hypot(bolt.pos.x - tgt.pos.x, bolt.pos.y - (tgt.pos.y + chest), bolt.pos.z - tgt.pos.z);
+            if (st.minApproachM === undefined || dd < st.minApproachM) st.minApproachM = +dd.toFixed(2);
+            st.boltFate = bolt.stuck ? 'stuck' : (g.projectiles.includes(bolt) ? 'flying' : 'gone');
+            if (!st.path) st.path = { from: [+cx.toFixed(1), +cz.toFixed(1)], tgt: [+tgt.pos.x.toFixed(1), +tgt.pos.z.toFixed(1)], pts: [] };
+            if (!bolt.stuck && st.path.pts.length < 60) {
+              st.path.pts.push([+bolt.pos.x.toFixed(2), +bolt.pos.y.toFixed(2), +bolt.pos.z.toFixed(2)]);
+            }
+          }
+          for (const pr of g.projectiles) {
+            if (!pr.staff) continue;
+            if (bolt !== pr) {
+              bolt = pr;
+              st.gravity = pr.g;
+              st.speed = pr.speed;
+              st.spawnVy = +pr.vy.toFixed(3);
+              st.locked = Boolean(pr.staffTarget);
+              // Mana measured the frame the cast lands: the bar was FULL
+              // until this frame, so regen cannot have refilled the cost.
+              st.mpCost = +(mp0 - g.player.mp).toFixed(2);
+              prevBearing = Math.atan2(pr.dir.x, pr.dir.z);
+            } else {
+              const b2 = Math.atan2(pr.dir.x, pr.dir.z);
+              let d = b2 - prevBearing;
+              while (d > Math.PI) d -= Math.PI * 2;
+              while (d <= -Math.PI) d += Math.PI * 2;
+              maxTurnPerFrame = Math.max(maxTurnPerFrame, Math.abs(d));
+              totalTurn += Math.abs(d);
+              prevBearing = b2;
+            }
+          }
+        }
+        st.boltHits = boltHits;
+        st.hitDistM = +hitDist.toFixed(1);
+        st.maxTurnPerFrameRad = +maxTurnPerFrame.toFixed(4);
+        st.totalTurnRad = +totalTurn.toFixed(3);
+        st.turnBoundRad = +(S.turnRate / 60).toFixed(4);
+
+        // THE BEAM. A fresh opener fires free, then the finisher is pressed
+        // inside the chain window and HELD against a grunt pinned 5 m down
+        // the beam line. Ticks are read off the live channel state.
+        g._damageEnemy = realDamageEnemy;
+        g.input.held.delete('attack');
+        for (const q of [...g.enemies]) if (!q.isBoss) g._killEnemy(q);
+        for (let i = g.projectiles.length - 1; i >= 0; i--) g._removeProjectile(i);
+        g.player.hp = g.derived.maxHp;
+        g.player.mp = g.derived.maxMp;
+
+        let tickHits = 0;
+        g._damageEnemy = (e, amount, opts) => { tickHits++; realDamageEnemy(e, amount, opts); };
+        let beamSeen = false;
+        let beamMeshSeen = false;
+        let beamTicks = 0;
+        let beamGone = -1;
+        let mpBeforeBeam = 0;
+        let mpNet = 0;
+        let beamTgt = null;
+        for (let i = 0; i < 400; i++) {
+          if (i === 0) { g.input.pressed.add('attack'); g.input.held.add('attack'); }
+          if (i === 2) g.input.held.delete('attack');
+          if (i === 45) {
+            // Opener total is 0.52 s (32 frames); the 1.10 s chain window is
+            // open. Spawn the pinned target, then press AND HOLD.
+            g._spawnEnemy(new V(cx + camF.x * 5, 0, cz + camF.z * 5), 'grunt');
+            beamTgt = g.enemies.find((q) => !q.isBoss);
+            beamTgt.spawning = 0;
+            beamTgt.attackCd = 9e9;
+            // Same immortality as the bolt target — tick 1 must not delete
+            // the subject of ticks 2-8.
+            beamTgt.maxHp = 1e9;
+            beamTgt.hp = 1e9;
+            mpBeforeBeam = g.player.mp;
+            g.input.pressed.add('attack');
+            g.input.held.add('attack');
+          }
+          if (beamTgt) {
+            beamTgt.pos.set(cx + camF.x * 5, 0, cz + camF.z * 5);
+            beamTgt.vel.set(0, 0, 0);
+            beamTgt.body?.reset?.(beamTgt.pos.x, 0, beamTgt.pos.z);
+            beamTgt.hp = beamTgt.maxHp;
+          }
+          g.player.invuln = 1;
+          g.update(1 / 60);
+          if (g._staffBeam) {
+            beamSeen = true;
+            beamTicks = Math.max(beamTicks, g._staffBeam.ticks);
+            if (g.fx._beam?.visible) beamMeshSeen = true;
+          } else if (beamSeen && beamGone < 0 && i > 46) {
+            beamGone = i;
+            mpNet = +(mpBeforeBeam - g.player.mp).toFixed(2);
+            // Stop the held button from opening a fresh combo after the
+            // channel times out — the trial is over.
+            g.input.held.delete('attack');
+          }
+          if (beamGone >= 0 && i > beamGone + 5) break;
+        }
+        g.input.held.delete('attack');
+        g._damageEnemy = realDamageEnemy;
+        st.beam = {
+          seen: beamSeen,
+          meshSeen: beamMeshSeen,
+          ticks: beamTicks,
+          tickHits,
+          mpNet,
+          endedAtFrame: beamGone,
+        };
+        const statsAfter = g.pool.stats();
+        st.poolDelta = {
+          meshes: statsAfter.meshes - statsBefore.meshes,
+          geometries: statsAfter.geometries - statsBefore.geometries,
+          materials: statsAfter.materials - statsBefore.materials,
+        };
+
+        // Hand the melee loadout back so nothing downstream measures a staff.
+        g.equipFromStash(0);
+        for (const q of [...g.enemies]) if (!q.isBoss) g._killEnemy(q);
+        for (let i = g.projectiles.length - 1; i >= 0; i--) g._removeProjectile(i);
+      }
       return out;
     }, index, boltPlane);
 
@@ -462,6 +1036,63 @@ try {
       + `${bc?.framesAlive} frames alive vs ${bo?.framesAlive})`,
     Boolean(bo) && Boolean(bc) && bo.hits > 0 && bc.hits === 0
       && bc.framesAlive < bo.framesAlive);
+
+    // The melee fairness window survives the swing-machine rewire, frame-exact.
+    const me = res.melee;
+    check(`${rank}: an armed grunt swings through the machine and its blow lands exactly `
+      + `telegraphMax after the wind-up starts (${me?.windupFrames} frames vs ${me?.wantFrames} `
+      + `for ${me?.telMax}s, ${me?.hits} blows, ${me?.damage} hp)`,
+    Boolean(me) && me.usesMachine === true && me.hits > 0
+      && Math.abs(me.windupFrames - me.wantFrames) <= 1);
+
+    // --- the bow (E only): RPG_SPEC step 8 -------------------------------
+    if (res.bow) {
+      const bw = res.bow;
+      check(`E: the player bow HITS a moving enemy at 15 m — ${bw.hits} hit(s) at `
+        + `${bw.hitDistM} m after ${bw.shots} shot(s); target ran ${bw.targetMovedM} m `
+        + 'during the flight',
+      bw.lineClear === true && bw.hits > 0 && bw.hitDistM >= 12);
+      check(`E: arrows fly under the spec's shared g=9.0 with a real vertical component `
+        + `(g ${bw.gravity}, spawn vy ${bw.spawnVy}, launch speed ${bw.speed} m/s at full draw)`,
+      bw.gravity === 9 && typeof bw.spawnVy === 'number' && bw.speed >= 44);
+      const fs = bw.freeShot;
+      check(`E: an unlocked arrow ARCS and STICKS where it lands — rises ${fs?.spawnVy} m/s `
+        + `to y ${fs?.maxY}, ends at y ${fs?.endY}, stuck=${fs?.stuck}, still visible=${fs?.meshVisible}`,
+      Boolean(fs) && fs.spawnVy > 0 && fs.maxY > 1.6 && fs.stuck === true && fs.meshVisible === true);
+      check('E: in-game arrow fire allocates nothing once warm — pool ledger delta '
+        + `${JSON.stringify(bw.poolDelta)}`,
+      bw.poolDelta && bw.poolDelta.meshes === 0 && bw.poolDelta.geometries === 0
+        && bw.poolDelta.materials === 0);
+      check(`E: the bow is left-handed and ranged (mainHand ${bw.mainHand}, family ${bw.family})`,
+        bw.mainHand === 'L' && bw.family === 'bow');
+    }
+
+    // --- the staff (E only): RPG_SPEC step 9 -----------------------------
+    if (res.staff) {
+      const stf = res.staff;
+      check(`E: the staff bolt HITS through the machine at range — ${stf.boltHits} hit(s) at `
+        + `${stf.hitDistM} m after a 2 m sidestep mid-flight (locked=${stf.locked})`,
+      stf.lineClear === true && stf.boltHits > 0 && stf.hitDistM >= 5 && stf.locked === true);
+      check(`E: the bolt flies at the spec's 18 m/s under the arrow's shared g=9.0 `
+        + `(g ${stf.gravity}, speed ${stf.speed}, solved vy ${stf.spawnVy})`,
+      stf.gravity === 9 && stf.speed === 18 && typeof stf.spawnVy === 'number');
+      check(`E: the cast costs mana at the contact frame (${stf.mpCost} MP of the contract's 4)`,
+        typeof stf.mpCost === 'number' && stf.mpCost > 3 && stf.mpCost <= 4.05);
+      check('E: homing is BOUNDED — steering happened '
+        + `(${stf.totalTurnRad} rad total) but never beat 90 deg/s `
+        + `(${stf.maxTurnPerFrameRad} rad/frame vs bound ${stf.turnBoundRad})`,
+      stf.totalTurnRad > 0.03 && stf.maxTurnPerFrameRad <= stf.turnBoundRad + 1e-3);
+      const bm = stf.beam;
+      check(`E: the held finisher CHANNELS — ${bm?.ticks} ticks, ${bm?.tickHits} blows on the `
+        + `pinned grunt, net ${bm?.mpNet} MP drained, beam mesh seen=${bm?.meshSeen}, `
+        + `ended by the 1.6 s ceiling at frame ${bm?.endedAtFrame}`,
+      Boolean(bm) && bm.seen === true && bm.ticks >= 6 && bm.tickHits >= 5
+        && bm.mpNet > 5 && bm.meshSeen === true && bm.endedAtFrame > 0);
+      check('E: staff fire allocates nothing once warm — pool ledger delta '
+        + `${JSON.stringify(stf.poolDelta)}`,
+      stf.poolDelta && stf.poolDelta.meshes === 0 && stf.poolDelta.geometries === 0
+        && stf.poolDelta.materials === 0);
+    }
   }
 
   const file = writeReport('fight-test', report);

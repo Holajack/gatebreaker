@@ -346,6 +346,9 @@ export class CityMode extends GameMode {
       this._setPrompt({
         kind: 'portal',
         rank: portal.rank,
+        // Verge wild gates yield emberdust at ANY rank (RPG_SPEC gate3
+        // recipe); game.enterGate only knows if the prompt tells it.
+        wild: Boolean(portal.wild),
         locked: Boolean(portal.locked),
         label: `${portal.rank}-GRADE GATE`,
         sub: portal.locked
@@ -556,7 +559,7 @@ export class CityMode extends GameMode {
         g.ui.toast(`THIS GATE IS SEALED · REQUIRES LEVEL ${gate?.reqLevel ?? '?'}`, 'danger');
         return null;
       }
-      g.enterGate(prompt.rank);
+      g.enterGate(prompt.rank, { wild: Boolean(prompt.wild) });
       return { action: 'enterGate', rank: prompt.rank };
     }
 

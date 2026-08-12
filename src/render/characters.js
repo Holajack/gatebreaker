@@ -273,6 +273,90 @@ const LOOKS = {
 /** Rank rotates each pool so an S-rank grunt is not the same man as an E one. */
 const RANK_OFFSET = { E: 0, D: 1, C: 2, B: 3, A: 4, S: 5 };
 
+// ------------------------------------------------------------ armour looks
+//
+// RPG_SPEC step 12: equipped armour changes the hunter's SILHOUETTE by part
+// swap — fact 4 (parts are swappable within a rig) pointed at the player.
+// Each armour set names one donor character per rig whose modular parts read
+// as that set; an equipped piece replaces the matching part of the player's
+// adventurer base. PLAYER-ONLY by design (RPG_SPEC modules note): every
+// distinct override is one more merged geometry in the refcounted cache, and
+// letting enemies wear overrides would multiply that by the crowd size.
+//
+// The pack has NO per-slot hands part — every character's hands are baked into
+// its body mesh (manifest parts are head/body/legs/feet only) — so the HANDS
+// slot cannot swap a part without faking modularity that is not there. It gets
+// a tinted gauntlet accent on the wrist sockets instead: plain lit boxes, no
+// rim, no emissive (both banned on living characters).
+//
+// Armour slot -> pack part slot. chest maps to 'body' (torso+arms+hands are
+// one mesh); hands is deliberately absent — see above.
+const ARMOR_SLOT_TO_PART = { head: 'head', chest: 'body', legs: 'legs', feet: 'feet' };
+
+// Donor characters per set per rig, chosen off the 21 shipped bodies for how
+// the SILHOUETTE reads against the set's fiction, and an accent colour for the
+// hands gauntlets. Tier order tracks how "dressed" the donor looks: worker
+// denim (issue) -> tactical vest + helmet (ossuary) -> sealed sci-fi suit
+// (deepglass) -> black leathers (emberfall) -> crown and gold (vigil).
+const ARMOR_LOOKS = {
+  issue: { male: 'men_worker', female: 'women_worker', accent: 0x8a6a48 },
+  ossuary: { male: 'men_swat', female: 'women_soldier', accent: 0xb9b2a4 },
+  deepglass: { male: 'men_spacesuit', female: 'women_scifi', accent: 0x7fb0b8 },
+  emberfall: { male: 'men_punk', female: 'women_punk', accent: 0x6b2f2a },
+  vigil: { male: 'men_king', female: 'women_medieval', accent: 0xc9a84c },
+};
+
+/**
+ * Equipment (save.equipment shape: slot -> {k,b,r,s,l}|null) -> the parts
+ * override appearanceFor takes: { head|chest|hands|legs|feet: setId }.
+ *
+ * Base ids are `${setId}_${slot}` (armor.js: "lowercase, no spaces, stable
+ * forever"), so the setId is everything before the LAST underscore. Trinkets
+ * (k:'t') and unknown sets resolve to nothing rather than to a guess.
+ * THREE-free and glb-free on purpose: callers may build overrides headlessly.
+ */
+export function armorLookFromEquipment(equipment) {
+  if (!equipment || typeof equipment !== 'object') return null;
+  const out = {};
+  let any = false;
+  for (const slot of ['head', 'chest', 'hands', 'legs', 'feet']) {
+    const rec = equipment[slot];
+    const b = rec && rec.k === 'a' && typeof rec.b === 'string' ? rec.b : null;
+    if (!b) continue;
+    const cut = b.lastIndexOf('_');
+    const setId = cut > 0 ? b.slice(0, cut) : null;
+    if (!setId || !ARMOR_LOOKS[setId]) continue;
+    out[slot] = setId;
+    any = true;
+  }
+  return any ? out : null;
+}
+
+// The player's armour look, cached exactly like _playerBody below: read lazily
+// from the save on first use so a fresh boot dresses the hunter with no wiring,
+// refreshed by setPlayerArmorLook when the panel equips something. undefined
+// means "not read yet"; null means "bare".
+let _playerArmor;
+
+/**
+ * Point the player's armour look at an equipment object (or null for bare).
+ * The caller still owns the rebuild: this only changes what the NEXT
+ * appearanceFor/rebuildHumanoid resolves, exactly like setPlayerBody.
+ */
+export function setPlayerArmorLook(equipment) {
+  _playerArmor = equipment ? armorLookFromEquipment(equipment) : null;
+}
+
+function playerArmorLook() {
+  if (_playerArmor !== undefined) return _playerArmor;
+  try {
+    _playerArmor = armorLookFromEquipment(loadSave()?.equipment);
+  } catch {
+    _playerArmor = null;      // headless / storage-denied: bare
+  }
+  return _playerArmor;
+}
+
 // ------------------------------------------------------------- player body
 //
 // save.playerBody is the identity screen's choice. It is read lazily from the
@@ -303,9 +387,12 @@ function playerBody() {
  * @param {object} opts
  * @param {string} opts.archetype  key into LOOKS; unknown falls back to 'grunt'
  * @param {string} opts.rank       'E'..'S', rotates the base pool
- * @returns {{key,rig,base,parts,archetype,rank,tint}|null}
+ * @param {object|null} opts.partsOverride  PLAYER-ONLY armour look
+ *   ({slot: setId}, see armorLookFromEquipment). undefined (absent) resolves
+ *   the module's cached look from the save; an explicit null forces bare.
+ * @returns {{key,rig,base,parts,archetype,rank,tint,transient,accent}|null}
  */
-export function appearanceFor(seed, { archetype = 'grunt', rank = 'E' } = {}) {
+export function appearanceFor(seed, { archetype = 'grunt', rank = 'E', partsOverride } = {}) {
   if (!_loaded) return null;
   const look = LOOKS[archetype] || LOOKS.grunt;
   const rnd = mulberry32(hashSeed(seed));
@@ -335,9 +422,37 @@ export function appearanceFor(seed, { archetype = 'grunt', rank = 'E' } = {}) {
     parts[slot] = (src.parts[slot] || rec.parts[slot]) ?? null;
   }
 
+  // The armour override, applied AFTER the mix loop and only for the player,
+  // so the RNG stream above is consumed identically with or without armour —
+  // enemies' looks cannot shift because the hunter changed his boots. The
+  // donor is resolved on the CURRENT rig, which is what makes an M/F flip
+  // re-apply the whole armour look for free (rebuildHumanoid comes back here).
+  let transient = false;
+  let accent = 0;
+  if (archetype === 'player') {
+    const ov = partsOverride !== undefined ? partsOverride : playerArmorLook();
+    if (ov) {
+      for (const [aSlot, setId] of Object.entries(ov)) {
+        const armorLook = ARMOR_LOOKS[setId];
+        if (!armorLook) continue;
+        if (aSlot === 'hands') { accent = armorLook.accent; continue; }
+        const part = ARMOR_SLOT_TO_PART[aSlot];
+        const donor = part ? _chars.get(armorLook[rig === 'female' ? 'female' : 'male']) : null;
+        const donorPart = donor?.parts?.[part];
+        if (!donorPart || donorPart === parts[part]) continue;
+        parts[part] = donorPart;
+        // Any swapped part marks the merged geometry TRANSIENT: exactly one
+        // caller (the player) can ever hold it, so releaseGeometry frees it
+        // at refs 0 instead of letting twenty wardrobe changes stack twenty
+        // dead 165 KB entries against the eviction ceiling.
+        transient = true;
+      }
+    }
+  }
+
   return {
     key: `${rig}|${parts.head}|${parts.body}|${parts.legs}|${parts.feet}`,
-    rig, base, parts, archetype, rank, tint: look.tint,
+    rig, base, parts, archetype, rank, tint: look.tint, transient, accent,
   };
 }
 
@@ -573,7 +688,15 @@ function mergedGeometryFor(appearance) {
   // this geometry is shared by every enemy with the same appearance.
   geometry.userData.shared = true;
 
-  const entry = { geometry, refs: 1, order: _geoOrder++ };
+  const entry = {
+    geometry,
+    refs: 1,
+    order: _geoOrder++,
+    // Armour-override looks (appearanceFor sets transient) are held by at most
+    // one instance ever — the player — so they are freed eagerly on release
+    // rather than parked until the 40-entry ceiling forces an eviction sweep.
+    transient: Boolean(appearance.transient),
+  };
   _geoCache.set(appearance.key, entry);
   evictGeometries();
   return geometry;
@@ -581,7 +704,22 @@ function mergedGeometryFor(appearance) {
 
 function releaseGeometry(key) {
   const entry = _geoCache.get(key);
-  if (entry) entry.refs = Math.max(0, entry.refs - 1);
+  if (!entry) return;
+  entry.refs = Math.max(0, entry.refs - 1);
+  if (entry.transient && entry.refs <= 0) {
+    entry.geometry.dispose();
+    _geoCache.delete(key);
+  }
+}
+
+/**
+ * Test window into the refcounted cache (tools/character-test.mjs asserts the
+ * armour-swap lifecycle: never above baseline + 2 mid-swap, refs back to zero
+ * and transient entries gone after the last one). Copies, not live objects.
+ */
+export function geometryCacheInfo() {
+  return Array.from(_geoCache.entries())
+    .map(([key, e]) => ({ key, refs: e.refs, transient: Boolean(e.transient) }));
 }
 
 function evictGeometries() {
@@ -734,6 +872,37 @@ function eyeMaterial(glow) {
   let m = _matCache.get(key);
   if (m) return m;
   m = new THREE.MeshBasicMaterial({ color: glow, toneMapped: false });
+  m.userData.shared = true;
+  _matCache.set(key, m);
+  return m;
+}
+
+// The hands-slot gauntlet accent (see the armour-looks note: the pack has no
+// hands part to swap, so the slot reads as tinted boxes over the fists). One
+// shared geometry, one shared material per set colour; five sets is five
+// materials, ever.
+let _gauntletGeo = null;
+function gauntletGeometry() {
+  if (_gauntletGeo) return _gauntletGeo;
+  // Sized against the pack hand. The socket's 1/MODEL_SCALE counter-scale and
+  // the root's MODEL_SCALE cancel exactly (measured: socket world scale 1.000),
+  // so these numbers ARE metres. The pack fist is ~0.09 across; a 0.11 box
+  // wraps it as a chunky low-poly glove — the first cut at 0.2/0.26/0.22
+  // rendered as luggage-sized bricks in the harness contact sheet.
+  _gauntletGeo = new THREE.BoxGeometry(0.11, 0.14, 0.12);
+  _gauntletGeo.userData.shared = true;
+  return _gauntletGeo;
+}
+
+function gauntletMaterial(hex) {
+  const key = `gauntlet:${hex}`;
+  let m = _matCache.get(key);
+  if (m) return m;
+  // Plain lit flat-shaded standard material: NO rim, NO emissive — both are
+  // banned on living characters, and a gauntlet is part of a living character.
+  m = new THREE.MeshStandardMaterial({
+    color: hex, roughness: 0.7, metalness: 0.25, flatShading: true,
+  });
   m.userData.shared = true;
   _matCache.set(key, m);
   return m;
@@ -998,6 +1167,8 @@ class CharacterInstance {
  * @param {boolean} opts.ghost             use the unified shadow material
  * @param {boolean} opts.eyes              emissive telegraph mote (default true)
  * @param {boolean} opts.armed             idle with a blade out rather than arms down
+ * @param {object|null} opts.partsOverride PLAYER-ONLY armour look, forwarded to
+ *                                         appearanceFor (absent = read the save)
  * @returns {CharacterInstance|null}       null when the pack is absent or over budget
  */
 export function makeCharacter({
@@ -1011,6 +1182,7 @@ export function makeCharacter({
   eyes = true,
   armed = false,
   ignoreBudget = false,
+  partsOverride,
 } = {}) {
   if (!_loaded) return null;
   // Two gates, and they mean different things. The per-module budget is this
@@ -1021,7 +1193,7 @@ export function makeCharacter({
   if (!ignoreBudget && _liveInstances >= _quality.budget) return null;
   if (!ignoreBudget && !skinnedBodyAvailable(_quality.tier, ghost)) return null;
 
-  const appearance = appearanceFor(seed, { archetype: ghost ? 'shadow' : archetype, rank });
+  const appearance = appearanceFor(seed, { archetype: ghost ? 'shadow' : archetype, rank, partsOverride });
   if (!appearance) return null;
   const rig = _rigs.get(appearance.rig);
   if (!rig) return null;
@@ -1076,6 +1248,21 @@ export function makeCharacter({
   const stow = { lift: 0, scale: 1 / MODEL_SCALE };
   if (chest) inst.sockets.back = makeSocket(chest, stow);
   if (hips) inst.sockets.hip = makeSocket(hips, stow);
+
+  // Hands-slot armour accent. Parented to the wrist sockets so they ride the
+  // hands through every clip; local y = -0.72 is the same fist offset the
+  // weapon grips use (makeSocket lifts the socket 0.72 above the bone).
+  // castShadow stays off — two thumb-sized boxes are not worth two extra
+  // depth-pass draws per frame on a phone.
+  if (appearance.accent) {
+    for (const s of [inst.sockets.hand, inst.sockets.handL]) {
+      if (!s) continue;
+      const mitt = new THREE.Mesh(gauntletGeometry(), gauntletMaterial(appearance.accent));
+      mitt.position.set(0, -0.72, 0);
+      mitt.castShadow = false;
+      s.add(mitt);
+    }
+  }
 
   if (eyes && inst.sockets.head) {
     const eye = new THREE.Mesh(eyeGeometry(), eyeMaterial(glow));
@@ -1163,6 +1350,7 @@ export function disposeCharacterModels() {
     });
   }
   if (_eyeGeo) { _eyeGeo.dispose(); _eyeGeo = null; }
+  if (_gauntletGeo) { _gauntletGeo.dispose(); _gauntletGeo = null; }
   _scene = null;
   _manifest = null;
   _clips = new Map();

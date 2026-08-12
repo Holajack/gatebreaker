@@ -163,6 +163,20 @@ export const ARCHETYPES = {
     anim: { lo: -2.30, hi: 2.40, twist: 0.42, twoHand: true, thrust: false, alternate: false },
     mass: 4.8,
   },
+  greatsword: {
+    // RPG_SPEC weaponFamilies.greatsword: grip lifted from the already-measured
+    // HELD_MODELS.bigsword (the lancer and the boss have carried Sword_big since
+    // the pack landed, so its y/z/rx were tuned on a spawned lancer, not
+    // guessed). rz 0.06 matches the greataxe: a two-hander hangs near the
+    // centre line and leans only slightly outboard.
+    name: 'Greatsword', feel: 'Linear and committed. It stops things dead rather than launching them.',
+    build: buildGreatsword,
+    grip: { y: -0.02, z: 0.07, rx: 0.30, rz: 0.06 },
+    // Winds further than the sword, not as far as the greataxe — mass 3.6 sits
+    // between their 1.4 and 4.8 and the shoulder arc should read that way.
+    anim: { lo: -2.10, hi: 2.20, twist: 0.36, twoHand: true, thrust: false, alternate: false },
+    mass: 3.6,
+  },
   daggers: {
     // The steepest pitch of the four on purpose: a short blade held near
     // vertical disappears against the forearm, and the dagger silhouette is
@@ -172,6 +186,55 @@ export const ARCHETYPES = {
     grip: { y: 0.02, z: 0.08, rx: 0.52, rz: 0.12 },
     anim: { lo: -0.90, hi: 1.55, twist: 0.14, twoHand: false, thrust: false, alternate: true },
     mass: 0.9,
+  },
+  axe: {
+    // RPG_SPEC weaponFamilies.axe: grip lifted from HELD_MODELS.axe — grunts
+    // have carried Axe_small on this rig since the pack landed, so y/z/rx are
+    // measured numbers. One-handed, so it takes a small outboard rz like the
+    // sword's rather than hugging the centre line.
+    name: 'Hand Axe', feel: 'Mid speed, mid reach, and a hook — nothing it touches gets to leave.',
+    build: buildHandAxe,
+    grip: { y: -0.02, z: 0.06, rx: 0.34, rz: 0.08 },
+    anim: { lo: -1.80, hi: 2.05, twist: 0.30, twoHand: false, thrust: false, alternate: false },
+    mass: 2.1,
+  },
+  bow: {
+    // RPG_SPEC weaponFamilies.bow: grip lifted VERBATIM from HELD_MODELS.bow
+    // below (same sign-corrected frame as every other entry) — the shallowest
+    // pitch of the set, because a bow is carried across the body, not raised.
+    // `mainHand: 'L'` is the family's one structural demand: adventurers.json
+    // confirms the convention (adv_bow attaches to handslot_l, adv_arrow to
+    // handslot_r), and equipWeapon honours the flag rather than assuming 'R'.
+    // `ranged: true` is what routes game.js's attack input to draw-hold-release
+    // instead of the swing machine — the family has no melee arc AT ALL.
+    name: 'Bow', feel: 'Hold to draw, release to loose. Useless inside arm\'s reach — that is the trade.',
+    build: buildBow,
+    grip: { y: 0, z: 0.05, rx: 0.14, rz: 0.06 },
+    // Barely winds: the shot is the projectile, not the arm.
+    anim: { lo: -0.40, hi: 0.60, twist: 0.05, twoHand: false, thrust: true, alternate: false },
+    mass: 1.1,
+    mainHand: 'L',
+    ranged: true,
+  },
+  staff: {
+    // RPG_SPEC weaponFamilies.staff. The spec's grip { y 0.02, z 0.10,
+    // rx -0.28 } was authored BEFORE two corrections this table now carries:
+    // the rx sign flip documented at the top of ARCHETYPES (its -0.28 meant
+    // "0.28 of forward pitch", which is +rx in the corrected frame), and the
+    // polearm's z lesson (a near-upright pole does not fold a forward offset
+    // into its pitch, so z 0.10 puts the shaft visibly outside the closed
+    // fist — 0.03 threads it through the fingers). Magnitudes kept, frame
+    // corrected; pitched slightly more than the polearm's 0.16 because the
+    // staff is 0.7 m shorter and can afford the lean without the butt
+    // sweeping the floor.
+    name: 'Staff', feel: 'Costs mana where everything else costs time. The bolt arcs and steers; the beam roots you.',
+    build: buildStaff,
+    grip: { y: 0.02, z: 0.03, rx: 0.22, rz: 0.06 },
+    // Two-handed (spec), thrust-flavoured: a cast PUSHES the head at the
+    // target rather than sweeping an arc, so it reads closer to the spear's
+    // language than the sword's.
+    anim: { lo: -0.70, hi: 1.25, twist: 0.12, twoHand: true, thrust: true, alternate: false },
+    mass: 1.6,
   },
   polearm: {
     // Nearly upright: a 2.5 m shaft pitched as far as a sword would put the
@@ -228,6 +291,102 @@ const AFFIX_KEYS = Object.keys(AFFIXES);
 
 const TITLES = ['the Hollow', 'Ash', 'the Long Night', 'Broken Grades', 'the Archon', 'Nine Gates'];
 
+// ------------------------------------------------------------ legendary rules
+//
+// RPG_SPEC rarityAndLegendary: the raw legendary multiplier is deliberately a
+// small step (1.36 -> 1.58, +16% — less than one tier step's ~+53%); the REAL
+// prize is one named clause per base that changes a VERB. The hard law:
+//
+//   A LEGENDARY RULE MAY NEVER MULTIPLY DAMAGE.
+//
+// Enforced STRUCTURALLY, not by convention, in three layers:
+//   1. every rule's `fx` object may only use keys from RULE_VERBS below, and
+//      the whitelist contains no damage term — an unknown key throws at module
+//      load (assertLegendaryLaw below runs unconditionally on import);
+//   2. hitDamage(w, step, atk) — the ONE damage computation — takes no rule
+//      input and never reads w.rule, so a rule has no channel into the number
+//      even if someone smuggled a key past the list;
+//   3. tools/ascension-test.mjs asserts both: the whitelist is closed, and a
+//      legendary's hitDamage over an epic's from the SAME seed is exactly the
+//      RARITIES.mul ratio — the rule contributed zero.
+//
+// Every verb below is tempo (when things happen), positioning (where bodies
+// end up) or resource flow (what a hit refunds or passes on). Consumers:
+// tickAttack/canAttack/startAttack here; the rest in game.js combat sites.
+export const RULE_VERBS = new Set([
+  'comboKeepOnWhiff',    // tickAttack: a lapsed chain keeps the combo cursor
+  'finisherCancelMul',   // canAttack: the finisher's cancel window scales
+  'chargeTimeMul',       // tickAttack/chargeMul: full charge takes less hold
+  'chargedStaggerMul',   // game.js: a near-full charge's stagger scales
+  'staggerOnMiss',       // game.js: finisher stagger lands in the arc regardless
+  'craterT',             // game.js: radial finisher leaves a slow zone (secs)
+  'craterSlow',          // game.js: movement factor inside the crater
+  'pullStagger',         // game.js: the hook's pull also staggers (secs)
+  'bleedJump',           // game.js: a bleeding kill passes the wound on (metres)
+  'critRefund',          // game.js: a crit refunds step time (secs)
+  'critRefundMax',       // game.js: at most N refunds per combo
+  'finisherLungeMul',    // startAttack: the finisher's lunge scales
+  'finisherDashReset',   // game.js: landing the finisher clears the dash cd
+  'sweepPull',           // game.js: wide-arc hits pull toward the arc centre (m)
+  'drawRefundOnKill',    // game.js: a full-draw kill re-arms a full draw
+  'drawFullMul',         // game.js: full draw arrives sooner
+  'beamCheapT',          // game.js: beam ticks past this time cost less (secs)
+  'beamCostMul',         // game.js: the cheap tick's cost factor
+  'boltTurnMul',         // game.js: the homing bolt's steering bound scales
+]);
+
+// One rule per base. Text is what the panel prints; fx is what combat reads.
+// Where the spec's example clause names a mechanic this build does not have
+// (daggers carry no bleed; nothing interrupts a player swing), the clause was
+// re-cut to the nearest verb the machine actually owns — still tempo /
+// positioning / resource, never a damage number.
+export const LEGENDARY_RULES = {
+  riftedge: { name: 'RIFTEDGE ASCENDANT', text: 'Your combo does not reset on a whiff — only taking a hit resets it.', fx: { comboKeepOnWhiff: true } },
+  dawnbrand: { name: 'DAWNBRAND ASCENDANT', text: 'The third chop’s cancel window doubles, so the finisher can loop into itself.', fx: { finisherCancelMul: 2 } },
+  gatecleaver: { name: 'GATECLEAVER ASCENDANT', text: 'The finisher’s full charge takes half the hold.', fx: { chargeTimeMul: 0.5 } },
+  duskrend: { name: 'DUSKREND ASCENDANT', text: 'A near-full charge’s stagger doubles.', fx: { chargedStaggerMul: 2 } },
+  sunderaxe: { name: 'SUNDERAXE ASCENDANT', text: 'The finisher’s stagger lands on everything in the arc even on a miss — the wind alone staggers.', fx: { staggerOnMiss: true } },
+  gravemaul: { name: 'GRAVEMAUL ASCENDANT', text: 'The ground pound leaves a 3 s crater that halves enemy speed inside it.', fx: { craterT: 3, craterSlow: 0.5 } },
+  hookfang: { name: 'HOOKFANG ASCENDANT', text: 'The hook’s pull also staggers what it drags (0.35 s).', fx: { pullStagger: 0.35 } },
+  cinderbite: { name: 'CINDERBITE ASCENDANT', text: 'Killing a bleeding enemy passes the wound to the nearest enemy within 6 m.', fx: { bleedJump: 6 } },
+  galesting: { name: 'GALESTING ASCENDANT', text: 'A full-draw arrow that kills its target refunds the draw — the next shot starts full.', fx: { drawRefundOnKill: true } },
+  starpiercer: { name: 'STARPIERCER ASCENDANT', text: 'Full draw arrives 30% sooner.', fx: { drawFullMul: 0.7 } },
+  emberstave: { name: 'EMBERSTAVE ASCENDANT', text: 'Beam ticks past 0.8 s cost half mana — a long channel is cheaper per second than a short one.', fx: { beamCheapT: 0.8, beamCostMul: 0.5 } },
+  hollowlight: { name: 'HOLLOWLIGHT ASCENDANT', text: 'The homing bolt’s steering bound doubles.', fx: { boltTurnMul: 2 } },
+  whisperfangs: { name: 'WHISPERFANGS ASCENDANT', text: 'A crit refunds 0.05 s of the current step’s recovery, at most 3 times per combo.', fx: { critRefund: 0.05, critRefundMax: 3 } },
+  veinsplitters: { name: 'VEINSPLITTERS ASCENDANT', text: 'The finisher’s lunge doubles — the blades close the room themselves.', fx: { finisherLungeMul: 2 } },
+  vigil: { name: 'VIGIL ASCENDANT', text: 'Landing the thrust finisher resets Dash.', fx: { finisherDashReset: true } },
+  voidglaive: { name: 'VOIDGLAIVE ASCENDANT', text: 'The sweep pulls every target 0.8 m toward the centre of the arc.', fx: { sweepPull: 0.8 } },
+};
+
+/**
+ * The structural half of the law, run at import time and re-runnable by the
+ * tests against arbitrary tables: any fx key outside RULE_VERBS throws. The
+ * whitelist itself is the proof there is no damage channel — grep it: no key
+ * feeds hitDamage, and hitDamage takes no rule.
+ */
+export function assertLegendaryLaw(rules = LEGENDARY_RULES) {
+  for (const [baseId, rule] of Object.entries(rules)) {
+    if (!rule || typeof rule !== 'object' || !rule.fx || typeof rule.fx !== 'object') {
+      throw new Error(`legendary rule ${baseId}: no fx object`);
+    }
+    for (const key of Object.keys(rule.fx)) {
+      if (!RULE_VERBS.has(key)) {
+        throw new Error(`legendary rule ${baseId}: fx key "${key}" is not a sanctioned verb — `
+          + 'a legendary rule may never multiply damage, and new verbs must enter RULE_VERBS deliberately');
+      }
+    }
+  }
+  return true;
+}
+assertLegendaryLaw();
+
+/** The rule a legendary of `baseId` carries, or null. Rarity-gated by the
+ *  caller (rollWeapon attaches it only on legendary instances). */
+export function legendaryRule(baseId) {
+  return LEGENDARY_RULES[baseId] || null;
+}
+
 // --------------------------------------------------------------- weapon table
 //
 // Step fields:
@@ -247,6 +406,13 @@ const TITLES = ['the Hollow', 'Ash', 'the Long Night', 'Broken Grades', 'the Arc
 // The current hardcoded sword — windup 0.17, total 0.34, ranges 2.9/3.6, arcs
 // 0.62pi/0.85pi, knockback 2.5/9, finisher x1.85 — is exactly `riftedge` below,
 // so switching game.js over to this table is a no-op for existing feel.
+//
+// RECOVERY IS TUNED AGAINST ENEMY ATTACK COOLDOWNS, deliberately: grunt
+// attackCd is 1.5 s and stalker 1.2 s (config.ENEMY_TYPES). A whiffed greataxe
+// finisher costs 0.55 windup + 0.16 active + 0.52 recovery = 1.23 s — almost
+// exactly one free enemy attack — while a whiffed dagger light costs 0.18 s,
+// which is nothing. Retune either side of that pairing and the other must
+// follow, or heavy weapons stop being a wager and become a tax.
 
 const SWORD_COMBO = [
   { windup: 0.17, active: 0.09, recovery: 0.08, lock: 0.26, cancel: 0.09,
@@ -273,6 +439,175 @@ const MAUL_COMBO = [
   { windup: 0.62, active: 0.18, recovery: 0.62, lock: 1.42, cancel: 0.18,
     arc: Math.PI * 2.00, range: 5.0, dmg: 4.80, knock: 24, stagger: 1.10, lunge: 0.4, move: 0.04, shake: 1.10, hitStop: 0.12, finisher: true },
 ];
+
+// RPG_SPEC weaponPhysics.familyTable, greatsword row: mass 3.6, windup 0.34,
+// active 0.13, recovery 0.26, lock 0.72, cancel 0.12, reach 4.6, stagger
+// 0.45/0.95, knock 8/16, move 0.16, hitStop 0.08, shake 0.55. The family is
+// LINEAR where the greataxe is WIDE: a narrow overhead (0.42pi against the
+// axe's 1.15pi), then a horizontal sweep at the family's full 0.95pi, then a
+// finisher you can HOLD — `charge` extends the windup up to +0.45 s while the
+// attack input stays down and scales damage 1.0 -> 2.1 linearly over the hold
+// (see tickAttack / chargeMul). Note lock 0.72 vs the mass-formula's 0.48:
+// the table deliberately buys NEAR-full commitment (0.72 of a 0.73 s opener)
+// because "it stops them, it does not launch them" only reads if the player
+// is also stopped. Low knockback relative to the greataxe, highest
+// non-radial stagger in the game — that asymmetry IS the family.
+const GREATSWORD_COMBO = [
+  { windup: 0.34, active: 0.13, recovery: 0.26, lock: 0.72, cancel: 0.12,
+    arc: Math.PI * 0.42, range: 4.6, dmg: 2.00, knock: 8.0, stagger: 0.45, lunge: 1.0, move: 0.16, shake: 0.30, hitStop: 0.05 },
+  { windup: 0.36, active: 0.14, recovery: 0.28, lock: 0.78, cancel: 0.13,
+    arc: Math.PI * 0.95, range: 4.2, dmg: 2.20, knock: 10.0, stagger: 0.55, lunge: 1.2, move: 0.14, shake: 0.40, hitStop: 0.06 },
+  { windup: 0.40, active: 0.15, recovery: 0.34, lock: 0.89, cancel: 0.14,
+    arc: Math.PI * 0.95, range: 4.6, dmg: 3.40, knock: 16.0, stagger: 0.95, lunge: 1.5, move: 0.12, shake: 0.55, hitStop: 0.08,
+    charge: { time: 0.45, dmgMul: 2.1 }, finisher: true },
+];
+
+// RPG_SPEC familyTable, axe row: mass 2.1, windup 0.21, active 0.10, recovery
+// 0.14, lock 0.38, cancel 0.09, arc 0.70pi, reach 3.0, stagger 0.15/0.55,
+// knock 5/-12, move 0.30, hitStop 0.05. Two verbs no other family has:
+//   bleed — every connecting hit applies a 3 s damage-over-time (game.js owns
+//   the ticking; stacks cap at 3 applications), which is why the raw dmg
+//   shares (1.15/1.30/2.30) sit BELOW the sword's — the wound is the damage;
+//   the hook — the finisher's knock is NEGATIVE: game.js._damageEnemy reads
+//   a negative impulse as a pull TOWARD the attacker (capped so it closes to
+//   arm's length, never through you). The weapon that refuses to let go.
+// Finisher shake is 0.30, not the table's 0.28: the table row conflicts with
+// the spec's own hitStopAndShakeAreMass law ("keep the ordering monotonic in
+// mass forever; assert it") — the shipped sword (mass 1.4) already shakes
+// 0.30, so a heavier axe may not shake less. The asserted law wins by 0.02.
+const AXE_COMBO = [
+  { windup: 0.21, active: 0.10, recovery: 0.14, lock: 0.38, cancel: 0.09,
+    arc: Math.PI * 0.70, range: 3.0, dmg: 1.15, knock: 5.0, stagger: 0.15, lunge: 0.8, move: 0.30, shake: 0.00, hitStop: 0.00, bleed: true },
+  { windup: 0.20, active: 0.10, recovery: 0.15, lock: 0.37, cancel: 0.09,
+    arc: Math.PI * 0.70, range: 3.0, dmg: 1.30, knock: 5.5, stagger: 0.18, lunge: 0.9, move: 0.30, shake: 0.10, hitStop: 0.00, bleed: true },
+  { windup: 0.26, active: 0.12, recovery: 0.24, lock: 0.50, cancel: 0.10,
+    arc: Math.PI * 0.78, range: 3.2, dmg: 2.30, knock: -12.0, stagger: 0.55, lunge: 0.6, move: 0.26, shake: 0.30, hitStop: 0.05, bleed: true, finisher: true },
+];
+
+// RPG_SPEC familyTable, bow row: mass 1.1, "draw 0.22 min / 0.55 full",
+// active 0.02, recovery 0.22, lock 0.30, cancel 0.06, reach 34, arc 0, knock
+// 1.5, stagger 0.1, shake 0.10, hitStop 0. The swing machine NEVER runs this
+// table — game.js routes a ranged archetype to draw-hold-release — but the
+// step still exists so every consumer of w.combo (dps scoring, the summary
+// panel's reach row, moveScale's guards) reads honest family numbers instead
+// of a special case. windup is the FULL draw; the single step is not a
+// finisher, so the mass-monotonicity assert over finishers is untouched.
+const BOW_COMBO = [
+  { windup: 0.55, active: 0.02, recovery: 0.22, lock: 0.30, cancel: 0.06,
+    arc: 0, range: 34, dmg: 1.00, knock: 1.5, stagger: 0.1, lunge: 0, move: 0.45, shake: 0.10, hitStop: 0.00 },
+];
+
+// The bow's ballistic contract, verbatim from RPG_SPEC weaponPhysics
+// .projectilePhysics.arrowNumbers — ONE home so game.js and the tests read
+// the same numbers.
+//   gravity 9.0  — slightly under real gravity so aim stays forgiving on a
+//                  phone without reading as floaty. THE SAME constant the
+//                  staff bolt will use (step 9): a bolt is slower, so it arcs
+//                  more, which is "internally consistent magic" made visible.
+//   speed 22->46 — linear in draw fraction. At 46 m/s over 20 m the flight is
+//                  0.435 s and the drop 0.5*9*0.435^2 = 0.85 m: visible,
+//                  aimable. At 22 m/s the same shot drops 3.7 m — a snapped
+//                  shot misses where a drawn one lands, which is how the
+//                  player learns the draw from the arc, not from a number.
+//   dmg 0.55->1.35, life 2.5 s, riseVy: without a soft-lock target the arrow
+//                  leaves at vy = speed * 0.12, a gentle rise.
+//   cone 25 deg  — soft-lock accepts the nearest enemy within 25 degrees of
+//                  camera-forward (the spec's recommended aim affordance; no
+//                  new input mode, no new camera mode).
+//   maxLive 12   — the spec's cap on live player projectiles.
+export const BOW = {
+  drawMin: 0.22,
+  drawFull: 0.55,
+  speedMin: 22,
+  speedFull: 46,
+  dmgMin: 0.55,
+  dmgFull: 1.35,
+  gravity: 9.0,
+  life: 2.5,
+  riseVy: 0.12,
+  launchY: 1.4,               // chest height; also the lineBlocked probe height
+  coneCos: Math.cos((25 * Math.PI) / 180),
+  reach: 34,
+  moveDrawing: 0.45,          // familyTable: 0.45 while drawing, 0.85 otherwise
+  maxLive: 12,
+  knock: 1.5,
+  stagger: 0.1,
+  shake: 0.10,
+};
+
+// RPG_SPEC familyTable, staff row: mass 1.6, windup 0.28, active 0.06,
+// recovery 0.18, lock 0.34, cancel 0.10, reach 18, stagger 0.20/0.35, knock
+// 2.0/5.0, moveMul 0.55, hitStop 0, shake 0.15, steps 2. The family COSTS MANA
+// where every other family costs only time — that is its identity line, and it
+// is why both steps run through the swing machine rather than the bow's
+// draw-hold-release: a cast has a windup you commit to, not a string you hold.
+//   step 1 (bolt: true)  — game.js._applySwingHit routes the machine's hit to
+//     _fireStaffBolt instead of the melee cone; range 18 is the family reach.
+//   step 2 (beam: true)  — the finisher opens a channelled beam that ticks
+//     while the button stays held (game.js owns the channel; see STAFF.beam).
+//     Its move 0.20 is the familyTable's "roots to move 0.20 while held".
+// dmg shares read low against the sword's 4.42 on purpose: the finisher's 0.55
+// is PER TICK and a full channel lands up to 8 of them (4.4 shares), so the
+// family's real output is metered by the mana bar, not by this column. The
+// beam step is deliberately absent from weapon-feel-test's melee shake/hitStop
+// mass ordering — like the bow, the staff fights at range and its "finisher"
+// moves no air at the player's feet.
+const STAFF_COMBO = [
+  { windup: 0.28, active: 0.06, recovery: 0.18, lock: 0.34, cancel: 0.10,
+    arc: 0, range: 18, dmg: 1.55, knock: 2.0, stagger: 0.20, lunge: 0, move: 0.55, shake: 0.15, hitStop: 0.00, bolt: true },
+  { windup: 0.30, active: 0.06, recovery: 0.20, lock: 0.36, cancel: 0.10,
+    arc: 0, range: 9.0, dmg: 0.55, knock: 5.0, stagger: 0.35, lunge: 0, move: 0.20, shake: 0.15, hitStop: 0.00, beam: true, finisher: true },
+];
+
+// The staff's ballistic-and-mana contract, ONE home for game.js and the tests
+// (the same shape as BOW above).
+//
+// MAGIC MAY BEND PHYSICS IN EXACTLY TWO NAMED WAYS (RPG_SPEC weaponPhysics
+// .magicMayBendExactlyTwoThings) — this table implements precisely those two
+// and nothing else:
+//   1. DAMAGE TYPE AND EFFECT — the bolt is arcane: its own tint, its own
+//      impact flash off the Kenney atlas, mana as the resource. It never buys
+//      a shorter windup, lock or recovery than STAFF_COMBO's (mass is real).
+//   2. TRAJECTORY CURVATURE, BOUNDED — the bolt may STEER toward its locked
+//      target at up to 90 deg/s (turnRate below; the spec's stated maximum,
+//      vs 0 for arrows). It may NOT ignore gravity: gravity here is the SAME
+//      9.0 the arrow flies under (asserted equal to BOW.gravity in
+//      fight-test), and it may not exceed its 18 m/s launch speed — at
+//      18 m/s a 90 deg/s turn is a ~11.5 m radius (v/omega = 18/(pi/2)), so
+//      a sprinting target still outruns a homing bolt, which is what keeps
+//      "homing" a property rather than a guarantee.
+//
+// The slower bolt under the shared g arcs MORE than an arrow (drop over 10 m:
+// 0.5*9*(10/18)^2 = 1.39 m vs the full-draw arrow's 0.21 m) — internally
+// consistent magic made visible, exactly as BOW's comment promises.
+export const STAFF = {
+  boltSpeed: 18,
+  gravity: 9.0,                        // == BOW.gravity, by law — see above
+  turnRate: Math.PI / 2,               // 90 deg/s, the spec's stated bound
+  boltMp: 4,                           // vs maxMp 50+ and mpRegen 2.2+/s: a
+                                       // net drain of ~3.5 MP/s at cadence, so
+                                       // the bar meters the family, not the cd
+  boltLife: 1.8,                       // 18 m/s * 1.8 = 32 m > reach + drop
+  launchY: 1.5,                        // the crystal head, just above shoulder
+  riseVy: 0.12,                        // unlocked shot: same gentle-rise
+                                       // language the bow teaches
+  coneCos: Math.cos((25 * Math.PI) / 180),  // same soft-lock cone as the bow
+  reach: 18,
+  maxLive: 12,                         // the spec's live player-projectile cap
+  beam: {
+    maxT: 1.6,                         // familyTable: "up to 1.6 s"
+    tick: 0.2,                         // 8 ticks over a full channel
+    mpPerTick: 2.5,                    // 20 MP for a full channel — Ruin costs
+                                       // 12 for one burst; the beam is a
+                                       // sustained spend you can stop
+    range: 9.0,                        // "a SHORT channelled beam" — half the
+                                       // bolt's reach, so the bolt stays the
+                                       // long-range answer
+    halfWidth: 0.9,                    // corridor half-width for the tick test
+    move: 0.20,                        // familyTable: roots while held
+    feetY: 1.3,                        // wall-cut probe height, chest-ish
+  },
+};
 
 // Each light step carries a real forward step, so a full dagger combo closes
 // about 4m of ground — the archetype hunts you into the enemy's face.
@@ -326,6 +661,24 @@ export const WEAPONS = {
     blurb: 'Lighter than it has any right to be. The edge stays warm.',
     look: { len: 1.62, width: 0.09, guard: 0.44 },
   },
+  // Greatsword bases. dmgMul runs below the greataxe pair on purpose: the
+  // family's sum of dmg shares (7.6) is already the largest table, and its
+  // finisher can charge to 2.1x on top — the instance multiplier is not where
+  // this family's damage lives.
+  gatecleaver: {
+    id: 'gatecleaver', name: 'Gatecleaver', archetype: 'greatsword', tier: 2, minRank: 1, reqLevel: 7,
+    dmgMul: 1.30, cd: 0.75, chainWindow: 1.25, reachMul: 1, arcMul: 1, knockMul: 1.15,
+    critAdd: 0, critMul: 2.10, moveMul: 0.95, combo: GREATSWORD_COMBO,
+    blurb: 'Too much sword to swing twice. You will not need to.',
+    look: { len: 2.05, width: 0.14, guard: 0.52 },
+  },
+  duskrend: {
+    id: 'duskrend', name: 'Duskrend', archetype: 'greatsword', tier: 4, minRank: 3, reqLevel: 22,
+    dmgMul: 1.50, cd: 0.70, chainWindow: 1.35, reachMul: 1.05, arcMul: 1, knockMul: 1.30,
+    critAdd: 0.03, critMul: 2.25, moveMul: 0.93, combo: GREATSWORD_COMBO, rate: 1.04,
+    blurb: 'Raise it and the room holds its breath until it comes down.',
+    look: { len: 2.20, width: 0.13, guard: 0.56 },
+  },
   sunderaxe: {
     id: 'sunderaxe', name: 'Sunderaxe', archetype: 'greataxe', tier: 2, minRank: 1, reqLevel: 6,
     dmgMul: 1.35, cd: 0.85, chainWindow: 1.30, reachMul: 1, arcMul: 1, knockMul: 1.3,
@@ -339,6 +692,66 @@ export const WEAPONS = {
     critAdd: -0.04, critMul: 2.40, moveMul: 0.86, combo: MAUL_COMBO, rate: 0.94,
     blurb: 'The finisher does not swing at anything. It swings at the floor.',
     look: { head: 'maul', haft: 1.95, bit: 0.26 },
+  },
+  // Hand-axe bases. The raw numbers read modest against the sword pair —
+  // deliberately: every hit also opens a 3 s bleed (see AXE_COMBO), so the
+  // family's real output arrives a beat after the swing.
+  hookfang: {
+    id: 'hookfang', name: 'Hookfang', archetype: 'axe', tier: 1, minRank: 0, reqLevel: 4,
+    dmgMul: 1.12, cd: 0.55, chainWindow: 1.00, reachMul: 1, arcMul: 1, knockMul: 1,
+    critAdd: 0.04, critMul: 1.95, moveMul: 1.00, combo: AXE_COMBO,
+    blurb: 'The head curves back toward you. So does everything it touches.',
+    look: { bit: 0.26, haft: 0.95 },
+  },
+  cinderbite: {
+    id: 'cinderbite', name: 'Cinderbite', archetype: 'axe', tier: 3, minRank: 2, reqLevel: 13,
+    dmgMul: 1.22, cd: 0.50, chainWindow: 1.05, reachMul: 1.03, arcMul: 1, knockMul: 1.15,
+    critAdd: 0.08, critMul: 2.05, moveMul: 1.02, combo: AXE_COMBO, rate: 1.06,
+    blurb: 'The wound stays open longer than the fight does.',
+    look: { bit: 0.30, haft: 1.00 },
+  },
+  // Bow bases. cd here is the post-release recovery (familyTable 0.22) plus a
+  // touch — the real cadence limiter is the draw itself, which no roll can
+  // shorten (mass law: enchantment never voids weight). dmgMul reads modest
+  // because the full-draw multiplier (x1.35) and the crit line are where the
+  // family's damage lives; moveMul 0.85 is the familyTable's "otherwise"
+  // column, the standing cost of carrying a ranged answer.
+  galesting: {
+    id: 'galesting', name: 'Galesting', archetype: 'bow', tier: 1, minRank: 0, reqLevel: 5,
+    dmgMul: 1.05, cd: 0.26, chainWindow: 0, reachMul: 1, arcMul: 1, knockMul: 1,
+    critAdd: 0.06, critMul: 2.00, moveMul: 0.85, combo: BOW_COMBO,
+    blurb: 'Strung with wind, or so the fletcher claimed. It does whistle.',
+    look: { limb: 1.10 },
+  },
+  starpiercer: {
+    id: 'starpiercer', name: 'Starpiercer', archetype: 'bow', tier: 3, minRank: 2, reqLevel: 16,
+    dmgMul: 1.18, cd: 0.22, chainWindow: 0, reachMul: 1.06, arcMul: 1, knockMul: 1.1,
+    critAdd: 0.12, critMul: 2.20, moveMul: 0.88, combo: BOW_COMBO, rate: 1.05,
+    blurb: 'Aim above what you want to hit. It was made for falling shots.',
+    look: { limb: 1.22 },
+  },
+  // Staff bases (RPG_SPEC step 9). Two per new family so the Exchange ladder
+  // picks them up with zero shop edits. dmgMul reads mid-table because the
+  // bolt's 1.55 share and the beam's per-tick output already carry the
+  // family; cd is the post-cast recovery breath, not the cadence limiter —
+  // the MANA BAR is this family's cadence limiter, which is the whole
+  // identity. look.head names the items.glb crystal that tops the haft
+  // (Crystal2 base tier, Crystal4 the deeper one, per the spec's model
+  // recommendation); buildStaff falls back to a procedural octahedron when
+  // the pack is absent.
+  emberstave: {
+    id: 'emberstave', name: 'Emberstave', archetype: 'staff', tier: 2, minRank: 1, reqLevel: 8,
+    dmgMul: 1.15, cd: 0.45, chainWindow: 1.10, reachMul: 1, arcMul: 1, knockMul: 1,
+    critAdd: 0.02, critMul: 1.90, moveMul: 1.00, combo: STAFF_COMBO,
+    blurb: 'The crystal was pulled from a gate that would not close. It remembers how.',
+    look: { haft: 1.65, head: 'Crystal2' },
+  },
+  hollowlight: {
+    id: 'hollowlight', name: 'Hollowlight', archetype: 'staff', tier: 4, minRank: 3, reqLevel: 21,
+    dmgMul: 1.32, cd: 0.40, chainWindow: 1.20, reachMul: 1.05, arcMul: 1, knockMul: 1.1,
+    critAdd: 0.06, critMul: 2.05, moveMul: 1.02, combo: STAFF_COMBO, rate: 1.06,
+    blurb: 'It does not shine. It makes everything around it darker.',
+    look: { haft: 1.75, head: 'Crystal4' },
   },
   whisperfangs: {
     id: 'whisperfangs', name: 'Whisperfangs', archetype: 'daggers', tier: 1, minRank: 0, reqLevel: 3,
@@ -395,7 +808,7 @@ export function rollRarity(rnd, luck = 0) {
  * `rnd` may be a mulberry32-style function or a raw numeric seed; passing the
  * seed is what makes a weapon storable as four fields (see serializeWeapon).
  */
-export function rollWeapon(baseId, rnd, { rarity, level = 1, luck = 0 } = {}) {
+export function rollWeapon(baseId, rnd, { rarity, level = 1, luck = 0, maxRarity = null } = {}) {
   const seed = typeof rnd === 'number' ? rnd >>> 0 : null;
   const r = seed === null ? rnd : mulberry32(seed);
   const base = WEAPONS[baseId] || WEAPONS.riftedge;
@@ -403,7 +816,14 @@ export function rollWeapon(baseId, rnd, { rarity, level = 1, luck = 0 } = {}) {
   // stat rolls either way — that is what lets a save store four fields and
   // rebuild the exact weapon instead of a snapshot of every number.
   const rolled = rollRarity(r, luck);
-  const rd = RARITIES[rarity] || RARITIES[rolled] || RARITIES.common;
+  let key = (RARITIES[rarity] || RARITIES[rolled] || RARITIES.common).key;
+  // The rank-band ceiling (RPG_SPEC gate1_dropFloor): a DOWNGRADE, never a
+  // re-roll — the rarity draw above already happened, so the stream is
+  // consumed identically whether or not the clamp binds. This is the same
+  // trick the forced-rarity path uses, and it is what keeps a replayed gate
+  // seed handing out the same loot with only the label capped.
+  if (maxRarity && RARITY_ORDER.indexOf(key) > RARITY_ORDER.indexOf(maxRarity)) key = maxRarity;
+  const rd = RARITIES[key];
 
   const w = {
     baseId: base.id,
@@ -445,6 +865,11 @@ export function rollWeapon(baseId, rnd, { rarity, level = 1, luck = 0 } = {}) {
   }
 
   w.cd = base.cd / w.rate;
+  // The named clause is DERIVED from (base, rarity) — never persisted, never
+  // rolled — so the {b,r,s,l} codec is untouched and every legendary of a base
+  // carries its base's rule. Attached after the stat rolls: it consumes no
+  // stream and hitDamage never reads it (see the law block above).
+  w.rule = rd.key === 'legendary' ? (LEGENDARY_RULES[base.id] || null) : null;
   w.name = buildName(base, rd, w.affixes, r);
   // Single comparable number for "is this better than what I'm holding".
   const c = w.combo;
@@ -460,11 +885,22 @@ export function rollWeapon(baseId, rnd, { rarity, level = 1, luck = 0 } = {}) {
 
 function buildName(base, rd, affixes, rnd) {
   const prefix = affixes.length ? `${affixes[0].name} ` : '';
-  const title = rd.key === 'legendary' || rd.key === 'epic'
-    ? ` of ${TITLES[Math.floor(rnd() * TITLES.length)]}`
-    : '';
+  if (rd.key === 'legendary') {
+    // The title draw still happens so the stream shape stays identical to
+    // every seed rolled before legendaries were renamed; the word itself is
+    // the spec's naming law — base name plus 'Ascendant', nothing invented.
+    rnd();
+    return `${prefix}${base.name} Ascendant`;
+  }
+  const title = rd.key === 'epic' ? ` of ${TITLES[Math.floor(rnd() * TITLES.length)]}` : '';
   return `${prefix}${base.name}${title}`;
 }
+
+// The legendary drop floor (RPG_SPEC gate1_dropFloor): below rank band B a
+// drawn legendary DOWNGRADES to epic. 3 is B's index in config.RANKS
+// (E 0, D 1, C 2, B 3) — "legendary" becomes a statement about where you have
+// been, not about how lucky you were on your third E-gate.
+export const LEGENDARY_MIN_RANK = 3;
 
 /** Pick a base weighted toward the player's depth, then roll it. */
 export function rollDrop(rnd, { rankIndex = 0, level = 1, luck = 0 } = {}) {
@@ -487,7 +923,14 @@ export function rollDrop(rnd, { rankIndex = 0, level = 1, luck = 0 } = {}) {
     r -= eligible[i].weight;
     if (r <= 0) { pickedId = eligible[i].w.id; break; }
   }
-  return rollWeapon(pickedId, rnd, { level, luck });
+  return rollWeapon(pickedId, rnd, {
+    level,
+    luck,
+    // Downgrade, never re-roll: rollWeapon draws the rarity either way, so a
+    // replayed gate stream at any rank hands out the same bases, seeds and
+    // affixes — only the top label is capped below band B.
+    maxRarity: rankIndex >= LEGENDARY_MIN_RANK ? null : 'epic',
+  });
 }
 
 /** The weapon you always have. Fixed roll so it is identical on every device. */
@@ -585,6 +1028,52 @@ function buildGreatweapon(look, tint, ghost) {
   return g;
 }
 
+// A longer, two-handed sword rather than a scaled buildSword: the wider blade,
+// the long two-hand grip and the pronounced tip are what stop it reading as
+// "sword, but the screenshot is zoomed" at play distance.
+function buildGreatsword(look, tint, ghost) {
+  const g = new THREE.Group();
+  const len = look.len ?? 2.05;
+  const wd = look.width ?? 0.14;
+
+  const blade = addPart(g, box(wd, len, 0.035), steelMat(tint, ghost), 0, len * 0.5 + 0.18, 0, false);
+  blade.castShadow = true;
+  addPart(g, cone(wd * 0.55, 0.24, 4), steelMat(tint, ghost), 0, len + 0.28, 0, false);
+  // Fuller strip, same glow-layer trick as the sword's.
+  addPart(g, box(wd * 0.30, len * 0.80, 0.05), edgeMat(tint), 0, len * 0.5 + 0.18, 0, true);
+
+  addPart(g, box(look.guard ?? 0.52, 0.09, 0.13), darkMat(ghost), 0, 0.10, 0, false);
+  // Two-hand grip: nearly twice the sword's 0.26, so the second hand has
+  // somewhere honest to be when the anim drags both arms through the arc.
+  addPart(g, cyl(0.040, 0.046, 0.44, 6), haftMat(ghost), 0, -0.16, 0, false);
+  addPart(g, octa(0.09), darkMat(ghost), 0, -0.42, 0, false);
+  return g;
+}
+
+// One bit, short haft, and a rear spur — the spur is the hook made visible,
+// which matters because the finisher PULLS and the silhouette should warn you.
+function buildHandAxe(look, tint, ghost) {
+  const g = new THREE.Group();
+  const haft = look.haft ?? 0.95;
+  const bit = look.bit ?? 0.26;
+  const top = haft - 0.25;
+
+  const pole = addPart(g, cyl(0.038, 0.046, haft, 6), haftMat(ghost), 0, haft * 0.5 - 0.25, 0, false);
+  pole.castShadow = true;
+  addPart(g, cyl(0.055, 0.055, 0.12, 6), darkMat(ghost), 0, -0.02, 0, false);
+
+  const main = addPart(g, wedge(bit, 0.05), steelMat(tint, ghost), bit * 0.55, top, 0, false);
+  main.scale.set(1.35, 1.1, 1);
+  main.rotation.z = -Math.PI / 2;
+  main.castShadow = true;
+  // The rear spur, kicked down-and-back.
+  const spur = addPart(g, wedge(bit * 0.45, 0.045), steelMat(tint, ghost), -bit * 0.40, top - 0.05, 0, false);
+  spur.rotation.z = Math.PI / 2 + 0.5;
+  addPart(g, box(0.045, bit * 1.4, 0.065), edgeMat(tint), bit * 1.0, top, 0, true);
+  addPart(g, cyl(0.075, 0.075, 0.12, 6), darkMat(ghost), 0, top, 0, false);
+  return g;
+}
+
 function buildDagger(look, tint, ghost) {
   const g = new THREE.Group();
   const len = look.len ?? 0.52;
@@ -606,6 +1095,94 @@ function buildDaggers(look, tint, ghost) {
   off.rotation.set(Math.PI * 0.92, 0, 0.18);
   off.position.set(0, 0.04, -0.02);
   g.userData.offhand = off;
+  return g;
+}
+
+// Riser at the origin (the fist grips the middle of a bow, not an end),
+// limbs raked BACK along -Z so the string side faces the archer, string on
+// the glow layer so the silhouette reads "bow" at play distance even in a
+// dark room. Procedural fallback only — the pack's Bow_Wooden is the shipped
+// look.
+function buildBow(look, tint, ghost) {
+  const g = new THREE.Group();
+  const limb = look.limb ?? 1.1;         // tip-to-tip along Y
+  const half = limb * 0.5;
+  const rake = 0.30;                     // limb sweep, radians
+
+  addPart(g, cyl(0.034, 0.034, 0.24, 6), haftMat(ghost), 0, 0, 0, false);
+  const upper = addPart(g, box(0.045, half, 0.055), haftMat(ghost), 0, half * 0.5, -Math.sin(rake) * half * 0.25, false);
+  upper.rotation.x = rake;
+  upper.castShadow = true;
+  const lower = addPart(g, box(0.045, half, 0.055), haftMat(ghost), 0, -half * 0.5, -Math.sin(rake) * half * 0.25, false);
+  lower.rotation.x = -rake;
+  // Tips, where the string ties off.
+  const tipZ = -Math.sin(rake) * half * 0.5 - 0.02;
+  addPart(g, octa(0.04), darkMat(ghost), 0, half + 0.02, tipZ, false);
+  addPart(g, octa(0.04), darkMat(ghost), 0, -half - 0.02, tipZ, false);
+  // The string: tip to tip, dead straight.
+  addPart(g, box(0.014, limb + 0.02, 0.014), edgeMat(tint), 0, 0, tipZ, true);
+  return g;
+}
+
+// The magic implement (RPG_SPEC step 9). PROCEDURAL BY FINDING, not by
+// preference: items.glb contains no staff, no wand and no rod, so the haft is
+// authored from the same cyl/haftMat/darkMat/edgeMat blocks as every other
+// procedural weapon and only the HEAD comes from the pack — a crystal
+// (look.head: Crystal2 base / Crystal4 tier variant; 1-3 primitives each)
+// whose silhouette reads unambiguously as a magic implement at play distance.
+// With public/models/ absent the head falls back to a stretched octahedron,
+// so the weapon still builds and still reads as a staff offline. The glow
+// core inside the head is edgeMat — the SAME rarity-tint glow-layer trick the
+// sword's fuller uses — never an emissive on the character.
+//
+// Head fit is per-model because the crystals are authored around different
+// origins (measured off items.glb): Crystal2 is 0.90 tall CENTRED (so its
+// centre must sit half its scaled height above the collar), Crystal4 is 0.50
+// centred, Mineral sits base-down (minY -0.11). scale brings each to a
+// 0.30-0.38 m head on the 2.14-unit rig.
+const STAFF_HEAD_FIT = {
+  Crystal2: { scale: 0.42, lift: 0.21 },
+  Crystal4: { scale: 0.62, lift: 0.18 },
+  Mineral: { scale: 0.55, lift: 0.09 },
+};
+
+function buildStaff(look, tint, ghost) {
+  const g = new THREE.Group();
+  const haft = look.haft ?? 1.65;
+  // The fist grips a third of the way up: 0.55 m of shaft hangs below the
+  // hand (enough to plant), the rest rises to the head.
+  const below = 0.55;
+  const top = haft - below;
+
+  const pole = addPart(g, cyl(0.040, 0.048, haft, 6), haftMat(ghost), 0, haft * 0.5 - below, 0, false);
+  pole.castShadow = true;
+  // Grip wrap + butt cap, the readable-at-distance details.
+  addPart(g, cyl(0.056, 0.056, 0.14, 6), darkMat(ghost), 0, 0.02, 0, false);
+  addPart(g, octa(0.055), darkMat(ghost), 0, -below + 0.02, 0, false);
+  // Collar where the head seats.
+  addPart(g, cyl(0.070, 0.050, 0.10, 6), darkMat(ghost), 0, top + 0.02, 0, false);
+
+  // Pack crystal head. Ghosts stay procedural for the same reason
+  // buildPackMesh refuses them: pack materials are shared across every clone.
+  let head = null;
+  const fit = STAFF_HEAD_FIT[look.head];
+  if (!ghost && _getModel && fit) {
+    head = _getModel(look.head, { scale: fit.scale });
+    if (head) {
+      head.position.y = top + 0.07 + fit.lift;
+      g.add(head);
+    }
+  }
+  if (!head) {
+    // Offline fallback: a stretched octahedron reads "crystal" against the
+    // flat-shaded language of the rest of the kit.
+    const oct = addPart(g, octa(0.13), steelMat(tint, ghost), 0, top + 0.30, 0, false);
+    oct.scale.y = 1.55;
+    oct.castShadow = true;
+  }
+  // The rarity-tint core, inside the head, on the glow layer.
+  const core = addPart(g, octa(0.075), edgeMat(tint), 0, top + 0.30, 0, true);
+  core.scale.y = 1.4;
   return g;
 }
 
@@ -737,9 +1314,19 @@ export function setModelSource(getMesh) {
 // a separate direction, not because the two daggers differ.
 export const PACK_FIT = {
   sword: { scale: 0.60, tilt: 0.16, lift: -0.05 },
+  // greatsword and axe are lifted VERBATIM from HELD_MODELS.bigsword and
+  // HELD_MODELS.axe below — the lancer/boss and the grunts have carried these
+  // exact models on this exact rig since the pack landed, so scale, tilt and
+  // (crucially) Sword_big's measured-off-a-render -0.22 lift are already the
+  // screenshot-verified numbers. Do not retune one table without the other.
+  greatsword: { scale: 0.52, tilt: 0.12, lift: -0.22 },
+  axe: { scale: 0.62, tilt: 0.14, lift: 0.12 },
   greataxe: { scale: 0.62, tilt: 0.10, lift: 0.22 },
   daggers: { scale: 0.50, tilt: 0.14, lift: -0.09, offhandLift: 0.14 },
   polearm: { scale: 0.55, tilt: 0.06, lift: 0.10 },
+  // Lifted verbatim from HELD_MODELS.bow: gripped at the riser, which is the
+  // middle of the model rather than one end, hence lift 0.
+  bow: { scale: 0.62, tilt: 0.06, lift: 0 },
 };
 
 // Rarity is carried by swapping to the pack's own gold variants rather than by
@@ -766,6 +1353,12 @@ export function weaponModelName(weapon) {
   switch (archetype) {
     case 'sword':
       return `Sword${gold}`;
+    case 'greatsword':
+      // The same Sword_big the lancer carries — the player's version differs
+      // by PACK_FIT/grip, not by model. RPG_SPEC family mapping.
+      return `Sword_big${gold}`;
+    case 'axe':
+      return `Axe_small${gold}`;
     case 'greataxe':
       // The maul variant is a hammer, not an axe, and the pack has both — using
       // the axe for it would misread the one archetype whose finisher is a
@@ -773,6 +1366,10 @@ export function weaponModelName(weapon) {
       return base?.look?.head === 'maul' ? `Hammer_Double${gold}` : `Axe_Double${gold}`;
     case 'daggers':
       return `Dagger${gold}`;
+    case 'bow':
+      // The pack's gold bow is named Bow_Golden, NOT Bow_Wooden_Golden — the
+      // one family where the suffix rule would fabricate a missing node.
+      return gold ? 'Bow_Golden' : 'Bow_Wooden';
     default:
       return null;
   }
@@ -1009,6 +1606,18 @@ function mergedItemGeometry(name) {
   return merged;
 }
 
+/**
+ * The pool's window into the item pack (RPG_SPEC projectiles module: "via a
+ * small exported accessor"). An arrow through here is ONE draw call against a
+ * shared, vertex-coloured geometry — the same bake-and-merge path every held
+ * NPC weapon uses — instead of the 2-3 a naive getItemMesh clone would cost.
+ * Returns null when the pack is absent (a normal offline state). The geometry
+ * is cached and shared: it is weapons.js's to dispose, never the caller's.
+ */
+export function sharedItemGeometry(name) {
+  return mergedItemGeometry(name);
+}
+
 function heldMaterial() {
   return cachedMat('held', () => new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -1135,10 +1744,12 @@ export function equipWeapon(root, weapon, { ghost = false } = {}) {
   const offhand = main.userData.offhand || null;
   if (offhand) main.remove(offhand);
 
-  const rHand = handSocket(rig, 'R');
-  if (!rHand) return null;
+  // The bow family sets mainHand 'L' (a bow is held in the left hand; the
+  // right draws the string) — everything else keeps the shipped 'R'.
+  const mHand = handSocket(rig, arch.mainHand === 'L' ? 'L' : 'R');
+  if (!mHand) return null;
   applyGrip(main, arch);
-  rHand.add(main);
+  mHand.add(main);
 
   if (offhand) {
     const lHand = handSocket(rig, 'L');
@@ -1228,12 +1839,32 @@ export const STOW = {
   // Hilt over the right shoulder where the hand can reach it, blade running
   // down across the back to the left hip. Point-down, hence rx near -pi.
   sword: { socket: 'back', x: -0.16, y: 0.16, z: -0.20, rx: -3.02, ry: 0, rz: -0.40 },
+  // Same diagonal carry as the sword, pushed further out and raked harder: a
+  // 2 m blade on the sword's exact transform pokes past both the shoulder and
+  // the knee.
+  greatsword: { socket: 'back', x: -0.16, y: 0.22, z: -0.24, rx: -3.02, ry: 0, rz: -0.46 },
+  // A hand axe rides the belt like the daggers do — but head-UP (rx near 0,
+  // like the greataxe's carry) with the grip dropped below the socket so the
+  // bit sits at the belt line and the haft hangs down the thigh. On the back
+  // it would read as a second, smaller greataxe.
+  axe: { socket: 'hip', x: -0.26, y: -0.28, z: -0.12, rx: -0.12, ry: 0, rz: -0.10 },
   // Head UP over the shoulder, haft butt near the hip: a greataxe carried
   // point-down would put a 40 cm bit through the back of the character's knee.
   greataxe: { socket: 'back', x: -0.05, y: -0.40, z: -0.30, rx: -0.10, ry: 0, rz: -0.28 },
   // Near vertical. A 2.5 m shaft raked as hard as a sword pushes the butt
   // through the floor at one end and the point through the head at the other.
   polearm: { socket: 'back', x: 0.02, y: -0.80, z: -0.30, rx: -0.08, ry: 0, rz: -0.16 },
+  // Same near-vertical carry as the polearm, crystal UP (rx near 0) — a
+  // point-down staff would bury the one part that says "magic" behind the
+  // knees. 0.7 m shorter than the spear, so it rides higher on the back and
+  // rakes a touch harder without fouling the floor.
+  staff: { socket: 'back', x: -0.04, y: -0.52, z: -0.28, rx: -0.09, ry: 0, rz: -0.20 },
+  // Slung diagonally across the back, string toward the body, the same carry
+  // every archer culture converged on. Point-down like the sword (rx near
+  // -pi) but raked less hard: a strung bow lying flat along the sword's
+  // diagonal would foul the greatsword's stow line and read as a second
+  // blade; the shallower rz keeps the stave's curve legible from behind.
+  bow: { socket: 'back', x: -0.14, y: 0.10, z: -0.22, rx: -3.05, ry: 0, rz: -0.30 },
   // ONE PER HIP, which is the whole reason this table carries a socket name.
   daggers: {
     socket: 'hip', x: -0.26, y: 0.01, z: -0.12, rx: -2.94, ry: 0, rz: -0.10,
@@ -1325,7 +1956,8 @@ export function setStance(root, stance) {
     // the relaxed plaza walk with no additional animation work.
     root.userData.character?.setArmed?.(false);
   } else {
-    const rHand = handSocket(rig, 'R');
+    // Same mainHand rule as equipWeapon: the bow returns to the LEFT fist.
+    const rHand = handSocket(rig, arch.mainHand === 'L' ? 'L' : 'R');
     if (!rHand) { root.userData.stance = 'sheathed'; return 'sheathed'; }
     rHand.add(held.main);
     restore(held.main, held.hold.main);
@@ -1364,6 +1996,12 @@ export function makeAttackState() {
     chain: 0,        // seconds of combo window left after a step ends
     lunge: 0,        // forward impulse the caller should consume this frame
     buffered: false, // a press arrived too early and is waiting
+    // Chargeable steps (GREATSWORD_COMBO's finisher). `charging` is a LIVE
+    // input flag the caller refreshes every frame before tickAttack; `chargeT`
+    // is how long the blade has been held at the top of the windup, in real
+    // (un-rate-scaled) seconds, capped by the step's charge.time.
+    charging: false,
+    chargeT: 0,
   };
 }
 
@@ -1378,7 +2016,11 @@ export function canAttack(state, w) {
   const total = step.windup + step.active + step.recovery;
   // Only the tail of the recovery accepts the next input. A greataxe step sets
   // cancel small relative to its recovery, so it stays a real commitment.
-  return state.t >= total - step.cancel;
+  // DAWNBRAND ASCENDANT (legendary rule, tempo verb): the finisher's cancel
+  // window scales. 1 on every non-legendary instance — w.rule is null there —
+  // so the shipped timing is untouched.
+  const cancel = step.cancel * (step.finisher ? (w.rule?.fx.finisherCancelMul || 1) : 1);
+  return state.t >= total - cancel;
 }
 
 /** Begin the next combo step. Returns the step, or null if the input was eaten. */
@@ -1400,8 +2042,10 @@ export function startAttack(state, w) {
   state.hits = 0;
   state.chain = 0;
   state.cd = w.cd;
-  state.lunge = step.lunge || 0;
+  // VEINSPLITTERS ASCENDANT (positioning verb): the finisher's lunge scales.
+  state.lunge = (step.lunge || 0) * (step.finisher ? (w.rule?.fx.finisherLungeMul || 1) : 1);
   state.buffered = false;
+  state.chargeT = 0;
   return step;
 }
 
@@ -1414,7 +2058,13 @@ export function tickAttack(state, w, dt, onHit, ctx) {
   if (!state.active) {
     if (state.chain > 0) {
       state.chain -= dt;
-      if (state.chain <= 0) { state.chain = 0; state.next = 0; }
+      if (state.chain <= 0) {
+        state.chain = 0;
+        // RIFTEDGE ASCENDANT (tempo verb): a lapsed chain KEEPS the combo
+        // cursor — only taking a hit rewinds it (game.js does that in
+        // _damagePlayer). Every other instance rewinds here, as shipped.
+        if (!w?.rule?.fx.comboKeepOnWhiff) state.next = 0;
+      }
     }
     return;
   }
@@ -1422,7 +2072,28 @@ export function tickAttack(state, w, dt, onHit, ctx) {
   const step = w.combo[state.index];
   // Attack rate scales the clock rather than the table, so a "Quick" roll
   // speeds up the whole swing without cloning per-instance combo steps.
-  state.t += dt * w.rate;
+  let adv = dt * w.rate;
+  // Chargeable step (RPG_SPEC: the greatsword's third step): while the input
+  // is held, the blade PARKS just under the top of the windup and the overflow
+  // time accrues as charge instead — up to step.charge.time real seconds, then
+  // the swing releases itself. Steps without `charge` (every shipped table,
+  // and npcStrikeWeapon) never enter this branch, so their timing is
+  // byte-identical to before this field existed. Charge accrues un-rate-scaled
+  // because a "Quick" affix should speed the swing, not shorten the hold the
+  // player is deliberately buying.
+  // GATECLEAVER ASCENDANT (tempo verb): full charge takes chargeTimeMul of the
+  // hold. chargeMul divides by the same effective time, so the damage span
+  // (1 -> dmgMul) is unchanged — only the clock to reach it moves.
+  const chargeTime = step.charge ? step.charge.time * (w.rule?.fx.chargeTimeMul || 1) : 0;
+  if (step.charge && state.phase === PHASE_WINDUP && state.charging
+      && state.chargeT < chargeTime) {
+    const headroom = Math.max(0, step.windup - 1e-6 - state.t);
+    if (adv > headroom) {
+      state.chargeT = Math.min(chargeTime, state.chargeT + (adv - headroom) / w.rate);
+      adv = headroom;
+    }
+  }
+  state.t += adv;
 
   if (state.phase === PHASE_WINDUP && state.t >= step.windup) state.phase = PHASE_ACTIVE;
 
@@ -1441,6 +2112,32 @@ export function tickAttack(state, w, dt, onHit, ctx) {
     state.phase = PHASE_IDLE;
     state.chain = w.chainWindow;
   }
+}
+
+/**
+ * A one-step pseudo-weapon for NPC strikes, so enemy humanoids run through the
+ * SAME machine the player does instead of a parallel pair of hand-decremented
+ * timers. The shape is deliberate arithmetic equivalence with the shipped
+ * telegraph -> strike -> follow-through code in game.js:
+ *
+ *   windup   = the steerAgent telegraph (0.42/0.5/0.55 fairness windows —
+ *              those numbers stay OWNED by enemyai.js and are poked into the
+ *              step per attack, which is why every enemy gets its own copy)
+ *   active   = 0, so tickAttack fires the blow on the exact frame the old
+ *              `telegraph -= dt; if (telegraph <= 0) strike()` fired it
+ *   recovery = 0.3, the old e.swing follow-through constant
+ *
+ * cd and chainWindow are 0 because enemy cadence is e.attackCd's business
+ * (attackCd is tuned against player recovery — see the combo table note),
+ * and an NPC has no combo to chain.
+ */
+export function npcStrikeWeapon() {
+  return {
+    combo: [{ windup: 0.42, active: 0, recovery: 0.3, lock: 0, cancel: 0,
+      arc: 0, range: 0, dmg: 1, knock: 0, stagger: 0, lunge: 0, move: 0 }],
+    rate: 1, cd: 0, chainWindow: 0,
+    dmgMul: 1, reachMul: 1, arcMul: 1, knockMul: 1, moveMul: 1,
+  };
 }
 
 /** True once, for a press that arrived mid-swing and is now due. */
@@ -1467,6 +2164,24 @@ export function cancelAttack(state) {
   state.next = 0;
   state.lunge = 0;
   state.buffered = false;
+  state.chargeT = 0;
+}
+
+/**
+ * Damage multiplier a held charge has earned: 1 at a tap, step.charge.dmgMul
+ * at a full hold, linear between (RPG_SPEC: "scales dmg 1.0 -> 2.1 linearly
+ * over that hold"). 1 for every step without a charge clause, so callers can
+ * apply it unconditionally.
+ */
+export function chargeMul(state, step, w = null) {
+  const c = step?.charge;
+  if (!c || !(c.time > 0)) return 1;
+  // Same effective time tickAttack accrues against (GATECLEAVER ASCENDANT
+  // halves it), so a full hold always reads as a full charge. `w` is optional:
+  // existing callers without it get the shipped behaviour on every instance
+  // that carries no rule.
+  const time = c.time * (w?.rule?.fx.chargeTimeMul || 1);
+  return 1 + ((c.dmgMul || 1) - 1) * Math.min(1, state.chargeT / time);
 }
 
 /** Movement multiplier for the frame: heavy weapons nearly root you. */

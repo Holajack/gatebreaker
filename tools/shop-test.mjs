@@ -108,6 +108,22 @@ console.log('\nA. THE LADDER\n');
   // Crossing a band MUST change it — that is the reward.
   const next = shopStock(Object.assign(freshSave(), { level: 37 }));
   ok(key(next) !== key(hi), 'crossing into A rank produced an identical shelf');
+  // THE SHOP CEILING (RPG_SPEC step 14, gate2): the Exchange NEVER sells
+  // legendary, at ANY band — a legendary is crafted at the ascension entry.
+  // The clamp binds AFTER the rarity draw, so every other row is untouched:
+  // asserted by the determinism keys above (same seeds, same prices) plus the
+  // explicit scan here.
+  for (const lv of [1, 8, 16, 25, 37, 53]) {
+    const rows = shopStock(Object.assign(freshSave(), { level: lv }));
+    const legs = rows.filter((r) => r.rarity === 'legendary');
+    ok(legs.length === 0, `LV ${lv}: a legendary reached the shelf (${legs.map((r) => r.baseId).join(',')})`);
+  }
+  // The ceiling downgrades rather than deleting: high bands still shelve the
+  // would-be legendaries as epics.
+  ok(shopStock(Object.assign(freshSave(), { level: 37 })).some((r) => r.rarity === 'epic'),
+    'the legendary clamp emptied rows instead of downgrading them');
+  phase('legendary ceiling');
+
   // No Math.random / Date.now in the generation path.
   const src = await import('node:fs').then((fs) => fs.readFileSync('src/game/shop.js', 'utf8'));
   // Comments stripped first: the module's own header documents the rule by

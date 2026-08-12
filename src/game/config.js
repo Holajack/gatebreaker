@@ -323,7 +323,20 @@ export function xpForLevel(level) {
 }
 
 // Derived player numbers from base + allocated + auto-granted stats.
-export function derive(save) {
+//
+// `armor` is the armour layer's contribution — armorDerive()'s return value —
+// passed in by game.refreshDerived (RPG_SPEC step 11) so this stays the ONE
+// place every derived number is computed. It is a plain object, never an
+// import: armor.js imports weapons.js which imports this file, so taking the
+// numbers as an argument is what keeps the module graph acyclic.
+//
+// THE NAKED CONTRACT: with no armour worn (or armor === null) every value the
+// shipped derive() returned is BYTE-identical — each fold below is `+ 0`,
+// `* 1`, or a min() against an unchanged operand, all of which are exact in
+// IEEE754 for the non-negative finite values these formulas produce. The
+// armour-only outputs (armorDR / staggerResist / knockTakenMul / dashCd) are
+// NEW keys with honest naked defaults; they change no existing number.
+export function derive(save, armor = null) {
   // The +1-per-level auto grant applies to every stat, so it is added here
   // rather than being written into save.stats (which stays "what you spent").
   const auto = save.autoStats || 0;
@@ -335,30 +348,57 @@ export function derive(save) {
   const per = (s.per || 0) + auto;
   const lv = save.level;
   const R = STAT_RATES;
+  const A = armor;
   return {
-    maxHp: Math.floor(130 + vit * R.vit.hp + (lv - 1) * 9),
+    // Chest secondary (+9 hp per tier) and the Vital affix arrive pre-summed
+    // in hpAdd; the floor happens after the add so a fractional Vital roll
+    // still counts.
+    maxHp: Math.floor(130 + vit * R.vit.hp + (lv - 1) * 9 + (A ? A.hpAdd : 0)),
     maxMp: Math.floor(50 + intel * R.int.mp + (lv - 1) * 3),
     atk: 13 + str * R.str.atk + (lv - 1) * 1.6,
     // Smooth approach to the cap rather than a hard clamp, so a point of
     // agility is never worthless — it just buys less speed and more dodge
-    // window the further in you go.
-    speed: 6.0 + R.agi.speedCap * (1 - Math.exp(-agi * R.agi.speed / R.agi.speedCap)),
+    // window the further in you go. Armour speed rides OUTSIDE the agility
+    // curve: it was already clamped to its own +0.6 budget (ARMOR_SPEED_CAP)
+    // inside armorDerive, so agility's asymptote stays agility's.
+    speed: 6.0 + R.agi.speedCap * (1 - Math.exp(-agi * R.agi.speed / R.agi.speedCap)) + (A ? A.speedAdd : 0),
     crit: Math.min(R.agi.critCap, 0.05 + agi * R.agi.crit),
-    critDmg: 1.5 + agi * R.agi.critDmg,
-    atkSpeed: Math.min(R.str.atkSpeedCap, str * R.str.atkSpeed),
+    critDmg: 1.5 + agi * R.agi.critDmg + (A ? A.critDmgAdd : 0),
+    // Armour attack speed (hands secondary, Deft, emberfall 2pc) folds into
+    // the EXISTING 0.30 cap — it does not get its own budget (spec guardrail).
+    atkSpeed: Math.min(R.str.atkSpeedCap, str * R.str.atkSpeed + (A ? A.atkSpeedAdd : 0)),
     skillMul: 1 + intel * 0.025,
     cdr: Math.min(R.int.cdrCap, intel * R.int.cdr),
+    // Vitality only. The armour slab is deliberately a SEPARATE term
+    // (armorDR below): the two stack multiplicatively in _damagePlayer via
+    // combinedDR, and folding them into one number here would hide which
+    // layer a point of reduction came from on the panel.
     dr: Math.min(R.vit.drCap, vit * R.vit.dr),
     hpRegen: 0.6 + vit * R.vit.regen,
-    mpRegen: 2.2 + intel * R.int.mpRegen,
+    mpRegen: 2.2 + intel * R.int.mpRegen + (A ? A.mpRegenAdd : 0),
     // Perception compresses the low end of the damage roll upward instead of
     // raising the ceiling — nothing else in the game does this.
     dmgFloor: Math.min(R.per.floorCap, R.per.floorBase + per * R.per.floor),
-    tellLeadMs: Math.min(R.per.tellCapMs, R.per.tellBaseMs + per * R.per.tellMs),
+    // Head secondary tellAdd is on top of perception's, same 520 ms ceiling.
+    tellLeadMs: Math.min(R.per.tellCapMs, R.per.tellBaseMs + per * R.per.tellMs + (A ? A.tellAdd : 0)),
     // Agility is felt in the hands, not read on a panel: it widens the window
     // in which a dodge counts as perfect. Seconds, because the sim runs in dt.
-    dodgeWindow: Math.min(R.agi.dodgeCapMs, R.agi.dodgeBaseMs + agi * R.agi.dodgeWindowMs) / 1000,
-    shadowDmgMul: 1 + intel * R.int.shadowDmg,
+    // Legs secondary and the deepglass 4pc (dodgeAdd, in seconds) join agility
+    // INSIDE the existing dodgeCapMs 260 clamp, per the spec.
+    dodgeWindow: Math.min(R.agi.dodgeCapMs, R.agi.dodgeBaseMs + agi * R.agi.dodgeWindowMs + (A ? A.dodgeAdd * 1000 : 0)) / 1000,
+    // The armour part (vigil 2pc) multiplies so x1 is exact when naked.
+    shadowDmgMul: (1 + intel * R.int.shadowDmg) * (A ? A.shadowDmgMul : 1),
+    // ---- armour-layer outputs (new keys; naked defaults are the no-op) ----
+    // The slab: AP curve x set multipliers, computed in armorDerive. 0 naked.
+    armorDR: A ? A.armorDR : 0,
+    // Feet secondary + Rooted + ossuary 4pc, clamped 0.60 in armorDerive.
+    // Scales DOWN the player's hurt flinch — the player's stagger term.
+    staggerResist: A ? A.staggerResist : 0,
+    // Knockback-distance multiplier (feet cut clamped 0.50, then ossuary 4pc).
+    knockTakenMul: A ? A.knockTakenMul : 1,
+    // Dash cooldown after the issue 4pc (-0.25 s). Floor 0.5 s so no future
+    // stack of cooldown sources can make the dash a free permanent i-frame.
+    dashCd: Math.max(0.5, SKILLS.dash.cd + (A ? A.dashCdAdd : 0)),
   };
 }
 

@@ -6,6 +6,7 @@ import { DecalPool } from '../render/decalpool.js';
 import {
   loadCharacterModels, charactersReady, makeCharacter, characterStats,
   setCharacterQuality as setCharacterTier, characterBudgetAvailable, warmAppearance, MODEL_SCALE,
+  setPlayerArmorLook, armorLookFromEquipment,
 } from '../render/characters.js';
 import {
   loadCreatureModels, creaturesReady, makeCreature, creatureStats,
@@ -50,6 +51,10 @@ export { DecalPool };
 export {
   loadCharacterModels, charactersReady, characterStats,
   characterBudgetAvailable, MODEL_SCALE,
+  // Armour-look controls (RPG_SPEC step 12). setPlayerArmorLook points the
+  // hunter's silhouette at an equipment object; the caller then rebuilds via
+  // rebuildHumanoid, same contract as setPlayerBody + rebuild.
+  setPlayerArmorLook, armorLookFromEquipment,
 };
 // Creature-pack controls, same contract.
 export {
@@ -560,6 +565,12 @@ function buildSkinnedInto(root, opts) {
       glow: opts.glow,
       color: opts.color,
       ghost: opts.ghost,
+      // The armour look (RPG_SPEC step 12). Usually absent — appearanceFor
+      // then reads the module's cached equipment look, so a rebuild after a
+      // wardrobe change resolves the NEW armour rather than a value frozen
+      // into buildOpts at first build. An explicit partsOverride (tests, or a
+      // future preview feature) still rides buildOpts and wins.
+      partsOverride: opts.partsOverride,
       // The telegraph mote costs 2 draw calls (main pass + glow pass) and only
       // earns them on something that winds up an attack at you. The player can
       // see his own swing and shadows are already emissive head to foot.
@@ -946,7 +957,16 @@ export function animateRig(root, opts = {}) {
   const character = root.userData?.character;
   if (character) { character.animate(opts); return; }
 
-  const { moving, speed, t, attackPhase = 0, hurt = 0, airborne = false, riseRate = 0 } = opts;
+  const {
+    moving, speed, t, attackPhase = 0, hurt = 0, airborne = false, riseRate = 0,
+    // Swing shaping, supplied by weapons.js attackAnim for the player. The
+    // defaults are EXACTLY the numbers this branch used to hardcode (wind to
+    // -1.5 over the first 30%, chop through to +1.9, torso twist 0.22), so
+    // every caller that does not pass them — enemies, shadows, citizens —
+    // poses byte-identically to before.
+    swingContact = 0.3, swingLo = -1.5, swingHi = 1.9, swingTwist = 0.22,
+    twoHand = false, mirror = false,
+  } = opts;
   const rig = root.userData.rig;
   if (!rig) return;
   const { armL, armR, legL, legR, body, head } = rig;
@@ -969,14 +989,21 @@ export function animateRig(root, opts = {}) {
   }
 
   if (attackPhase > 0) {
-    // Wind up then chop through — armR leads, torso counter-rotates.
+    // Wind up then chop through — the lead arm carries it, torso
+    // counter-rotates. The break point sits on the CONTACT frame so the pose
+    // reaches the bottom of the arc on the exact frame damage is applied.
     const p = 1 - attackPhase; // 0 -> 1 over the swing
-    const swing = p < 0.3
-      ? -1.5 * (p / 0.3)
-      : -1.5 + 3.4 * ((p - 0.3) / 0.7);
-    armR.rotation.x = swing;
-    armL.rotation.x = -swing * 0.3;
-    body.rotation.y = swing * 0.22;
+    const c = Math.min(0.9, Math.max(0.1, swingContact));
+    const swing = p < c
+      ? swingLo * (p / c)
+      : swingLo + (swingHi - swingLo) * ((p - c) / (1 - c));
+    // Daggers alternate hands (mirror); two-handers drag both arms through
+    // the same arc instead of the off-arm's light counter-swing.
+    const lead = mirror ? armL : armR;
+    const off = mirror ? armR : armL;
+    lead.rotation.x = swing;
+    off.rotation.x = twoHand ? swing : -swing * 0.3;
+    body.rotation.y = swing * swingTwist * (mirror ? -1 : 1);
     legL.rotation.x = 0.1;
     legR.rotation.x = -0.1;
   } else if (moving) {

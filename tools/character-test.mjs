@@ -458,6 +458,209 @@ try {
     game.glow.render(game.scene, game.camera);
   });
   await page.screenshot({ path: shotPath('characters-lineup-walk.png') });
+
+  // ====================================== armour part swap (RPG_SPEC step 12)
+  //
+  // Equipped armour must change the player's silhouette by swapping modular
+  // parts within his rig, on BOTH rigs, without the merged-geometry cache
+  // creeping: 20 wardrobe changes must never push the cache more than 2
+  // entries over its pre-swap baseline (one for the outgoing look, one for the
+  // incoming, mid-rebuild), and every armour geometry must be refs=0 AND gone
+  // once the hunter strips.
+  const SETS = ['issue', 'ossuary', 'deepglass', 'emberfall', 'vigil'];
+  // The donor table from characters.js ARMOR_LOOKS, restated so a silent
+  // re-mapping upstream fails HERE rather than shipping a different wardrobe.
+  const DONORS = {
+    issue: { male: 'men_worker', female: 'women_worker' },
+    ossuary: { male: 'men_swat', female: 'women_soldier' },
+    deepglass: { male: 'men_spacesuit', female: 'women_scifi' },
+    emberfall: { male: 'men_punk', female: 'women_punk' },
+    vigil: { male: 'men_king', female: 'women_medieval' },
+  };
+  await page.evaluate(async () => { window.__ents = await import('/src/game/entities.js'); });
+
+  // --- contact sheets: five full sets on each rig, one row per screenshot.
+  for (const rig of ['male', 'female']) {
+    const sheet = await evalGame(page, (game, [rigKey, sets, donors]) => {
+      const chars = window.__chars;
+      chars.setPlayerBody(rigKey);
+      // Full-set equipment record for a set: five armour pieces, common/L1 —
+      // the LOOK must not depend on rarity or level, only on the set.
+      const eqFor = (set) => Object.fromEntries(
+        ['head', 'chest', 'hands', 'legs', 'feet']
+          .map((s) => [s, { k: 'a', b: `${set}_${s}`, r: 'common', s: 1, l: 1 }]),
+      );
+      // Everything else off-stage: the sheet is judged by eye. That includes
+      // the transient DOM chrome (level-up flash, toasts, stat-point pill) a
+      // crowd fight legitimately leaves behind.
+      for (const e of [game.player, ...game.enemies, ...game.shadows, ...game.corpses]) {
+        if (e?.mesh) e.mesh.visible = false;
+      }
+      for (const sel of ['.levelup-flash', '#toasts', '#pointsBadge']) {
+        document.querySelectorAll(sel).forEach((n) => { n.style.display = 'none'; });
+      }
+      window.__sheet = [];
+      const rows = [];
+      sets.forEach((set, i) => {
+        const inst = chars.makeCharacter({
+          seed: `sheet:${set}`,
+          archetype: 'player',
+          partsOverride: chars.armorLookFromEquipment(eqFor(set)),
+          eyes: false,
+          ignoreBudget: true,
+        });
+        if (!inst) { rows.push({ set, ok: false, why: 'makeCharacter null' }); return; }
+        inst.root.position.set(-6.0 + i * 3.0, 0, 3.0);
+        game.scene.add(inst.root);
+        for (let f = 0; f < 30; f++) inst.animate({ moving: false, dt: 1 / 60 });
+        window.__sheet.push(inst);
+        const donor = chars.characterRecord(donors[set][rigKey]);
+        const a = inst.appearance;
+        rows.push({
+          set,
+          ok: Boolean(donor)
+            && a.rig === rigKey
+            && a.parts.head === donor.parts.head
+            && a.parts.body === donor.parts.body
+            && a.parts.legs === donor.parts.legs
+            && a.parts.feet === donor.parts.feet
+            && a.transient === true
+            && a.accent !== 0,
+          key: a.key,
+          accent: a.accent,
+        });
+      });
+      game.camera.position.set(0, 2.2, 11.0);
+      game.camera.lookAt(0, 1.1, 3.0);
+      game.camera.updateProjectionMatrix();
+      game.glow.render(game.scene, game.camera);
+      return rows;
+    }, rig, SETS, DONORS);
+    const distinctLooks = new Set(sheet.map((r) => r.key));
+    check(`all five set looks resolve to their donors on the ${rig} rig`,
+      sheet.length === 5 && sheet.every((r) => r.ok) && distinctLooks.size === 5,
+      sheet.map((r) => `${r.set}:${r.ok ? 'ok' : 'BAD'}`).join(' '));
+    await page.screenshot({ path: shotPath(`armor-sets-${rig}.png`) });
+    await evalGame(page, (game) => {
+      for (const inst of window.__sheet || []) {
+        game.scene.remove(inst.root);
+        window.__ents.disposeObject3D(inst.root);
+      }
+      window.__sheet = [];
+      for (const e of [game.player, ...game.enemies, ...game.shadows]) {
+        if (e?.mesh) e.mesh.visible = true;
+      }
+    });
+  }
+  await page.evaluate(() => { window.__chars.setPlayerBody('male'); });
+
+  // --- the swap-lifecycle law: 20 wardrobe changes on the LIVE player.
+  const swapStats = await evalGame(page, (game, [sets, donors]) => {
+    const chars = window.__chars;
+    const ents = window.__ents;
+    const eqFor = (set) => Object.fromEntries(
+      ['head', 'chest', 'hands', 'legs', 'feet']
+        .map((s) => [s, { k: 'a', b: `${set}_${s}`, r: 'common', s: 1, l: 1 }]),
+    );
+    const baseline = chars.characterStats().appearances;
+    const nakedKey = game.player.mesh.userData.appearance?.key || null;
+    const armoredKeys = new Set();
+    let maxSize = baseline;
+    let rebuilds = 0;
+    let donorHits = 0;
+    for (let i = 0; i < 20; i++) {
+      const set = sets[i % sets.length];
+      chars.setPlayerArmorLook(eqFor(set));
+      if (ents.rebuildHumanoid(game.player.mesh)) rebuilds++;
+      const a = game.player.mesh.userData.appearance;
+      if (a) armoredKeys.add(a.key);
+      const donor = chars.characterRecord(donors[set].male);
+      if (donor && a && a.parts.body === donor.parts.body) donorHits++;
+      maxSize = Math.max(maxSize, chars.characterStats().appearances);
+    }
+    // Strip. The naked look must come back and every armour geometry must go.
+    chars.setPlayerArmorLook(null);
+    const stripped = ents.rebuildHumanoid(game.player.mesh);
+    const info = chars.geometryCacheInfo();
+    // An armoured key may legitimately survive the strip in ONE shape: as a
+    // non-transient refs=0 WARM entry, because the same look was warmed for an
+    // enemy pool (stalker/brute both roll men_swat, which is also the ossuary
+    // donor). What must not survive is a held reference or a transient entry.
+    const leftover = info.filter((e) => armoredKeys.has(e.key) && (e.refs > 0 || e.transient));
+    return {
+      baseline,
+      maxSize,
+      rebuilds,
+      donorHits,
+      distinctArmored: armoredKeys.size,
+      stripped,
+      finalSize: info.length,
+      transientLeft: info.filter((e) => e.transient).length,
+      leftover: leftover.map((e) => `${e.key} refs=${e.refs}`),
+      nakedRestored: game.player.mesh.userData.appearance?.key === nakedKey,
+      playerGlb: Boolean(game.player.mesh.userData.character),
+    };
+  }, SETS, DONORS);
+  check('20 armour swaps rebuild the live player against the right donors',
+    swapStats.rebuilds === 20 && swapStats.donorHits === 20 && swapStats.playerGlb,
+    `${swapStats.rebuilds}/20 rebuilds, ${swapStats.donorHits}/20 donor matches, `
+    + `${swapStats.distinctArmored} distinct armoured looks`);
+  check('the merged-geometry cache never exceeds baseline + 2 across 20 swaps',
+    swapStats.maxSize <= swapStats.baseline + 2,
+    `baseline ${swapStats.baseline}, peak ${swapStats.maxSize}`);
+  check('after the last swap every armour geometry is refs=0 and evicted',
+    swapStats.stripped && swapStats.nakedRestored
+    && swapStats.transientLeft === 0 && swapStats.leftover.length === 0
+    && swapStats.finalSize <= swapStats.baseline,
+    `final ${swapStats.finalSize} entries (baseline ${swapStats.baseline}), `
+    + `${swapStats.transientLeft} transient left, leftover: ${swapStats.leftover.join('; ') || 'none'}`);
+
+  // --- part-swap draw cost: a full set may only add the two hands-accent
+  // draws (the swapped parts merge into the SAME single body mesh). Measured
+  // as the player-only delta across the whole composed frame, so the glow
+  // pass is charged too.
+  const armorCost = await evalGame(page, (game, [donors]) => {
+    const chars = window.__chars;
+    const ents = window.__ents;
+    const eqFor = (set) => Object.fromEntries(
+      ['head', 'chest', 'hands', 'legs', 'feet']
+        .map((s) => [s, { k: 'a', b: `${set}_${s}`, r: 'common', s: 1, l: 1 }]),
+    );
+    const roots = [...game.enemies.map((e) => e.mesh), ...game.shadows.map((s) => s.mesh),
+      ...game.corpses.map((c) => c.mesh)].filter(Boolean);
+    for (const r of roots) r.visible = false;
+    const info = game.renderer.info;
+    const frame = () => {
+      info.autoReset = false;
+      info.reset();
+      game.glow.render(game.scene, game.camera);
+      const out = { calls: info.render.calls, triangles: info.render.triangles };
+      info.autoReset = true;
+      return out;
+    };
+    const naked = frame();
+    chars.setPlayerArmorLook(eqFor('ossuary'));
+    ents.rebuildHumanoid(game.player.mesh);
+    const armored = frame();
+    const a = game.player.mesh.userData.appearance;
+    const donor = chars.characterRecord(donors.ossuary.male);
+    const swapped = Boolean(donor && a && a.parts.body === donor.parts.body);
+    chars.setPlayerArmorLook(null);
+    ents.rebuildHumanoid(game.player.mesh);
+    for (const r of roots) r.visible = true;
+    return {
+      nakedCalls: naked.calls,
+      armoredCalls: armored.calls,
+      deltaCalls: armored.calls - naked.calls,
+      deltaTris: armored.triangles - naked.triangles,
+      swapped,
+    };
+  }, DONORS);
+  console.log(`  armour draw cost: ${armorCost.nakedCalls} -> ${armorCost.armoredCalls} calls `
+    + `(+${armorCost.deltaCalls}), ${armorCost.deltaTris} extra triangles`);
+  check('a full armour set costs at most the two hands-accent draws (<= 4 calls with glow pass)',
+    armorCost.swapped && armorCost.deltaCalls <= 4,
+    `+${armorCost.deltaCalls} calls, +${armorCost.deltaTris} tris`);
   await page.evaluate(() => { window.__clock?.start(); });
 
   check('no page errors during the GLB run', errors.length === 0, errors.slice(0, 2).join(' | '));
@@ -537,6 +740,24 @@ try {
   check('the procedural pose driver still runs in fallback',
     fb.legs.some((l) => Math.abs(l.legRot || 0) > 0.001),
     `leg rotations ${fb.legs.map((l) => (l.legRot ?? 0).toFixed(2)).join(',')}`);
+  // The armour-look API must be inert, not lethal, with no pack: the cache
+  // setter is glb-free, and rebuildHumanoid declines on a procedural body.
+  const fbArmor = await p2.evaluate(async () => {
+    try {
+      const ents = await import('/src/game/entities.js');
+      const eq = { chest: { k: 'a', b: 'ossuary_chest', r: 'common', s: 1, l: 1 } };
+      ents.setPlayerArmorLook(eq);
+      const look = ents.armorLookFromEquipment(eq);
+      const rebuilt = ents.rebuildHumanoid(window.__game.player.mesh);
+      ents.setPlayerArmorLook(null);
+      return { threw: false, rebuilt, look: JSON.stringify(look), alive: window.__game.player.alive };
+    } catch (err) {
+      return { threw: true, err: String(err) };
+    }
+  });
+  check('armour-look APIs are safe with characters.glb absent',
+    !fbArmor.threw && fbArmor.rebuilt === false && fbArmor.alive,
+    fbArmor.threw ? fbArmor.err : `rebuilt=${fbArmor.rebuilt}, look=${fbArmor.look}`);
   await p2.screenshot({ path: shotPath('characters-fallback.png') });
   check('no page errors during the fallback run', e2.length === 0, e2.slice(0, 2).join(' | '));
   await p2.close();
@@ -554,6 +775,7 @@ try {
     lineup,
     render,
     drawCallsPerCharacter: perCharacter,
+    armor: { swapStats, armorCost },
     perPopulation: {
       perCharacter,
       perCreature,
