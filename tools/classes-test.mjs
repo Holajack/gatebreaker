@@ -2979,13 +2979,15 @@ try {
   ok(W2.fired && W2.out === 12, 'the screenshot frame catches a live detonation', JSON.stringify(W2));
   await page.screenshot({ path: shotPath('legion-step.png') });
 
-  // The stance toggle on the shadow panel (the sheet's ARMY block).
+  // The stance toggle on the shadow panel (now the STATS SHEET's ARMY
+  // block, opened via the ticker's STATS button — the V3 paper-doll port
+  // replaced the old GEAR/STATS/SETS tabs with persistent rails + these
+  // sheets; see src/ui/inventoryui.js's header comment).
   const W3 = await evalGame(page, (g) => {
     g.invUI.open();
-    g.invUI._tab = 'stats';
+    g.invUI._sheet = 'stats';
     g.invUI.render();
-    const rowOf = () => [...document.querySelectorAll('#inv .tabs')]
-      .find((t) => t.textContent.includes('HOLD'));
+    const rowOf = () => document.querySelector('#invOverlayBody .stanceGroup');
     const row = rowOf();
     const out = { present: Boolean(row) };
     if (row) {
@@ -2996,8 +2998,8 @@ try {
       out.onAfter = rowOf()?.querySelector('button.on')?.textContent;
     }
     // The toggle lives at the bottom of the ARMY block — scroll it into the
-    // screenshot frame (the sheet owns its scroll box, #invCol).
-    const col = document.getElementById('invCol');
+    // screenshot frame (the sheet owns its one scroll box now).
+    const col = document.querySelector('#invOverlayBody .scrollCol');
     if (col) col.scrollTop = col.scrollHeight;
     return out;
   });

@@ -295,7 +295,15 @@ kbd{
 /* ---------- damage numbers / toasts ---------- */
 #toasts{
   position:fixed;left:50%;top:22%;transform:translateX(-50%);
-  z-index:30;pointer-events:none;display:flex;flex-direction:column;gap:6px;align-items:center;
+  /* Above every full-screen overlay (#inv and .rotate-gate both sit at 60):
+     a notification's whole job is to be the topmost thing on screen. At the
+     old z-index 30, a toast fired while the inventory panel is open (equip
+     confirmations are the obvious case — the panel's primary interaction)
+     rendered BEHIND #inv's translucent identity bar instead of on top of it,
+     so the two partially-transparent text layers double-exposed into an
+     unreadable smear instead of the toast simply covering the bar briefly
+     the way it does everywhere else in the game. */
+  z-index:65;pointer-events:none;display:flex;flex-direction:column;gap:6px;align-items:center;
 }
 .toast{
   padding:9px 18px;border-radius:9px;

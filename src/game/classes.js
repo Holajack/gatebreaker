@@ -206,7 +206,7 @@ export const CLASSES = {
   vanguard: {
     key: 'vanguard', name: 'VANGUARD', affinity: ['vit'],
     fantasy: 'The one who is still standing when the room stops moving.',
-    benefitText: '+14% MAX HP. DR CAP 45% > 55%. 25% OF EVERY HIT ARRIVES AS A 3S BLEED — KILL ANYTHING AND THE REMAINDER IS CANCELLED.',
+    benefitText: '+14% MAX HP. RAISES THE DR CAP TO 55% (FROM 45%). 25% OF EVERY HIT ARRIVES AS A 3S BLEED — KILL ANYTHING AND THE REMAINDER IS CANCELLED.',
     drawbackText: '-12% MOVE SPEED. DASH DISTANCE -20%. CRIT RATE CAPPED AT 30%.',
     benefit: {
       pct: { maxHp: 0.14 },
@@ -223,8 +223,8 @@ export const CLASSES = {
   berserker: {
     key: 'berserker', name: 'BERSERKER', affinity: ['str'],
     fantasy: 'Every wound is an argument for swinging harder.',
-    benefitText: 'ATTACK +0.45% PER 1% MISSING HP, TO +40% AT THE EDGE. ATTACK-SPEED CAP 30% > 36%.',
-    drawbackText: 'HEALING RECEIVED -35%. HP REGEN -50%. DR CAP DROPS 45% > 25%.',
+    benefitText: 'ATTACK +0.45% PER 1% MISSING HP, TO +40% AT THE EDGE. RAISES THE ATTACK-SPEED CAP TO 36% (FROM 30%).',
+    drawbackText: 'HEALING RECEIVED -35%. HP REGEN -50%. DROPS THE DR CAP TO 25% (FROM 45%).',
     benefit: {
       capRaise: { atkSpeed: 0.06 },
       flagsScaled: { rageMaxAtkBonus: 0.40, rageAtkPerMissingHpPct: 0.0045 },
@@ -240,7 +240,7 @@ export const CLASSES = {
   bladedancer: {
     key: 'bladedancer', name: 'BLADEDANCER', affinity: ['agi'],
     fantasy: 'Never in the same place the blow was aimed at.',
-    benefitText: 'DASH COOLDOWN 1.60 > 1.05S. DASH I-FRAMES 0.34 > 0.42S. +12% CRIT DAMAGE. PERFECT-DODGE WINDOW +40MS (CAP 300MS).',
+    benefitText: 'CUTS DASH COOLDOWN TO 1.05S (FROM 1.60S). EXTENDS DASH I-FRAMES TO 0.42S (FROM 0.34S). +12% CRIT DAMAGE. PERFECT-DODGE WINDOW +40MS (CAP 300MS).',
     drawbackText: '-18% MAX HP. -15% ATTACK. KNOCKBACK TAKEN +40%.',
     benefit: {
       pct: { critDmg: 0.12 },
@@ -257,7 +257,7 @@ export const CLASSES = {
   hexweaver: {
     key: 'hexweaver', name: 'HEXWEAVER', affinity: ['int'],
     fantasy: 'The blade is a formality.',
-    benefitText: '+25% SKILL DAMAGE. COOLDOWN-REDUCTION CAP 40% > 52%. MP REGEN +60%.',
+    benefitText: '+25% SKILL DAMAGE. RAISES THE COOLDOWN-REDUCTION CAP TO 52% (FROM 40%). MP REGEN +60%.',
     drawbackText: '-25% BASIC-ATTACK DAMAGE. -20% ATTACK SPEED. -12% MAX HP.',
     benefit: {
       pct: { skillMul: 0.25, mpRegen: 0.60 },

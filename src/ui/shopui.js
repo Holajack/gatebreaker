@@ -185,10 +185,27 @@ export class ShopUI {
     meta.appendChild(name);
     // Locked rows carry the FAMILY beside the unlock reason: with eight
     // archetypes on the ladder, "Gatecleaver — D-GRADE HUNTERS ONLY" answers
-    // "locked what?" while an unlock condition alone does not.
+    // "locked what?" while an unlock condition alone does not. row.weapon is
+    // null on a locked row (shopStock only rolls a weapon instance for
+    // unlocked rows), so the powerPct read must live INSIDE the unlocked
+    // branch, not before the ternary.
     const sub = el('small', null, row.locked
       ? `${ARCHETYPES[row.archetype]?.name || ''}  ·  ${row.reason}`
-      : `${RARITIES[row.rarity]?.name || ''} ${row.weapon.arch.name}  ·  x${row.weapon.dmgMul.toFixed(2)} power`);
+      : (() => {
+          // Weapon power as a plain +/-NN% delta off dmgMul 1.00 (Riftedge,
+          // the "standard hunter issue" baseline weapon) rather than
+          // "x1.XX power" or a flat damage figure. A flat number needs one
+          // arbitrary combo step picked out of several wildly different ones
+          // (a basic swing runs ~1.0-1.35 dmg share, a finisher spikes to
+          // 2.6) and one baseline atk, so it would read as "your real combat
+          // damage" while quietly omitting crit, DR and class modifiers —
+          // misleading in a shop row. dmgMul IS already the honest per-hit
+          // multiplier; showing it as a signed percent keeps that same
+          // information legible without the reader parsing a multiplier
+          // notation.
+          const powerPct = Math.round((row.weapon.dmgMul - 1) * 100);
+          return `${RARITIES[row.rarity]?.name || ''} ${row.weapon.arch.name}  ·  ${powerPct >= 0 ? '+' : ''}${powerPct}% weapon power`;
+        })());
     meta.appendChild(sub);
     btn.appendChild(meta);
 

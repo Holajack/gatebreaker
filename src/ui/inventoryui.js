@@ -1,5 +1,10 @@
-// The hunter's sheet: eight equipment slots, everything the character is, and
-// the stow/draw toggle the owner asked for in the plaza.
+// The hunter's sheet: a persistent "paper doll" view — the REAL hunter
+// standing centre-frame, four equipment slots flanking each side, a bottom
+// ticker of the numbers that matter mid-run, and two sheets (SETS, the full
+// STATS breakdown) that slide over it. Ported from the owner's picked
+// Claude Design mockup ("V3 — PAPER DOLL"); see docs/NUMBERS_SPEC.json for
+// background research from an earlier abandoned attempt at this exact port
+// (not authoritative — this file and the mockup are).
 //
 // It is an OVERLAY, not an AppState screen, and that is the same deliberate
 // call shopui.js documents: AppState.go('city') calls Game.enterCity, which
@@ -11,14 +16,46 @@
 //
 // Constructed ONCE, in main.js, beside the ShopUI. Rebuilding the DOM per open
 // would leak an #inv node per visit; main.js already records that lesson about
-// the shop.
+// the shop. render() DOES clear and repopulate the inner content of the
+// skeleton nodes below on every call — that is not the same mistake: the
+// skeleton (panel, rails, stage, ticker, overlay shell) is built exactly once
+// in the constructor, and only their CHILDREN are torn down and rebuilt per
+// render(), the same pattern _panes()/bodyEl always used here.
 //
-// WAVE 3-B STEP 13: the five armour slots and the trinket are LIVE. Equipping
-// is a deliberate two-step — tap a stash row, read the delta strip, confirm —
-// because an armour swap changes combat numbers and a player on a phone
-// deserves to see WHICH numbers before committing. Only the offhand still says
-// "not yet": no offhand item exists in any table this wave, and a slot that
-// pretends is worse than a slot that says so.
+// THE CENTRE IS A REAL CHARACTER, NOT A PREVIEW RENDER. This game owns exactly
+// one THREE.WebGLRenderer and one THREE.Scene (game.js:~357/376) and this
+// project has shipped three separate GPU-lifecycle leaks in its history (city
+// dispose, world dispose, entity LOD) — standing up a second GL context for a
+// preview canvas would be a fourth, for a feature that does not need one. The
+// player mesh already tracks equipped gear every frame this file changes it
+// (setPlayerArmorLook/rebuildHumanoid, called on every equip exactly as
+// game.setPlayerBody does), and the inventory panel is a DOM overlay that does
+// NOT stop the main render loop. So: open() points the EXISTING camera at a
+// close "paper doll" framing of the player via game.enterInventoryView(), the
+// panel's centre column carries no opaque background (only the chrome around
+// it — rails, ticker, header — has one), and close() calls
+// game.exitInventoryView() to hand the camera back. Zero new WebGL context,
+// zero new render pipeline, zero new material — the character renders through
+// the game's ordinary character material path, which is also why it carries
+// no rim/glow: that law governs meshes, and this is the same mesh.
+//
+// A scissored second-scene sub-viewport (three.js's "multiple views, one
+// canvas" technique) was the documented alternative and was NOT taken:
+// invUI.open() is reachable from the city (unpaused) and from inside a gate
+// (main.js pauses the sim the instant the panel opens — see open() below), so
+// the world behind the framed player is either a calm plaza or a FROZEN
+// (never mid-combat-animating) dungeon frame — never the chaotic, actively
+// re-rendering combat the second-scene escape hatch exists for. Camera framing
+// was sufficient.
+//
+// WAVE 4 (this port): the five armour slots, the trinket, and the weapon are
+// LIVE. Equipping is a deliberate two-step everywhere now — tap a slot, read
+// the delta strip against the real number, confirm — because a swap changes
+// combat numbers and a player on a phone deserves to see WHICH ones before
+// committing; the mockup's shared compare overlay already drew this pattern
+// for every slot, so weapons now get the same courtesy armour always had.
+// Only the offhand still says "not yet": no offhand item exists in any table
+// this wave, and a slot that pretends is worse than a slot that says so.
 //
 // Every node is built with createElement/textContent. Weapon names come out of
 // rollWeapon's buildName, but the repo's standing rule is that a markup sink is
@@ -30,9 +67,12 @@ import {
 } from '../game/weapons.js';
 // The armour half of the sheet: definitions for the slot filter and lock
 // checks, deserializeArmor to turn a stashed {k,b,r,s,l} record back into the
-// exact rolled piece, armorSummary/setProgress for the readouts.
+// exact rolled piece, armorSummary/setProgress for the readouts, and the two
+// the hard-numbers rule needs to print the REAL total-DR cap rather than the
+// mockup's invented 75%.
 import {
-  ARMOR_BASES, SETS, SET_THRESHOLDS, setProgress, deserializeArmor, armorSummary,
+  ARMOR_BASES, ARMOR_SLOTS, SETS, SET_THRESHOLDS, setProgress, deserializeArmor,
+  armorSummary, TOTAL_DR_CAP, combinedDR,
 } from '../game/armor.js';
 import { STATS, STAT_RATES, RANKS, derive, rankOf, xpForLevel } from '../game/config.js';
 // shopBand: the ONE rank-band computation, shared with the Exchange so the two
@@ -44,8 +84,8 @@ import { shopBand } from '../game/shop.js';
 import { ascensionRecipe, canAscend, SIGIL_LABEL } from '../game/ascension.js';
 import { effectiveStat, shadowRosterCapacity } from '../game/progression.js';
 // The identity layers (CLASSES_SPEC step 3). applyLayers is the SAME fold
-// game.refreshDerived runs, so this tab can never disagree with combat; the
-// direction/mastery/resonance readers are pure and drive the new rows.
+// game.refreshDerived runs, so this sheet can never disagree with combat; the
+// direction/mastery/resonance readers are pure and drive the identity rows.
 import {
   DIRECTIONS, MASTERY_THRESHOLDS, CLASSES, CLASS_QUALITY,
   directionOf, masteryTier, resonanceOf, applyLayers,
@@ -68,304 +108,66 @@ import { iconStyle } from './icons.js';
 const STASH_LIMIT = 40;
 
 // Slot metadata. `kind` is the item kind the slot accepts, matching the save
-// record's `k` field, so the GEAR list filter is a single comparison rather
-// than a per-slot special case.
+// record's `k` field, so the candidate list filter is a single comparison
+// rather than a per-slot special case. `code` is the mockup's short badge —
+// a SECONDARY decoration next to the real icon (requirement: the atlas icon
+// stays primary, never a 2-3 letter code standing in for it).
 const SLOTS = {
-  weapon: { name: 'WEAPON', kind: 'w', icon: 'sword', live: true, blurb: 'The family decides how combat FEELS: reach, arc, commitment, recovery.' },
-  offhand: { name: 'OFFHAND', kind: 'o', icon: 'arrow', live: false, blurb: 'Quiver, focus or parry token. Arrives with the bow and the staff.' },
-  head: { name: 'HEAD', kind: 'a', icon: 'crown', live: true, blurb: 'Perception: earlier enemy tells, harder crits.' },
-  chest: { name: 'CHEST', kind: 'a', icon: 'armor_metal', live: true, blurb: 'The slab. The largest single armour contribution, and max health.' },
-  hands: { name: 'HANDS', kind: 'a', icon: 'glove', live: true, blurb: 'Weapon handling: attack speed, and a shave off recovery.' },
-  legs: { name: 'LEGS', kind: 'a', icon: 'armor_leather', live: true, blurb: 'Mobility: move speed and a wider perfect-dodge window.' },
-  feet: { name: 'FEET', kind: 'a', icon: 'bone', live: true, blurb: 'Footing: stagger resistance, and less knockback taken.' },
-  trinket: { name: 'TRINKET', kind: 't', icon: 'ring3', live: true, blurb: 'One exotic effect. No armour at all — leech, luck, ash-find.' },
+  weapon: { name: 'WEAPON', kind: 'w', icon: 'sword', live: true, code: 'WPN', blurb: 'The family decides how combat FEELS: reach, arc, commitment, recovery.' },
+  offhand: { name: 'OFFHAND', kind: 'o', icon: 'arrow', live: false, code: 'OFF', blurb: 'Quiver, focus or parry token. Arrives with the bow and the staff.' },
+  head: { name: 'HEAD', kind: 'a', icon: 'crown', live: true, code: 'HED', blurb: 'Perception: earlier enemy tells, harder crits.' },
+  chest: { name: 'CHEST', kind: 'a', icon: 'armor_metal', live: true, code: 'CHS', blurb: 'The slab. The largest single armour contribution, and max health.' },
+  hands: { name: 'HANDS', kind: 'a', icon: 'glove', live: true, code: 'HND', blurb: 'Weapon handling: attack speed, and a shave off recovery.' },
+  legs: { name: 'LEGS', kind: 'a', icon: 'armor_leather', live: true, code: 'LEG', blurb: 'Mobility: move speed and a wider perfect-dodge window.' },
+  feet: { name: 'FEET', kind: 'a', icon: 'bone', live: true, code: 'FT', blurb: 'Footing: stagger resistance, and less knockback taken.' },
+  trinket: { name: 'TRINKET', kind: 't', icon: 'ring3', live: true, code: 'TRK', blurb: 'One exotic effect. No armour at all — leech, luck, ash-find.' },
 };
+const LEFT_SLOTS = ['weapon', 'offhand', 'head', 'chest'];
+const RIGHT_SLOTS = ['hands', 'legs', 'feet', 'trinket'];
 
-// The compare strip's row table, one entry per number an armour piece can
-// carry. Values come off the ROLLED INSTANCE fields directly rather than
-// re-parsing armorSummary's formatted strings — a delta needs the number, not
-// the label. Every field here is higher-is-better (knockTaken is the CUT taken
-// off incoming knockback, so more cut is strictly better), which is what lets
-// one sign convention colour the whole strip.
-const CMP_ROWS = [
-  ['Armor', (a) => a.ap, (v) => String(Math.round(v)), (d) => `${d > 0 ? '+' : ''}${Math.round(d)}`],
-  ['Health', (a) => a.hpAdd, (v) => `+${Math.round(v)}`, (d) => `${d > 0 ? '+' : ''}${Math.round(d)}`],
-  ['Tell lead', (a) => a.tellAdd, (v) => `+${Math.round(v)}ms`, (d) => `${d > 0 ? '+' : ''}${Math.round(d)}ms`],
-  ['Crit dmg', (a) => a.critDmgAdd, (v) => `+${Math.round(v * 100)}%`, (d) => `${d > 0 ? '+' : ''}${Math.round(d * 100)}%`],
-  ['Atk speed', (a) => a.atkSpeedAdd, (v) => `+${(v * 100).toFixed(1)}%`, (d) => `${d > 0 ? '+' : ''}${(d * 100).toFixed(1)}%`],
-  ['Speed', (a) => a.speedAdd, (v) => `+${v.toFixed(2)}`, (d) => `${d > 0 ? '+' : ''}${d.toFixed(2)}`],
-  ['Dodge window', (a) => a.dodgeAdd, (v) => `+${Math.round(v * 1000)}ms`, (d) => `${d > 0 ? '+' : ''}${Math.round(d * 1000)}ms`],
-  ['Stagger resist', (a) => a.staggerResist, (v) => `+${Math.round(v * 100)}%`, (d) => `${d > 0 ? '+' : ''}${Math.round(d * 100)}%`],
-  ['Knockback cut', (a) => a.knockTaken, (v) => `+${Math.round(v * 100)}%`, (d) => `${d > 0 ? '+' : ''}${Math.round(d * 100)}%`],
-  ['Leech', (a) => a.leech, (v) => `+${(v * 100).toFixed(1)}%`, (d) => `${d > 0 ? '+' : ''}${(d * 100).toFixed(1)}%`],
-  ['Ash found', (a) => a.ashFind, (v) => `+${Math.round(v * 100)}%`, (d) => `${d > 0 ? '+' : ''}${Math.round(d * 100)}%`],
-];
+// ---------------------------------------------------------------------------
+// HARD NUMBERS. The owner's own two complaints — "everything is based on 1.49
+// damage" and "dodge window is 114 ms" — were this file's OWN notation: a bare
+// "x1.49" multiplier and a millisecond figure with no seconds-scale context.
+// The V3 mockup's fmt() answers both (dodge in seconds, DR as "NN% (CAP NN%)",
+// flat rounded integers, "+NN%" bonus percentages) and this is that answer,
+// applied to every number this file prints — including the ones the mockup's
+// synthetic data never had to cover (weapon power, class quality, shadow
+// damage), because the rule is the notation, not the specific row.
+// ---------------------------------------------------------------------------
 
-// Labels + formatters for every derived field the class layer can touch, so
-// the CLASS section can print "what this class DID to you" as base -> final
-// rows straight off the two derived blocks rather than re-deriving the term
-// maths. Keys the layer never moved simply do not appear.
-const fmtMs = (v) => `${Math.round(v * 1000)}ms`;
-const CLASS_FIELD_LABEL = {
-  maxHp: ['Max health', (v) => String(Math.round(v))],
-  maxMp: ['Max mana', (v) => String(Math.round(v))],
-  atk: ['Attack power', (v) => v.toFixed(1)],
-  speed: ['Move speed', (v) => v.toFixed(2)],
-  crit: ['Crit chance', pctLater],
-  critDmg: ['Crit damage', (v) => `x${v.toFixed(2)}`],
-  atkSpeed: ['Attack speed', pctLater],
-  skillMul: ['Skill power', (v) => `x${v.toFixed(2)}`],
-  cdr: ['Cooldown cut', pctLater],
-  dr: ['Damage reduction', pctLater],
-  hpRegen: ['Health regen', (v) => `${v.toFixed(2)}/s`],
-  mpRegen: ['Mana regen', (v) => `${v.toFixed(2)}/s`],
-  dmgFloor: ['Damage floor', pctLater],
-  tellLeadMs: ['Enemy tell', (v) => `${Math.round(v)}ms`],
-  dodgeWindow: ['Dodge window', fmtMs],
-  shadowDmgMul: ['Shadow damage', (v) => `x${v.toFixed(2)}`],
-  dashCd: ['Dash cooldown', (v) => `${v.toFixed(2)}s`],
-  dashDistance: ['Dash distance', (v) => `${v.toFixed(1)}m`],
-  dashIframes: ['Dash i-frames', fmtMs],
-  knockTakenMul: ['Knockback taken', (v) => `x${v.toFixed(2)}`],
+/** A multiplier (1.49, 0.75, ...) as a signed bonus percentage off 1.0 —
+ *  "+49%" / "-25%". Replaces every "x1.NN" this panel used to print. */
+const bonusPct = (mult) => {
+  const p = Math.round((mult - 1) * 100);
+  return `${p >= 0 ? '+' : ''}${p}%`;
 };
-// pct() is declared below with the other helpers; alias through a function so
-// the table above can reference it before its const initialises.
-function pctLater(v) { return pct(v); }
-
-// Trinket effect labels, shared with armorSummary's own table.
-const TRINKET_LABEL = {
-  leech: 'Leech', ashFind: 'Ash found', luck: 'Luck', mpRegen: 'Mana regen', extract: 'Bind chance',
+/** A fraction already IN bonus terms (0.18 meaning "+18%") as the same signed
+ *  notation — atk speed, cooldown cut, stagger resist, leech, ash find: every
+ *  field that starts at 0 and is added to. */
+const bonusFrac = (frac) => {
+  const p = Math.round(frac * 100);
+  return `${p >= 0 ? '+' : ''}${p}%`;
 };
-const trinketFmt = (key, v) => (key === 'mpRegen' ? `+${v.toFixed(1)}/s` : `+${(v * 100).toFixed(1)}%`);
-
-// Rank pill classes already exist in styles.css (.rank-E .. .rank-SOVEREIGN),
-// so the panel's rank badge is the same colour as the gate the player is
-// allowed into. Reusing them is what keeps two screens from disagreeing.
-const CSS = `
-/* .screen is z-index 20 and #cityUi is 40, so without this the district
-   banner and the live OPEN button render ON TOP of the panel and eat taps —
-   the same fix #shop needed, for the same reason. */
-#inv { z-index: 60; }
-body.gb-inv #cityUi { display: none !important; }
-
-#inv .panel { max-height: 92vh; gap: 10px; }
-#inv .inv-wallet {
-  display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
-  border: 1px solid var(--edge); border-radius: 10px;
-  padding: 8px 12px; font-size: 12px; letter-spacing: .1em;
-  background: rgba(124,92,255,.07);
-}
-#inv .inv-wallet b { color: var(--ink); }
-#inv .inv-wallet .ash b { color: var(--gold); }
-#inv .inv-wallet span { color: var(--dim); }
-
-/* Two side-by-side scrolling columns, and this is not a style preference.
-   Panel padding + h2 + the wallet strip eat ~120 px of a 412 px-tall landscape
-   phone; ~290 px is left, and the sheet has strictly more content than the
-   Exchange's eight-row shelf that already needed a scroll box. A single
-   vertical list would be a peephole. */
-#inv .cols { display: flex; gap: 10px; align-items: flex-start; }
-#inv .slots {
-  display: grid; grid-template-columns: repeat(2, 56px); gap: 5px; flex: 0 0 auto;
-}
-/* THE PANEL USES THE WHOLE PHONE. .panel.wide is 560 px, which on an 892 px
-   landscape window left ~330 px of empty gutter while 63% of the sheet's body
-   sat below a 214 px fold — the stash list was entirely off-screen with no cue
-   that it existed. Nothing about a character sheet wants to be 560 px wide on a
-   screen that is 892. The generic .panel cap stays put for every other overlay;
-   only this one is content-dense enough to need the room. */
-#inv .panel { width: min(880px, 100%); }
-
-#inv .right { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-/* The tabs live OUTSIDE the scroll box now. They used to be the first children
-   of the scrolling column, so scrolling the sheet carried the only control that
-   switches tabs off the top of it. */
-#inv .colwrap { position: relative; min-height: 0; }
-#inv .col { max-height: min(52vh, 300px); overflow-y: auto; }
-
-/* THE SCROLLBAR THAT WASN'T (the shipped 3-A clip bug). The old block set the
-   standard scrollbar-width property AND ::-webkit-scrollbar rules; per spec
-   the standard property wins the moment it is present, so the "always drawn"
-   webkit track never rendered anywhere. Worse, measured on this project's own
-   harness Chromium (and on any macOS/Android build with overlay scrollbars),
-   even a PURE ::-webkit-scrollbar customisation stays an overlay bar that is
-   invisible until you already scroll: col.offsetWidth - col.clientWidth === 0
-   with 460+ px of content hidden below the fold and nothing but a MORE hint.
-   Native scrollbars are platform policy, not CSS — so the panel now draws its
-   OWN rail: a track + thumb positioned from scrollTop by _updateScrollHint,
-   pointer-events none (it is an affordance, not a control — the column itself
-   is the touch scroller). The native bar is suppressed on both engines so the
-   rail is THE scrollbar rather than a second one behind it. */
-#inv .col { scrollbar-width: none; }
-#inv .col::-webkit-scrollbar { display: none; width: 0; }
-/* Reserve the rail's lane so row values never sit under the thumb — the other
-   half of the shipped bug was the right column's numbers clipping against the
-   panel edge with nothing to say why. */
-#inv .col { padding-right: 12px; }
-#inv .rail {
-  position: absolute; right: 0; top: 2px; bottom: 2px; width: 6px;
-  border-radius: 3px; background: rgba(255,255,255,.08); pointer-events: none;
-}
-#inv .rail .thumb {
-  position: absolute; left: 0; right: 0; border-radius: 3px;
-  background: rgba(124,92,255,.65); min-height: 24px;
-}
-#inv .colwrap.no-scroll .rail { display: none; }
-#inv .morehint {
-  position: absolute; left: 0; right: 0; bottom: 0; height: 34px;
-  display: flex; align-items: flex-end; justify-content: center;
-  padding-bottom: 2px; pointer-events: none; opacity: 1; transition: opacity .15s;
-  background: linear-gradient(to bottom, rgba(12,14,28,0), rgba(12,14,28,.94));
-  color: var(--accent2); font-size: 9.5px; letter-spacing: .18em; font-weight: 800;
-}
-#inv .colwrap.at-end .morehint, #inv .colwrap.no-scroll .morehint { opacity: 0; }
-
-/* The body splits again inside the column. On a landscape phone the sheet is
-   wide and SHORT, so the fix for "the stash is below the fold" is to put the
-   stash beside the equipped card rather than under it. Narrow windows stack. */
-#inv .body2 { display: flex; gap: 10px; align-items: flex-start; }
-#inv .body2 > .pane { flex: 1 1 0; min-width: 0; }
-@media (max-width: 620px) { #inv .body2 { display: block; } }
-
-#inv .slot {
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
-  padding: 3px; border-radius: 9px; border: 1px solid transparent;
-  background: rgba(124,92,255,.05); cursor: pointer; font: inherit; color: var(--dim);
-}
-/* 44 px is this repo's tap-target floor; the cell is a secondary target so it
-   sits right on it rather than at cityui's 56 px thumb minimum. */
-#inv .slot i { width: 44px; height: 44px; border-radius: 8px; border: 2px solid rgba(180,190,220,.22); }
-#inv .slot small { font-size: 9px; letter-spacing: .06em; }
-#inv .slot.sel { border-color: var(--accent); background: rgba(124,92,255,.2); }
-#inv .slot.sel small { color: var(--ink); }
-#inv .slot.locked { opacity: .55; }
-
-#inv .tabs { display: flex; gap: 6px; margin-bottom: 8px; }
-/* min-height 44: the tabs and the footer are TAP TARGETS, and 26-31 px tall
-   bars (measured at 915x412 before this rule) sit under the repo's 44 px
-   floor however wide they are. The scroll column pays the ~30 px — it has a
-   rail and a MORE hint; a mis-tapped tab has nothing. */
-#inv .tabs button {
-  flex: 1; padding: 7px 4px; border: 1px solid var(--edge); border-radius: 8px;
-  background: transparent; color: var(--dim); font: inherit; font-size: 11px;
-  letter-spacing: .12em; cursor: pointer; min-height: 44px;
-}
-#inv .tabs button.on { background: rgba(124,92,255,.18); color: var(--ink); border-color: var(--accent); font-weight: 800; }
-
-/* shopui.js measured this: the gate row's 44 px swatch and 13 px padding fit
-   two rows in a 412 px window, and 9px/36px fits nearly four. That is the
-   difference between a list and a peephole, and it applies verbatim here. */
-#inv .gate { padding: 8px 10px; gap: 10px; }
-#inv .gate i { width: 34px; height: 34px; flex: 0 0 34px; border-radius: 8px; }
-#inv .gate .meta b { font-size: 13px; }
-#inv .gate .meta small { font-size: 10.5px; }
-#inv .gate .tagline { color: var(--dim); font-size: 10.5px; white-space: nowrap; letter-spacing: .08em; }
-#inv .gate.on { border-color: var(--accent); background: rgba(124,92,255,.18); }
-#inv .gate.on .tagline { color: var(--accent2); }
-#inv .gate.locked { opacity: .55; }
-
-/* The compare strip: label | equipped | candidate(delta). It REPLACES the
-   stash list in its pane rather than floating over the sheet — at 412 px there
-   is no room for a third layer, and a modal-on-modal is exactly the tap-eating
-   stack the z-index note above exists to prevent. */
-#inv .cmp { border: 1px solid var(--accent); border-radius: 10px; padding: 9px 11px; background: rgba(124,92,255,.08); }
-#inv .cmp .crow { display: flex; gap: 8px; align-items: baseline; font-size: 11.5px; padding: 2px 0; }
-#inv .cmp .crow > span { color: var(--dim); flex: 1 1 auto; letter-spacing: .04em; }
-#inv .cmp .crow .cur { color: var(--dim); text-align: right; flex: 0 0 auto; min-width: 44px; }
-#inv .cmp .crow .cand { color: var(--ink); font-weight: 700; text-align: right; flex: 0 0 auto; min-width: 72px; }
-#inv .cmp .delta.up { color: #54e08a; }
-#inv .cmp .delta.down { color: var(--danger); }
-#inv .cmp .cmp-foot { display: flex; gap: 8px; margin-top: 8px; }
-/* 44 px floor: EQUIP is the commit control of the whole panel — the one
-   button that must never be a squint target on a phone. */
-#inv .cmp .cmp-foot .btn { flex: 1; padding: 9px; font-size: 12px; min-height: 44px; }
-#inv .cmp .cmp-reason { color: var(--danger); font-size: 10.5px; letter-spacing: .1em; margin-top: 6px; }
-
-/* No leg icon exists in the 108-key atlas, so a legs piece reuses its set's
-   chest icon DESATURATED — legible as "same set, different piece" instead of
-   mistakable for the chest itself. Flagged in RPG_SPEC openQuestions. */
-#inv .desat { filter: saturate(.35) brightness(.9); }
-
-/* LEGENDARY rows read as the top of the ladder at a glance: the gold border
-   the rarity tint already provides, plus a soft outer bloom. This is UI
-   chrome, not a scene material — the no-glow-on-living-characters law governs
-   meshes, and a DOM box-shadow is neither rim nor emissive. */
-#inv .gate.leg {
-  border-color: rgba(255,194,75,.75);
-  background: linear-gradient(90deg, rgba(255,194,75,.14), rgba(255,194,75,.04));
-  box-shadow: 0 0 10px rgba(255,194,75,.28);
-}
-#inv .rule {
-  border: 1px solid rgba(255,194,75,.6); border-radius: 10px;
-  padding: 9px 11px; background: rgba(255,194,75,.07);
-  color: var(--ink); font-size: 11.5px; line-height: 1.6;
-}
-#inv .rule b { color: #ffc24b; letter-spacing: .12em; display: block; margin-bottom: 2px; }
-
-/* The ascension recipe: three requirement rows and the one commit button.
-   Requirement rows go green as they are met, so the block doubles as the
-   shopping list for the grind. */
-#inv .asc { border: 1px solid var(--edge); border-radius: 10px; padding: 9px 11px; background: rgba(255,194,75,.05); }
-#inv .asc .crow { display: flex; gap: 8px; align-items: baseline; font-size: 11.5px; padding: 2px 0; }
-#inv .asc .crow span { color: var(--dim); flex: 1 1 auto; letter-spacing: .06em; }
-#inv .asc .crow b { flex: 0 0 auto; }
-#inv .asc .crow.met b { color: #54e08a; }
-#inv .asc .crow.unmet b { color: var(--danger); }
-#inv .asc .btn { width: 100%; margin-top: 8px; padding: 9px; font-size: 12px; min-height: 44px; }
-#inv .asc .asc-reason { color: var(--danger); font-size: 10.5px; letter-spacing: .1em; margin-top: 6px; }
-
-#inv .note {
-  border: 1px dashed rgba(255,255,255,.16); border-radius: 10px;
-  padding: 10px 12px; color: var(--dim); font-size: 11.5px; line-height: 1.7;
-}
-#inv .note b { color: var(--ink); }
-#inv .sect { color: var(--accent2); font-size: 10.5px; letter-spacing: .18em; margin: 10px 0 3px; }
-#inv .sect:first-child { margin-top: 0; }
-#inv .readout .row small { color: var(--dim); font-size: 10px; letter-spacing: .04em; }
-#inv .foot { display: flex; gap: 8px; }
-#inv .foot .btn { padding: 10px; font-size: 13px; min-height: 44px; }
-#inv .unequip { margin-top: 6px; padding: 9px; font-size: 12px; width: 100%; min-height: 44px; }
-
-/* Desktop Chrome and portrait have the room to stack, so they do — two 300 px
-   columns side by side on a 900 px-wide window is mostly empty gutter. */
-@media (min-width: 700px) and (min-height: 620px) {
-  #inv .cols { display: block; }
-  #inv .slots { grid-template-columns: repeat(4, 56px); margin-bottom: 10px; }
-  #inv .col { max-height: 44vh; }
-}
-
-/* A landscape phone is the tightest case in the game: ~412 px tall with a
-   notch. Every row reclaimed here is a row of the sheet the player can read
-   without scrolling, so the chrome gives up its height first. */
-@media (orientation: landscape) and (max-height: 520px) {
-  #inv .panel { max-height: 96vh; padding: 10px 14px; gap: 6px; }
-  #inv .panel h2 { font-size: 15px; letter-spacing: .16em; }
-  #inv .inv-wallet { padding: 4px 10px; font-size: 11px; }
-  #inv .tabs { margin-bottom: 5px; }
-  #inv .tabs button { padding: 5px 4px; }
-  #inv .foot .btn { padding: 7px; font-size: 12px; }
-  /* Let the scroll box take every pixel the panel is not using, instead of a
-     52vh guess that left the panel itself scrolling underneath. The panel is
-     the frame; exactly one thing inside it scrolls, and it is the column. */
-  #inv .panel { overflow: hidden; }
-  /* stretch, NOT the flex-start the wide layout wants: with flex-start the
-     right-hand column keeps its CONTENT height, so it grows straight through
-     the footer buttons instead of handing the overflow to its scroll box. */
-  #inv .cols { flex: 1 1 auto; min-height: 0; align-items: stretch; }
-  #inv .right { min-height: 0; }
-  #inv .colwrap { flex: 1 1 auto; min-height: 0; display: flex; }
-  #inv .col { flex: 1 1 auto; min-height: 0; max-height: none; }
-}
-`;
-
-let _styleEl = null;
-function ensureStyle() {
-  if (_styleEl && _styleEl.isConnected) return;
-  _styleEl = document.createElement('style');
-  _styleEl.id = 'invUiStyle';
-  _styleEl.textContent = CSS;
-  document.head.appendChild(_styleEl);
-}
+/** An absolute rate (crit chance, damage floor) — a plain percentage with one
+ *  decimal, the precision this project has always shown these at. Not a
+ *  "bonus" in the additive sense, so it keeps its own notation rather than a
+ *  forced sign. */
+const pct = (v) => `${(v * 100).toFixed(1)}%`;
+/** Dodge window: seconds, two decimals — literally the owner's complaint,
+ *  answered. "0.11s" instead of "114ms". */
+const fmtDodge = (sec) => `${sec.toFixed(2)}s`;
+/** The one number that answers "total cap is 72%": the REAL combined
+ *  reduction (vitality x armour, from armor.js's own combinedDR — the single
+ *  computation site _damagePlayer uses) against the REAL cap, never the
+ *  mockup's invented 75. */
+const fmtDR = (frac) => `${Math.round(frac * 100)}% (CAP ${Math.round(TOTAL_DR_CAP * 100)}%)`;
+/** Rewrites any stray "x<number>" token in a string THIS FILE did not
+ *  compose — weaponSummary()/armorSummary() are owned by weapons.js /
+ *  armor.js, not this file, and both still emit the old notation — into the
+ *  same signed-percent form, so a row borrowed verbatim from either still
+ *  keeps the one promise every number on this panel makes. */
+const deMultiply = (str) => String(str).replace(/x(-?\d+(?:\.\d+)?)/g, (_, n) => bonusPct(Number(n)));
 
 const hex = (n) => `#${(n >>> 0).toString(16).padStart(6, '0')}`;
 
@@ -385,8 +187,6 @@ function row(label, value, sub) {
   return r;
 }
 
-const pct = (v) => `${(v * 100).toFixed(1)}%`;
-
 /** The icon key for a rolled weapon: the pack model name, lowercased. */
 function weaponIcon(w) {
   if (!w) return null;
@@ -403,6 +203,340 @@ function weaponIcon(w) {
   return null;
 }
 
+// The compare strip's row table, one entry per number an armour piece can
+// carry. Values come off the ROLLED INSTANCE fields directly rather than
+// re-parsing armorSummary's formatted strings — a delta needs the number, not
+// the label. Every field here is higher-is-better (knockTaken is the CUT taken
+// off incoming knockback, so more cut is strictly better), which is what lets
+// one sign convention colour the whole strip.
+const CMP_ROWS = [
+  ['Armor', (a) => a.ap, (v) => String(Math.round(v)), (d) => `${d > 0 ? '+' : ''}${Math.round(d)}`],
+  ['Health', (a) => a.hpAdd, (v) => `+${Math.round(v)}`, (d) => `${d > 0 ? '+' : ''}${Math.round(d)}`],
+  ['Tell lead', (a) => a.tellAdd, (v) => `+${Math.round(v)}ms`, (d) => `${d > 0 ? '+' : ''}${Math.round(d)}ms`],
+  ['Crit dmg', (a) => a.critDmgAdd, (v) => bonusFrac(v), (d) => bonusFrac(d)],
+  ['Atk speed', (a) => a.atkSpeedAdd, (v) => bonusFrac(v), (d) => bonusFrac(d)],
+  ['Speed', (a) => a.speedAdd, (v) => `+${v.toFixed(2)}`, (d) => `${d > 0 ? '+' : ''}${d.toFixed(2)}`],
+  // Seconds, not ms — the SAME hard-numbers rule that governs the headline
+  // dodge stat governs every appearance of it, deltas included.
+  ['Dodge window', (a) => a.dodgeAdd, (v) => fmtDodge(v), (d) => `${d > 0 ? '+' : ''}${d.toFixed(2)}s`],
+  ['Stagger resist', (a) => a.staggerResist, (v) => bonusFrac(v), (d) => bonusFrac(d)],
+  ['Knockback cut', (a) => a.knockTaken, (v) => bonusFrac(v), (d) => bonusFrac(d)],
+  ['Leech', (a) => a.leech, (v) => bonusFrac(v), (d) => bonusFrac(d)],
+  ['Ash found', (a) => a.ashFind, (v) => bonusFrac(v), (d) => bonusFrac(d)],
+];
+
+// The weapon compare strip's twin: weapons carry a different field set, and
+// COOLDOWN is the one row where LOWER is better — flagged per-row rather than
+// inverting the whole strip's colour convention for one field.
+const WEAPON_CMP_ROWS = [
+  ['Power', (w) => w.dmgMul, (v) => bonusPct(v), (d) => `${d > 0 ? '+' : ''}${Math.round(d * 100)}%`, true],
+  ['Crit chance', (w) => w.critAdd, (v) => bonusFrac(v), (d) => bonusFrac(d), true],
+  ['Crit mult', (w) => w.critMul, (v) => bonusPct(v), (d) => `${d > 0 ? '+' : ''}${Math.round(d * 100)}%`, true],
+  ['Reach', (w) => w.combo[0].range * w.reachMul, (v) => `${v.toFixed(1)}m`, (d) => `${d > 0 ? '+' : ''}${d.toFixed(1)}m`, true],
+  ['Cooldown', (w) => w.cd, (v) => `${v.toFixed(2)}s`, (d) => `${d > 0 ? '+' : ''}${d.toFixed(2)}s`, false],
+  ['Leech', (w) => w.leech || 0, (v) => bonusFrac(v), (d) => bonusFrac(d), true],
+];
+
+// Trinket effect labels, shared with armorSummary's own table.
+const TRINKET_LABEL = {
+  leech: 'Leech', ashFind: 'Ash found', luck: 'Luck', mpRegen: 'Mana regen', extract: 'Bind chance',
+};
+const trinketFmt = (key, v) => (key === 'mpRegen' ? `+${v.toFixed(1)}/s` : bonusFrac(v));
+
+// Rank pill classes already exist in styles.css (.rank-E .. .rank-SOVEREIGN),
+// so the panel's rank badge is the same colour as the gate the player is
+// allowed into. Reusing them is what keeps two screens from disagreeing.
+const CSS = `
+/* .screen is z-index 20 and #cityUi is 40, so without this the district
+   banner and the live OPEN button render ON TOP of the panel and eat taps —
+   the same fix #shop needed, for the same reason. */
+#inv { z-index: 60; }
+body.gb-inv #cityUi { display: none !important; }
+/* The HUD sits BELOW #inv (z-index 10) and is pointer-events:none, so it
+   never ate taps — but its health orb / joystick / minimap now have a
+   genuine chance to show through the panel's new transparent centre. Hiding
+   it here is the same call #cityUi already gets: this panel's job is to show
+   the REAL character, not whatever chrome happened to be drawn behind it. */
+body.gb-inv #hud { display: none !important; }
+
+/* THE PORTRAIT WINDOW. This is the whole reason the panel changed shape: the
+   old .screen.overlay backdrop (rgba(3,4,10,.86) + a 10px blur) and the
+   shared .panel's own opaque background together made it IMPOSSIBLE for
+   anything behind #inv to show through, no matter what the live scene was
+   doing. A transparent CHILD does not punch a hole in an opaque PARENT's own
+   paint — so the parent's paint has to go. Every piece of chrome below
+   (rails, the header bar, the ticker, the stage buttons) carries its OWN
+   background instead, exactly like the mockup's individual boxes; the
+   negative space between them — the stage centre most of all — is where the
+   already-rendering player (see game.enterInventoryView) shows through.
+   Sub-sheets (compare/sets/stats) are the deliberate exception: they cover
+   the stage with a real backdrop because browsing a list is not the moment
+   to also be parsing a character behind it. */
+#inv.screen.overlay { background: rgba(3, 4, 10, .28); backdrop-filter: none; }
+#inv .panel.wide { background: transparent; border: none; box-shadow: none; padding: 8px 10px; gap: 6px; }
+
+#inv .headbar {
+  display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+  border: 1px solid rgba(124,92,255,.35); border-radius: 8px;
+  background: rgba(12,14,28,.92);
+}
+#inv .headbar h2 { font-size: 14px; letter-spacing: .2em; flex: 1; text-align: left; margin: 0; }
+#inv .headbar .btn { width: auto; padding: 7px 14px; font-size: 11px; min-height: 36px; }
+
+#inv .inv-wallet {
+  display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  border: 1px solid rgba(124,92,255,.35); border-radius: 8px;
+  padding: 5px 12px; font-size: 11px; letter-spacing: .1em;
+  background: rgba(12,14,28,.85);
+}
+#inv .inv-wallet b { color: var(--ink); }
+#inv .inv-wallet .ash b { color: var(--gold); }
+#inv .inv-wallet span { color: var(--dim); }
+
+/* THE STAGE: left rail | centre character window | right rail. flex:1 so it
+   claims every pixel the header/wallet/ticker do not need — a landscape
+   phone has ~230-260 px to spend here and that is the whole budget. */
+#inv .stage { display: flex; gap: 6px; flex: 1 1 auto; min-height: 0; }
+#inv .rail { width: 132px; flex: 0 0 132px; display: flex; flex-direction: column; gap: 5px; }
+#inv .rail .slot {
+  flex: 1 1 0; min-height: 44px; display: flex; align-items: center; gap: 7px;
+  padding: 4px 7px; text-align: left; cursor: pointer; border-radius: 6px;
+  background: rgba(12,14,28,.92); border: 1px solid rgba(124,92,255,.35);
+  color: var(--dim); font: inherit;
+}
+#inv .rail .slot.sel { border-color: var(--accent); box-shadow: 0 0 12px rgba(124,92,255,.4); }
+#inv .rail .slot.locked { opacity: .55; }
+#inv .rail .slot i { width: 26px; height: 26px; flex: none; border-radius: 5px; border: 1px solid rgba(180,190,220,.3); }
+#inv .rail .slot .meta { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+#inv .rail .slot .code {
+  font-size: 7.5px; letter-spacing: .16em; color: var(--dim); font-weight: 700;
+}
+#inv .rail .slot b {
+  font-size: 10.5px; letter-spacing: .04em; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; max-width: 100%; font-weight: 600;
+}
+#inv .rail .slot small { font-size: 8px; letter-spacing: .1em; color: var(--dim); }
+/* No leg icon exists in the 108-key atlas, so a legs piece reuses its set's
+   chest icon DESATURATED — legible as "same set, different piece" instead of
+   mistakable for the chest itself. Flagged in RPG_SPEC openQuestions. */
+#inv .desat { filter: saturate(.35) brightness(.9); }
+
+/* THE CHARACTER WINDOW. No background of its own beyond a faint vignette —
+   see the CSS block comment above for why: this is the one region of the
+   panel deliberately left for the live game to show through. */
+#inv .stageCenter {
+  flex: 1 1 0; min-width: 0; position: relative;
+  background: radial-gradient(60% 70% at 50% 42%, rgba(124,92,255,.10), rgba(5,6,13,0) 70%);
+  border: 1px solid rgba(124,92,255,.18); border-radius: 8px;
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+}
+#inv .idBox {
+  position: absolute; top: 8px; display: flex; flex-direction: column; gap: 2px;
+  /* A live scene behind the text is not a controlled backdrop — the strong
+     shadow is what keeps DIRECTION/CLASS legible over whatever the player is
+     standing in front of, plaza or dungeon, without boxing the text in and
+     covering more of the character than the label needs to. */
+  text-shadow: 0 1px 3px rgba(0,0,0,.9), 0 0 10px rgba(0,0,0,.75);
+}
+#inv .idBox.left { left: 9px; align-items: flex-start; }
+#inv .idBox.right { right: 9px; align-items: flex-end; text-align: right; }
+#inv .idBox .lbl { font-size: 7.5px; letter-spacing: .2em; color: #c7cbe0; }
+#inv .idBox .dir { font-size: 13px; font-weight: 800; letter-spacing: .1em; color: var(--accent2); }
+#inv .idBox .cls { font-size: 12px; font-weight: 800; letter-spacing: .08em; color: var(--ink); }
+/* Benefit and drawback at the SAME size, forever — a class whose downside the
+   player did not read is a class they will blame the game for. */
+#inv .idBox .benefit, #inv .idBox .drawback { font-size: 9px; font-weight: 700; letter-spacing: .04em; max-width: 40vw; }
+#inv .idBox .benefit { color: var(--accent2); }
+#inv .idBox .drawback { color: var(--danger); }
+
+#inv .stageActions { display: flex; gap: 7px; margin-bottom: 8px; flex-wrap: wrap; justify-content: center; }
+#inv .stageActions .btn {
+  width: auto; padding: 8px 16px; font-size: 11px; letter-spacing: .16em; min-height: 40px;
+  background: rgba(124,92,255,.22); border-color: var(--accent);
+}
+/* The stance toggle reuses .stageActions' layout but needs its OFF state to
+   read as off — .btn.ghost alone loses that fight on specificity (both rules
+   are .stageActions .btn / .btn.ghost at equal specificity, and this
+   stylesheet is appended after styles.css, so it would otherwise win the tie
+   for every button regardless of ghost/on). Spelled out here so the toggle's
+   three buttons are visually distinguishable, not just DOM-distinguishable. */
+#inv .stanceGroup .btn.ghost { background: transparent; border-color: rgba(255,255,255,.14); color: var(--dim); }
+#inv .stanceGroup .btn.on { background: rgba(124,92,255,.32); border-color: var(--accent); color: var(--ink); font-weight: 800; }
+
+/* THE BOTTOM TICKER: ~8 key stats always visible, plus the two sheet buttons.
+   Its own opaque bar for the same reason every other piece of chrome has one. */
+#inv .ticker {
+  flex: none; display: flex; align-items: stretch;
+  border: 1px solid rgba(124,92,255,.35); border-radius: 8px; overflow: hidden;
+  background: rgba(12,14,28,.92);
+}
+#inv .ticker .cell {
+  flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 1px; padding: 5px 3px; border-right: 1px solid rgba(124,92,255,.15);
+}
+#inv .ticker .cell .lbl { font-size: 7px; letter-spacing: .1em; color: var(--dim); white-space: nowrap; }
+#inv .ticker .cell .val { font-size: 12px; font-weight: 800; letter-spacing: .02em; white-space: nowrap; color: var(--ink); }
+#inv .ticker button {
+  flex: none; padding: 5px 10px; cursor: pointer; border: 0; border-left: 1px solid rgba(124,92,255,.35);
+  background: rgba(124,92,255,.16); color: var(--ink); font: inherit; font-size: 9.5px;
+  font-weight: 800; letter-spacing: .1em; min-height: 44px;
+}
+#inv .ticker button:active { background: rgba(124,92,255,.3); }
+
+/* THE OVERLAY SHEETS: compare / sets / stats. Unlike the stage, these DO want
+   a real backdrop — a delta strip or a five-set grid is not the moment to
+   also be parsing a live character behind it. */
+#inv .overlay {
+  position: absolute; inset: 6px; z-index: 2; display: flex; flex-direction: column;
+  background: rgba(5,6,13,.95); border: 1px solid rgba(124,92,255,.55);
+  border-radius: 10px; box-shadow: 0 0 40px rgba(0,0,0,.5);
+}
+#inv .overlay.hidden { display: none; }
+#inv .overlay .ohead {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  border-bottom: 1px solid rgba(124,92,255,.3); flex: none;
+}
+#inv .overlay .ohead b { flex: 1; font-size: 12px; letter-spacing: .2em; color: var(--accent2); }
+#inv .overlay .ohead .btn { width: auto; padding: 7px 14px; font-size: 10.5px; min-height: 36px; }
+/* No overflow of its own — see _renderOverlay's comment. A single
+   .scrollWrap/.scrollCol (built by _makeScrollBox) fills this and owns the
+   actual scrolling + the panel's own rail; a second native overflow here
+   would just absorb the growth and leave that rail permanently unused. */
+#inv .overlay .obody { flex: 1 1 auto; min-height: 0; padding: 9px 12px; display: flex; }
+
+/* The compare row: EQUIPPED | CANDIDATE | DELTAS | EQUIP. */
+#inv .cmpRow { display: flex; gap: 7px; margin-bottom: 8px; flex-wrap: wrap; }
+#inv .cmpCard { flex: 1 1 150px; min-width: 0; padding: 7px 9px; border-radius: 6px; }
+#inv .cmpCard.eq { background: rgba(255,255,255,.03); border: 1px solid rgba(124,92,255,.3); }
+#inv .cmpCard.cand { background: rgba(34,211,238,.06); border: 1px solid rgba(34,211,238,.4); }
+#inv .cmpCard .lbl { font-size: 7.5px; letter-spacing: .18em; color: var(--dim); }
+#inv .cmpCard .nm { font-size: 12.5px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#inv .cmpCard .ln { font-size: 9.5px; color: var(--dim); letter-spacing: .04em; }
+#inv .deltas { flex: 1 1 160px; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 7px 9px; background: rgba(255,255,255,.03); border: 1px solid rgba(124,92,255,.3); border-radius: 6px; }
+#inv .deltas .drow { display: flex; justify-content: space-between; gap: 6px; font-size: 10px; }
+#inv .deltas .drow span { color: var(--dim); }
+#inv .deltas .drow .cur { color: var(--dim); }
+#inv .deltas .drow .cand b { color: var(--ink); }
+#inv .deltas .drow .up { color: #54e08a; }
+#inv .deltas .drow .down { color: var(--danger); }
+#inv .deltas .hint { color: var(--dim); font-size: 10px; line-height: 1.6; }
+#inv .cmpEquip {
+  flex: 0 0 auto; align-self: stretch; width: auto; padding: 0 18px;
+  font-size: 11px; letter-spacing: .16em; min-height: 44px;
+}
+#inv .cmp-reason { color: var(--danger); font-size: 10.5px; letter-spacing: .08em; margin: -4px 0 8px; }
+#inv .unequip { margin-bottom: 8px; padding: 8px; font-size: 11px; width: 100%; min-height: 40px; }
+
+/* The candidate list: the SAME 44px-floor row shape the Exchange proved out. */
+#inv .candList .sect { color: var(--accent2); font-size: 10px; letter-spacing: .18em; margin: 4px 0 5px; }
+#inv .gate { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 9px; margin-bottom: 5px; min-height: 44px; text-align: left; cursor: pointer; border-radius: 6px; background: rgba(255,255,255,.02); border: 1px solid rgba(124,92,255,.2); color: var(--ink); font: inherit; }
+#inv .gate.sel { border-color: #22d3ee; background: rgba(34,211,238,.1); }
+#inv .gate.on { border-color: var(--accent); background: rgba(124,92,255,.14); }
+#inv .gate.locked { opacity: .55; }
+#inv .gate i { width: 32px; height: 32px; flex: 0 0 32px; border-radius: 7px; border: 2px solid transparent; }
+#inv .gate .code { font-size: 7px; letter-spacing: .1em; color: var(--dim); display: block; }
+#inv .gate .meta { min-width: 0; flex: 1 1 auto; }
+#inv .gate .meta b { display: block; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#inv .gate .meta small { color: var(--dim); font-size: 10px; letter-spacing: .04em; }
+#inv .gate .tagline { flex: 0 0 auto; font-size: 10px; font-weight: 800; letter-spacing: .06em; }
+
+/* LEGENDARY rows read as the top of the ladder at a glance: the gold border
+   the rarity tint already provides, plus a soft outer bloom. This is UI
+   chrome, not a scene material — the no-glow-on-living-characters law governs
+   meshes, and a DOM box-shadow is neither rim nor emissive. */
+#inv .gate.leg { border-color: rgba(255,194,75,.75); background: linear-gradient(90deg, rgba(255,194,75,.14), rgba(255,194,75,.04)); box-shadow: 0 0 10px rgba(255,194,75,.28); }
+#inv .cmpCard.leg { border-color: rgba(255,194,75,.75); box-shadow: 0 0 10px rgba(255,194,75,.28); }
+
+/* The legendary's named clause and the ascension recipe, both homed in the
+   weapon compare sheet. */
+#inv .rule { border: 1px solid rgba(255,194,75,.6); border-radius: 8px; padding: 8px 10px; background: rgba(255,194,75,.07); color: var(--ink); font-size: 11px; line-height: 1.55; margin-bottom: 8px; }
+#inv .rule b { color: #ffc24b; letter-spacing: .1em; display: block; margin-bottom: 2px; }
+#inv .asc { border: 1px solid var(--edge); border-radius: 8px; padding: 8px 10px; background: rgba(255,194,75,.05); margin-bottom: 8px; }
+#inv .asc .crow { display: flex; gap: 8px; align-items: baseline; font-size: 11px; padding: 2px 0; }
+#inv .asc .crow span { color: var(--dim); flex: 1 1 auto; letter-spacing: .05em; }
+#inv .asc .crow b { flex: 0 0 auto; }
+#inv .asc .crow.met b { color: #54e08a; }
+#inv .asc .crow.unmet b { color: var(--danger); }
+#inv .asc .btn { width: 100%; margin-top: 7px; padding: 8px; font-size: 11px; min-height: 40px; }
+#inv .asc .asc-reason { color: var(--danger); font-size: 10px; letter-spacing: .08em; margin-top: 5px; }
+
+#inv .note { border: 1px dashed rgba(255,255,255,.16); border-radius: 8px; padding: 9px 11px; color: var(--dim); font-size: 11px; line-height: 1.65; }
+#inv .note b { color: var(--ink); }
+
+/* The STATS sheet's readout, and its zoned DERIVED groups (OFFENSE / DEFENSE
+   / MOBILITY / RESOURCE) — everything the old tabbed STATS view held, nothing
+   cut, just no longer competing with GEAR for the same screen. */
+#inv .sect { color: var(--accent2); font-size: 10px; letter-spacing: .18em; margin: 10px 0 4px; }
+#inv .sect:first-child { margin-top: 0; }
+#inv .readout { font-size: 12.5px; color: var(--dim); line-height: 1.75; }
+#inv .readout b { color: var(--ink); }
+#inv .readout .row { display: flex; justify-content: space-between; gap: 10px; }
+#inv .readout .row small { color: var(--dim); font-size: 9.5px; letter-spacing: .04em; }
+#inv .zones { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 4px; }
+@media (max-width: 620px) { #inv .zones { grid-template-columns: 1fr; } }
+#inv .zone { border: 1px solid rgba(124,92,255,.25); border-radius: 7px; padding: 7px 9px; }
+#inv .zone .ztitle { font-size: 9.5px; font-weight: 800; letter-spacing: .16em; margin-bottom: 4px; }
+
+/* The SETS sheet: one card per set, ALL FIVE, not just the worn ones — this
+   sheet IS the "collect a set" reward loop, and a loop the player cannot see
+   the whole of is not a loop. */
+#inv .setGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+#inv .setCard { display: flex; flex-direction: column; gap: 5px; padding: 8px; background: rgba(255,255,255,.02); border: 1px solid rgba(124,92,255,.25); border-radius: 7px; }
+#inv .setCard .shead { display: flex; align-items: baseline; gap: 5px; }
+#inv .setCard .shead b { font-size: 11.5px; letter-spacing: .08em; flex: 1; }
+#inv .pips { display: flex; gap: 3px; }
+#inv .pips span { flex: 1; height: 4px; border-radius: 2px; background: rgba(255,255,255,.08); border: 1px solid rgba(124,92,255,.3); }
+#inv .pips span.on { background: var(--accent2); border-color: var(--accent2); }
+#inv .tier { display: flex; gap: 5px; padding: 4px 5px; border-radius: 4px; background: rgba(255,255,255,.02); border-left: 2px solid rgba(138,147,184,.5); opacity: .5; }
+#inv .tier.live { opacity: 1; border-left-color: var(--accent2); background: rgba(124,92,255,.1); }
+#inv .tier .n { font-size: 9px; font-weight: 800; color: var(--dim); flex: none; }
+#inv .tier.live .n { color: var(--accent2); }
+#inv .tier .t { font-size: 9px; line-height: 1.3; letter-spacing: .03em; color: var(--dim); }
+#inv .tier.live .t { color: var(--ink); }
+
+/* Panel-owned scroll rail, same reasoning that shipped it for the old STATS
+   tab: native scrollbars are overlay-or-nothing platform policy (measured on
+   this project's own harness Chromium — even a pure ::-webkit-scrollbar
+   customisation stayed an invisible overlay bar until mid-scroll), so any box
+   in this panel that can overflow draws its own. */
+#inv .scrollWrap { position: relative; min-height: 0; flex: 1 1 auto; display: flex; }
+#inv .scrollCol { flex: 1 1 auto; overflow-y: auto; scrollbar-width: none; padding-right: 12px; min-height: 0; }
+#inv .scrollCol::-webkit-scrollbar { display: none; width: 0; }
+#inv .rail2 { position: absolute; right: 0; top: 2px; bottom: 2px; width: 6px; border-radius: 3px; background: rgba(255,255,255,.08); pointer-events: none; }
+#inv .rail2 .thumb { position: absolute; left: 0; right: 0; border-radius: 3px; background: rgba(124,92,255,.65); min-height: 24px; }
+#inv .scrollWrap.no-scroll .rail2 { display: none; }
+
+/* Desktop Chrome and portrait have the room to breathe: the rails widen and
+   the ticker cells get more air. */
+@media (min-width: 700px) and (min-height: 620px) {
+  #inv .rail { width: 168px; flex-basis: 168px; }
+  #inv .ticker .cell { padding: 8px 5px; }
+  #inv .ticker .cell .val { font-size: 14px; }
+}
+
+/* A landscape phone is the tightest case in the game: ~412 px tall with a
+   notch. Every row reclaimed here is a row the sheet can spend on the stage
+   instead, so the chrome gives up its height first. */
+@media (orientation: landscape) and (max-height: 520px) {
+  #inv .panel { max-height: 96vh; }
+  #inv .headbar { padding: 4px 8px; }
+  #inv .headbar h2 { font-size: 12.5px; }
+  #inv .inv-wallet { padding: 3px 10px; font-size: 10px; }
+  #inv .rail { width: 108px; flex-basis: 108px; }
+  #inv .rail .slot b { font-size: 9.5px; }
+  #inv .stageActions .btn { padding: 6px 12px; font-size: 10px; min-height: 36px; }
+}
+`;
+
+let _styleEl = null;
+function ensureStyle() {
+  if (_styleEl && _styleEl.isConnected) return;
+  _styleEl = document.createElement('style');
+  _styleEl.id = 'invUiStyle';
+  _styleEl.textContent = CSS;
+  document.head.appendChild(_styleEl);
+}
+
 export class InventoryUI {
   /**
    * @param {{game:object, audio?:object, root?:HTMLElement}} opts
@@ -417,11 +551,19 @@ export class InventoryUI {
     this.game = game || null;
     this.audio = audio || game?.audio || null;
     this._open = false;
+    // The rail slot currently "focused" — the OPEN STASH button and every
+    // rail tap both funnel through this, defaulting to the weapon so a bare
+    // OPEN STASH tap on a fresh open has something sensible to show.
     this._slot = 'weapon';
-    this._tab = 'gear';
-    // Index into game.armorStash of the candidate whose compare strip is up,
-    // or -1 for none. Cleared by every slot/tab change — a strip comparing a
-    // helmet must not survive into the chest slot's list.
+    // null | 'compare' | 'sets' | 'stats'. Only one sheet is ever up; opening
+    // one always replaces whichever was showing, matching the rest of the
+    // panel's "one overlay at a time" rule.
+    this._sheet = null;
+    // Index into the slot's own candidate source (g.stash for weapons,
+    // g.armorStash for armour/trinket) of the candidate under review inside
+    // the compare sheet, or -1 for none. Cleared on every slot change and
+    // every sheet close — a delta strip comparing a helmet must not survive
+    // into the chest slot.
     this._cmp = -1;
     // Set on open() and honoured on close(): opening the sheet inside a gate
     // pauses the sim, opening it in the city does not. The asymmetry is
@@ -438,12 +580,24 @@ export class InventoryUI {
     // The stance-label poll (see open()). Kept on the instance so close() can
     // stop it; null while the sheet is closed.
     this._stancePoll = null;
+    // Every scrollbox this render() built (see _makeScrollBox), refreshed via
+    // rAF once layout has settled — the STATS sheet, the SETS sheet and the
+    // compare sheet's candidate list each get their own.
+    this._scrollBoxes = [];
 
     const screen = el('div', 'screen overlay hidden');
     screen.id = 'inv';
 
     const panel = el('div', 'panel wide');
-    panel.appendChild(el('h2', null, 'THE HUNTER'));
+
+    const headbar = el('div', 'headbar');
+    headbar.appendChild(el('h2', null, 'THE HUNTER'));
+    const close = el('button', 'btn ghost', 'CLOSE');
+    close.id = 'invClose';
+    close.type = 'button';
+    close.addEventListener('click', () => { this.audio?.ui?.(); this.close(); });
+    headbar.appendChild(close);
+    panel.appendChild(headbar);
 
     const wallet = el('div', 'inv-wallet');
     const lv = el('span', null, 'LV ');
@@ -461,61 +615,84 @@ export class InventoryUI {
     wallet.append(lv, rk, xp, ash);
     panel.appendChild(wallet);
 
-    const cols = el('div', 'cols');
-    this.slotsEl = el('div', 'slots');
-    this.slotsEl.id = 'invSlots';
-    cols.appendChild(this.slotsEl);
+    // -------------------------------------------------------------- stage
+    const stage = el('div', 'stage');
+    this.railLeftEl = el('div', 'rail');
+    this.railLeftEl.id = 'invRailLeft';
+    stage.appendChild(this.railLeftEl);
 
-    const right = el('div', 'right');
-    this.tabsEl = el('div', 'tabs');
-    for (const [key, label] of [['gear', 'GEAR'], ['stats', 'STATS'], ['sets', 'SETS']]) {
-      const b = el('button', null, label);
-      b.type = 'button';
-      b.dataset.tab = key;
-      b.addEventListener('click', () => { this.audio?.ui?.(); this._tab = key; this._cmp = -1; this.render(); });
-      this.tabsEl.appendChild(b);
-    }
-    right.appendChild(this.tabsEl);
+    const stageCenter = el('div', 'stageCenter');
+    stageCenter.id = 'invStageCenter';
+    // The REAL character shows through THIS element — see the CSS comment
+    // above. Nothing is ever drawn into it; it is a deliberately empty window
+    // onto the live scene, positioned by game.enterInventoryView's camera
+    // framing rather than by any DOM content of its own.
+    const idL = el('div', 'idBox left');
+    this.dirLabelEl = el('div', 'dir', 'UNSWORN');
+    idL.append(el('div', 'lbl', 'DIRECTION'), this.dirLabelEl);
+    const idR = el('div', 'idBox right');
+    this.classLabelEl = el('div', 'cls', '—');
+    this.benefitEl = el('div', 'benefit', '');
+    this.drawbackEl = el('div', 'drawback', '');
+    idR.append(this.classLabelEl, this.benefitEl, this.drawbackEl);
+    stageCenter.append(idL, idR);
 
-    // The scroll box and its "there is more" affordance. Kept as real elements
-    // rather than a CSS-only shadow because the hint has to know when it has
-    // reached the end, and that is a scroll position, not a style.
-    this.colWrap = el('div', 'colwrap');
-    this.colEl = el('div', 'col');
-    this.colEl.id = 'invCol';
-    this.bodyEl = el('div', null);
-    this.bodyEl.id = 'invBody';
-    this.colEl.appendChild(this.bodyEl);
-    this.colWrap.appendChild(this.colEl);
-    this.moreHint = el('div', 'morehint', 'MORE BELOW  ▼');
-    this.colWrap.appendChild(this.moreHint);
-    // The panel-owned scrollbar (see the .rail CSS note): native bars are
-    // overlay-or-nothing platform policy, so the sheet draws its own.
-    this.railEl = el('div', 'rail');
-    this.thumbEl = el('div', 'thumb');
-    this.railEl.appendChild(this.thumbEl);
-    this.colWrap.appendChild(this.railEl);
-    this.colEl.addEventListener('scroll', () => this._updateScrollHint(), { passive: true });
-    right.appendChild(this.colWrap);
-    cols.appendChild(right);
-    panel.appendChild(cols);
-
-    const foot = el('div', 'foot');
+    const actions = el('div', 'stageActions');
     // The plaza show-off control, in the owner's own words: "the sword can be
     // visible or placed in the inventory". Long-pressing attack and desktop's
-    // X key do the same thing; this is the discoverable one.
+    // X key do the same thing; this is the discoverable one. Homed on the
+    // stage now, next to the character it affects, per the port brief.
     this.stanceBtn = el('button', 'btn', 'SHEATHE');
     this.stanceBtn.id = 'invStance';
     this.stanceBtn.type = 'button';
     this.stanceBtn.addEventListener('click', () => this._toggleStance());
-    foot.appendChild(this.stanceBtn);
+    const openStash = el('button', 'btn', 'OPEN STASH');
+    openStash.id = 'invOpenStash';
+    openStash.type = 'button';
+    openStash.addEventListener('click', () => {
+      this.audio?.ui?.();
+      this._sheet = 'compare';
+      this._cmp = -1;
+      this.render();
+    });
+    actions.append(this.stanceBtn, openStash);
+    stageCenter.appendChild(actions);
+    stage.appendChild(stageCenter);
 
-    const close = el('button', 'btn ghost', 'CLOSE');
-    close.id = 'invClose';
-    close.type = 'button';
-    close.addEventListener('click', () => { this.audio?.ui?.(); this.close(); });
-    foot.appendChild(close);
-    panel.appendChild(foot);
+    this.railRightEl = el('div', 'rail');
+    this.railRightEl.id = 'invRailRight';
+    stage.appendChild(this.railRightEl);
+    panel.appendChild(stage);
+
+    // -------------------------------------------------------------- ticker
+    this.tickerEl = el('div', 'ticker');
+    this.tickerEl.id = 'invTicker';
+    panel.appendChild(this.tickerEl);
+
+    // -------------------------------------------------------------- overlay
+    // One shared shell for all three sheets (compare / sets / stats) — the
+    // mockup's own showOverlay/showSetsSheet are mutually exclusive, so one
+    // container that swaps its body is the same behaviour with one fewer DOM
+    // subtree to keep in sync.
+    this.overlayEl = el('div', 'overlay hidden');
+    this.overlayEl.id = 'invOverlay';
+    const ohead = el('div', 'ohead');
+    this.overlayTitleEl = el('b', null, '');
+    this.overlayTitleEl.id = 'invOverlayTitle';
+    const oclose = el('button', 'btn ghost', 'CLOSE');
+    oclose.id = 'invOverlayClose';
+    oclose.type = 'button';
+    oclose.addEventListener('click', () => {
+      this.audio?.ui?.();
+      this._sheet = null;
+      this._cmp = -1;
+      this.render();
+    });
+    ohead.append(this.overlayTitleEl, oclose);
+    this.overlayBodyEl = el('div', 'obody');
+    this.overlayBodyEl.id = 'invOverlayBody';
+    this.overlayEl.append(ohead, this.overlayBodyEl);
+    panel.appendChild(this.overlayEl);
 
     screen.appendChild(panel);
     root.appendChild(screen);
@@ -526,7 +703,7 @@ export class InventoryUI {
 
   open() {
     if (!this.game) return false;
-    this._slot = 'weapon';
+    this._sheet = null;
     this._cmp = -1;
     this.render();
     this.root.classList.remove('hidden');
@@ -538,6 +715,10 @@ export class InventoryUI {
       this.game.pause(true);
       this._pausedByUs = true;
     }
+    // Point the ONE live camera at a still portrait of the player — see the
+    // header comment and game.js's enterInventoryView for why this is the
+    // whole character-preview mechanism, not a placeholder for one.
+    this.game.enterInventoryView?.();
     // THE STALE-LABEL FIX (shipped 3-A bug). In the city the sim keeps running
     // under the sheet, so the auto-stow policy can sheathe the sword while the
     // button still reads SHEATHE — and the old handler then toggled off the
@@ -555,6 +736,9 @@ export class InventoryUI {
     document.body.classList.remove('gb-inv');
     this._open = false;
     if (this._stancePoll) { clearInterval(this._stancePoll); this._stancePoll = null; }
+    // Hand the camera back to whatever mode owns it — see
+    // game.exitInventoryView for why there is nothing else to restore.
+    this.game?.exitInventoryView?.();
     if (this._pausedByUs) {
       this._pausedByUs = false;
       this.game?.pause?.(false);
@@ -580,48 +764,46 @@ export class InventoryUI {
     this.xpValue.textContent = `${Math.max(0, need - (save.xp || 0))} XP`;
     this.ashValue.textContent = String(Math.floor(save.ash || 0));
 
-    for (const b of this.tabsEl.children) b.classList.toggle('on', b.dataset.tab === this._tab);
+    this._scrollBoxes = [];
     this._renderSlots();
     this._renderStanceBtn();
-
-    this.bodyEl.textContent = '';
-    if (this._tab === 'stats') this._renderStats();
-    else if (this._tab === 'sets') this._renderSets();
-    else this._renderGear();
-    // Layout has to settle before scrollHeight means anything, and render() is
-    // called while the panel is still hidden on open().
-    requestAnimationFrame(() => this._updateScrollHint());
+    this._renderIdentity();
+    this._renderTicker();
+    this._renderOverlay();
+    // Layout has to settle before scrollHeight means anything, and render()
+    // can be called while the panel is still hidden on open().
+    requestAnimationFrame(() => this._updateScrollHints());
   }
 
-  /** Two side-by-side panes inside the scroll box; CSS stacks them when narrow. */
-  _panes() {
-    const wrap = el('div', 'body2');
-    const a = el('div', 'pane');
-    const b = el('div', 'pane');
-    wrap.append(a, b);
-    this.bodyEl.appendChild(wrap);
-    return [a, b];
+  /** A scrollable box with the panel's own rail — see the CSS comment on
+   *  .scrollWrap. Returns the element to append rows into; the wrap/rail pair
+   *  is tracked on this._scrollBoxes so render() can refresh every box's hint
+   *  in one pass regardless of which sheet is open. */
+  _makeScrollBox(parent) {
+    const wrap = el('div', 'scrollWrap');
+    const col = el('div', 'scrollCol');
+    wrap.appendChild(col);
+    const rail = el('div', 'rail2');
+    const thumb = el('div', 'thumb');
+    rail.appendChild(thumb);
+    wrap.appendChild(rail);
+    col.addEventListener('scroll', () => this._updateScrollHints(), { passive: true });
+    parent.appendChild(wrap);
+    this._scrollBoxes.push({ wrap, col, rail, thumb });
+    return col;
   }
 
-  _updateScrollHint() {
-    const c = this.colEl;
-    if (!c) return;
-    const overflow = c.scrollHeight - c.clientHeight;
-    this.colWrap.classList.toggle('no-scroll', overflow <= 4);
-    // 4 px of slack: sub-pixel layout means scrollTop never exactly equals the
-    // maximum, and a hint that never goes away is a hint players learn to
-    // ignore.
-    this.colWrap.classList.toggle('at-end', c.scrollTop >= overflow - 4);
-    // Position the panel-owned thumb. Proportional, floored at the CSS
-    // min-height (24 px) so a long sheet still leaves something grabbable to
-    // the eye; the travel maths uses the same floored height so the thumb
-    // bottoms out exactly when the content does.
-    if (overflow > 4 && this.railEl) {
-      const railH = this.railEl.clientHeight;
-      const thumbH = Math.max(24, (c.clientHeight / c.scrollHeight) * railH);
-      const y = (c.scrollTop / overflow) * (railH - thumbH);
-      this.thumbEl.style.height = `${Math.round(thumbH)}px`;
-      this.thumbEl.style.transform = `translateY(${Math.round(y)}px)`;
+  _updateScrollHints() {
+    for (const { wrap, col, rail, thumb } of this._scrollBoxes) {
+      const overflow = col.scrollHeight - col.clientHeight;
+      wrap.classList.toggle('no-scroll', overflow <= 4);
+      if (overflow > 4) {
+        const railH = rail.clientHeight;
+        const thumbH = Math.max(24, (col.clientHeight / col.scrollHeight) * railH);
+        const y = (col.scrollTop / overflow) * (railH - thumbH);
+        thumb.style.height = `${Math.round(thumbH)}px`;
+        thumb.style.transform = `translateY(${Math.round(y)}px)`;
+      }
     }
   }
 
@@ -636,9 +818,11 @@ export class InventoryUI {
 
   _renderSlots() {
     const g = this.game;
-    this.slotsEl.textContent = '';
+    this.railLeftEl.textContent = '';
+    this.railRightEl.textContent = '';
     for (const id of EQUIP_SLOTS) {
       const meta = SLOTS[id];
+      const target = LEFT_SLOTS.includes(id) ? this.railLeftEl : this.railRightEl;
       const btn = el('button', 'slot');
       btn.type = 'button';
       btn.dataset.slot = id;
@@ -650,21 +834,30 @@ export class InventoryUI {
       // iconStyle already renders a neutral grey square for an unknown key, so
       // an EMPTY slot needs no placeholder markup of its own. An empty slot
       // still draws its TYPE icon, faded: eight identical grey squares tell the
-      // player nothing about where a helmet goes, and the 9 px label under a
-      // 44 px cell is not a legible answer on a phone.
+      // player nothing about where a helmet goes.
       const iconKey = held ? (id === 'weapon' ? weaponIcon(held) : held.base.icon) : meta.icon;
-      box.setAttribute('style', iconStyle(iconKey, 44));
+      box.setAttribute('style', iconStyle(iconKey, 26));
       if (held) box.style.borderColor = hex(rarityColor(held.rarity));
       else box.style.opacity = '0.3';
       if (held && id === 'legs') box.classList.add('desat');
       btn.appendChild(box);
-      btn.appendChild(el('small', null, meta.name));
+
+      const metaEl = el('span', 'meta');
+      metaEl.appendChild(el('span', 'code', meta.code));
+      const nameEl = el('b', null, held ? held.name : meta.name);
+      if (held) nameEl.style.color = hex(rarityColor(held.rarity));
+      metaEl.appendChild(nameEl);
+      metaEl.appendChild(el('small', null, held ? meta.name : 'EMPTY'));
+      btn.appendChild(metaEl);
+
       btn.addEventListener('click', () => {
         this.audio?.ui?.();
-        this._slot = id; this._tab = 'gear'; this._cmp = -1;
+        this._slot = id;
+        this._sheet = 'compare';
+        this._cmp = -1;
         this.render();
       });
-      this.slotsEl.appendChild(btn);
+      target.appendChild(btn);
     }
   }
 
@@ -693,18 +886,113 @@ export class InventoryUI {
     this._renderStanceBtn();
   }
 
-  // ------------------------------------------------------------------- gear
-
-  _renderGear() {
-    const meta = SLOTS[this._slot];
-    if (meta.kind === 'w') return this._renderWeaponGear(meta);
-    if (!meta.live) return this._renderLockedGear(meta);
-    return this._renderArmorGear(meta);
+  /** DIRECTION top-left, CLASS + benefit/drawback top-right — the identity
+   *  overlay printed straight over the character window, exactly where the
+   *  V3 mockup put it. */
+  _renderIdentity() {
+    const save = this.game.save;
+    const dirKey = directionOf(save);
+    // Direction is DERIVED from spent points (never chosen in a menu), so the
+    // label simply names what the player has been doing. UNSWORN is a real,
+    // non-punished state.
+    this.dirLabelEl.textContent = dirKey === 'unsworn' ? 'UNSWORN' : DIRECTIONS[dirKey].name;
+    const cls = CLASSES[save.className];
+    if (cls) {
+      this.classLabelEl.textContent = cls.name;
+      this.benefitEl.textContent = `+ ${cls.benefitText}`;
+      this.drawbackEl.textContent = `− ${cls.drawbackText}`;
+    } else {
+      this.classLabelEl.textContent = (save.level || 1) >= 20 ? 'UNCLASSED' : `CLASS AT LV 20`;
+      this.benefitEl.textContent = '';
+      this.drawbackEl.textContent = '';
+    }
   }
 
-  _renderLockedGear(meta) {
-    const [body] = this._panes();
-    body.appendChild(el('div', 'sect', meta.name));
+  /** The bottom ticker: ~8 always-visible numbers, plus the two sheet
+   *  buttons. Every value goes through the hard-numbers helpers — this is
+   *  the panel's highest-traffic surface, so it is the one place the owner's
+   *  two named complaints (the "1.49" multiplier, the "114 ms" dodge window)
+   *  are guaranteed to be seen fixed. */
+  _renderTicker() {
+    const g = this.game;
+    const save = g.save;
+    const dBase = derive(save, g._armorBonus || null);
+    const d = applyLayers(save, dBase);
+    const totalDR = combinedDR(d.dr, d.armorDR);
+    const totalAp = ARMOR_SLOTS.reduce((sum, slot) => {
+      const inst = this._wornInstance(slot);
+      return sum + (inst ? inst.ap : 0);
+    }, 0);
+    const counts = setProgress(save.equipment);
+    let activeSets = 0;
+    for (const n of counts.values()) if (n >= 2) activeSets++;
+
+    this.tickerEl.textContent = '';
+    const cell = (label, val) => {
+      const c = el('div', 'cell');
+      c.append(el('div', 'lbl', label), el('div', 'val', val));
+      this.tickerEl.appendChild(c);
+    };
+    cell('ATK POWER', d.atk.toFixed(1));
+    cell('CRIT', pct(d.crit));
+    cell('CRIT DMG', bonusPct(d.critDmg));
+    cell('MAX HEALTH', String(d.maxHp));
+    cell('DMG RED.', fmtDR(totalDR));
+    cell('ARMOR', String(Math.round(totalAp)));
+    cell('MOVE SPD', d.speed.toFixed(2));
+    cell('DODGE', fmtDodge(d.dodgeWindow));
+
+    const statsBtn = el('button', null, 'STATS');
+    statsBtn.id = 'invStatsBtn';
+    statsBtn.type = 'button';
+    statsBtn.addEventListener('click', () => { this.audio?.ui?.(); this._sheet = 'stats'; this.render(); });
+    this.tickerEl.appendChild(statsBtn);
+
+    const setsBtn = el('button', null, `SETS ${activeSets} ACTIVE`);
+    setsBtn.id = 'invSetsBtn';
+    setsBtn.type = 'button';
+    setsBtn.addEventListener('click', () => { this.audio?.ui?.(); this._sheet = 'sets'; this.render(); });
+    this.tickerEl.appendChild(setsBtn);
+  }
+
+  // ---------------------------------------------------------------- overlay
+
+  _renderOverlay() {
+    const show = Boolean(this._sheet);
+    this.overlayEl.classList.toggle('hidden', !show);
+    if (!show) return;
+    this.overlayBodyEl.textContent = '';
+    // ONE scrollbox for the whole sheet body — see the CSS comment on .obody.
+    // .obody used to carry its OWN native overflow-y:auto while every sheet
+    // renderer ALSO nested a _makeScrollBox candidate list inside it; the
+    // outer native scroll absorbed all the growth, so the inner box never
+    // overflowed and the panel-owned rail (the whole point of _makeScrollBox
+    // — see its own comment) never appeared. One scrollbox, built here,
+    // spanning the entire sheet, is both simpler and the box that actually
+    // gets used.
+    const body = this._makeScrollBox(this.overlayBodyEl);
+    if (this._sheet === 'sets') {
+      this.overlayTitleEl.textContent = 'ARMOR SETS';
+      this._renderSetsSheet(body);
+    } else if (this._sheet === 'stats') {
+      this.overlayTitleEl.textContent = 'THE FULL SHEET';
+      this._renderStatsSheet(body);
+    } else {
+      const meta = SLOTS[this._slot];
+      this.overlayTitleEl.textContent = `${meta.name} SLOT`;
+      this._renderCompareSheet(body, meta);
+    }
+  }
+
+  // ------------------------------------------------------------ compare
+
+  _renderCompareSheet(body, meta) {
+    if (meta.kind === 'w') return this._renderWeaponCompare(body, meta);
+    if (!meta.live) return this._renderLockedCompare(body, meta);
+    return this._renderArmorCompare(body, meta);
+  }
+
+  _renderLockedCompare(body, meta) {
     body.appendChild(el('div', 'note', meta.blurb));
     const note = el('div', 'note');
     note.appendChild(el('b', null, 'NOT YET FITTED.  '));
@@ -718,51 +1006,107 @@ export class InventoryUI {
     body.appendChild(note);
   }
 
-  _renderWeaponGear(meta) {
+  _renderWeaponCompare(body, meta) {
     const g = this.game;
-    // Left pane: what is fitted. Right pane: what you could fit instead. The
-    // whole point of the GEAR tab is swapping, so the list you swap FROM has to
-    // share the fold with the thing you are swapping OUT.
-    const [body, right] = this._panes();
-
-    body.appendChild(el('div', 'sect', meta.name));
-    body.appendChild(el('div', 'note', meta.blurb));
-
-    // --- equipped
     const held = g.weapon;
+    const stash = Array.isArray(g.stash) ? g.stash : [];
+    const cand = this._cmp >= 0 ? stash[this._cmp] : null;
+
+    this._renderCmpRow(body, {
+      curName: held?.name, curColor: held ? hex(rarityColor(held.rarity)) : null,
+      curLine: held ? `${held.arch.name}  ·  ${bonusPct(held.dmgMul)} power  ·  LV ${held.level}` : 'EMPTY',
+      curLegendary: held?.rarity === 'legendary',
+      candName: cand?.name, candColor: cand ? hex(rarityColor(cand.rarity)) : null,
+      candLine: cand ? `${cand.arch.name}  ·  ${bonusPct(cand.dmgMul)} power  ·  LV ${cand.level}` : null,
+      candLegendary: cand?.rarity === 'legendary',
+      deltaRows: this._weaponDeltaRows(held, cand),
+      onEquip: cand ? () => this._equip(this._cmp) : null,
+    });
+
+    // The full readout for the equipped weapon — weaponSummary() is owned by
+    // weapons.js, not this file, so its rows still carry the old "x1.NN"
+    // notation; deMultiply rewrites every one before it lands on screen, the
+    // same generic pass armorSummary's rows get below.
     if (held) {
-      body.appendChild(el('div', 'sect', 'EQUIPPED'));
-      body.appendChild(this._weaponRow(held, { equipped: true }));
-      const stats = el('div', 'readout');
-      for (const [k, v] of weaponSummary(held)) stats.appendChild(row(k, v));
-      const mesh = g.player?.mesh;
-      stats.appendChild(row('Carried', mesh && weaponStance(mesh) === 'sheathed' ? 'On the back' : 'In hand'));
-      body.appendChild(stats);
-      // The legendary's named clause — the ACTUAL prize (RPG_SPEC: the raw
-      // multiplier is deliberately small; the rule is what you grind for).
-      if (held.rule) {
-        const rl = el('div', 'rule');
-        rl.appendChild(el('b', null, held.rule.name));
-        rl.appendChild(document.createTextNode(held.rule.text));
-        body.appendChild(rl);
-      }
-      if (held.blurb) body.appendChild(el('div', 'note', held.blurb));
-      // The ascension entry (step 14): an EPIC in hand can climb the last
-      // rung right here. Recipe rows read have/need and go green as they are
-      // met; the refusal reason prints verbatim under a disabled button.
-      if (held.rarity === 'epic') this._renderAscension(body, held);
+      const ro = el('div', 'readout');
+      for (const [k, v] of weaponSummary(held)) ro.appendChild(row(k, deMultiply(v)));
+      body.appendChild(ro);
     }
 
-    // --- stash
-    const stash = Array.isArray(g.stash) ? g.stash : [];
-    right.appendChild(el('div', 'sect', `IN THE STASH  (${stash.length})`));
+    // The legendary's named clause and the ascension recipe — the ACTUAL
+    // prize (RPG_SPEC: the raw multiplier is deliberately small; the rule is
+    // what you grind for). Both key off the EQUIPPED weapon, not the
+    // candidate under review.
+    if (held?.rule) {
+      const rl = el('div', 'rule');
+      rl.appendChild(el('b', null, held.rule.name));
+      rl.appendChild(document.createTextNode(held.rule.text));
+      body.appendChild(rl);
+    }
+    if (held?.rarity === 'epic') this._renderAscension(body, held);
+
+    body.appendChild(el('div', 'sect candList', `IN THE STASH  (${stash.length})`));
     if (!stash.length) {
-      right.appendChild(el('div', 'note', 'Nothing spare. Gates drop weapons and the Exchange sells them.'));
+      body.appendChild(el('div', 'note', 'Nothing spare. Gates drop weapons and the Exchange sells them.'));
       return;
     }
-    for (let i = 0; i < stash.length; i++) {
-      right.appendChild(this._weaponRow(stash[i], { index: i }));
+    for (let i = 0; i < stash.length; i++) body.appendChild(this._weaponCandidateRow(stash[i], i, held));
+  }
+
+  /** Delta rows for the weapon compare strip, built off WEAPON_CMP_ROWS —
+   *  the armour CMP_ROWS's twin, with the one cooldown row flagged
+   *  lower-is-better so the strip's colour convention stays a single rule. */
+  _weaponDeltaRows(held, cand) {
+    if (!cand) return null;
+    const rows = [];
+    for (const [label, get, fmt, dfmt, higherBetter] of WEAPON_CMP_ROWS) {
+      const cur = held ? get(held) : 0;
+      const val = get(cand);
+      const delta = val - cur;
+      if (Math.abs(delta) < 1e-9) continue;
+      const good = higherBetter ? delta > 0 : delta < 0;
+      rows.push({ label, cur: fmt(cur), cand: fmt(val), delta: dfmt(delta), up: good });
     }
+    const overall = held ? cand.score - held.score : 1;
+    rows.unshift({
+      label: 'Overall', cur: held ? String(Math.round(held.score)) : '—', cand: String(Math.round(cand.score)),
+      delta: `${overall > 0 ? '+' : ''}${Math.round(overall)}`, up: overall > 0, bold: true,
+    });
+    return rows;
+  }
+
+  _weaponCandidateRow(w, index, held) {
+    const btn = el('button', 'gate');
+    btn.type = 'button';
+    if (this._cmp === index) btn.classList.add('sel');
+    if (w.rarity === 'legendary') btn.classList.add('leg');
+
+    const box = el('i');
+    box.setAttribute('style', iconStyle(weaponIcon(w), 32));
+    box.style.borderColor = hex(rarityColor(w.rarity));
+    btn.appendChild(box);
+
+    const metaEl = el('span', 'meta');
+    metaEl.appendChild(el('span', 'code', SLOTS.weapon.code));
+    const name = el('b', null, w.name);
+    name.style.color = hex(rarityColor(w.rarity));
+    metaEl.appendChild(name);
+    metaEl.appendChild(el('small', null, `${RARITIES[w.rarity]?.name || ''} ${w.arch.name}  ·  LV ${w.level}`));
+    btn.appendChild(metaEl);
+
+    // The one comparison that matters, spelled out rather than left to the
+    // player to work out from two power numbers: rollWeapon's `score` is the
+    // single comparable value.
+    const better = held ? w.score - held.score : 1;
+    const tag = el('span', 'tagline', better > 0 ? `+${Math.round(better)}` : `${Math.round(better)}`);
+    tag.style.color = better > 0 ? '#54e08a' : 'var(--danger)';
+    btn.appendChild(tag);
+
+    // Two-step, uniformly: tapping a candidate selects it for the compare
+    // strip above — it never equips on its own. EQUIP is the one commit
+    // button on the sheet.
+    btn.addEventListener('click', () => { this.audio?.ui?.(); this._cmp = index; this.render(); });
+    return btn;
   }
 
   /**
@@ -772,9 +1116,9 @@ export class InventoryUI {
    */
   _renderAscension(body, held) {
     const g = this.game;
-    body.appendChild(el('div', 'sect', 'ASCENSION'));
     const box = el('div', 'asc');
     box.id = 'invAscend';
+    box.appendChild(el('div', 'sect', 'ASCENSION'));
     for (const [label, have, need, met] of ascensionRecipe(g.save, held)) {
       const r = el('div', `crow ${met ? 'met' : 'unmet'}`);
       r.appendChild(el('span', null, label));
@@ -800,44 +1144,6 @@ export class InventoryUI {
     body.appendChild(box);
   }
 
-  _weaponRow(w, { equipped = false, index = -1 } = {}) {
-    const g = this.game;
-    const btn = el('button', 'gate');
-    btn.type = 'button';
-    if (equipped) btn.classList.add('on');
-    if (w.rarity === 'legendary') btn.classList.add('leg');
-
-    const box = el('i');
-    box.setAttribute('style', iconStyle(weaponIcon(w), 34));
-    box.style.borderStyle = 'solid';
-    box.style.borderWidth = '2px';
-    box.style.borderColor = hex(rarityColor(w.rarity));
-    btn.appendChild(box);
-
-    const meta = el('span', 'meta');
-    const name = el('b', null, w.name);
-    name.style.color = hex(rarityColor(w.rarity));
-    meta.appendChild(name);
-    meta.appendChild(el('small', null,
-      `${RARITIES[w.rarity]?.name || ''} ${w.arch.name}  ·  x${w.dmgMul.toFixed(2)} power  ·  LV ${w.level}`));
-    btn.appendChild(meta);
-
-    if (equipped) {
-      btn.appendChild(el('span', 'tagline', 'EQUIPPED'));
-      btn.disabled = true;
-    } else {
-      // The one comparison that matters, spelled out rather than left to the
-      // player to work out from two power numbers: rollWeapon's `score` is the
-      // single comparable value and _takeWeapon already auto-equips on it.
-      const better = g.weapon ? w.score - g.weapon.score : 1;
-      const tag = el('span', 'tagline', better > 0 ? `+${Math.round(better)}` : `${Math.round(better)}`);
-      tag.style.color = better > 0 ? '#54e08a' : 'var(--danger)';
-      btn.appendChild(tag);
-      btn.addEventListener('click', () => this._equip(index));
-    }
-    return btn;
-  }
-
   _equip(index) {
     const g = this.game;
     const w = g?.stash?.[index];
@@ -849,10 +1155,15 @@ export class InventoryUI {
     // at one slot and a 12-entry cap and is not harmless at eight and forty.
     g.equipFromStash(index);
     g.ui?.toast?.(`${w.name.toUpperCase()}  ·  EQUIPPED`);
+    // Close the sheet back to the paper doll — the payoff of an equip is
+    // SEEING the character change, and the character render lives on the
+    // stage, not behind this overlay.
+    this._sheet = null;
+    this._cmp = -1;
     this.render();
   }
 
-  // ----------------------------------------------------------------- armour
+  // ------------------------------------------------------------- armour
 
   /** Stash entries that fit `slot`, as { rec, inst, index } with `index` the
    *  position in game.armorStash (the equip API's coordinate system). */
@@ -879,27 +1190,38 @@ export class InventoryUI {
     return null;
   }
 
-  _renderArmorGear(meta) {
-    const [body, right] = this._panes();
+  _renderArmorCompare(body, meta) {
     const slot = this._slot;
-
-    body.appendChild(el('div', 'sect', meta.name));
-    body.appendChild(el('div', 'note', meta.blurb));
-
-    // --- equipped
     const worn = this._wornInstance(slot);
+    const candidates = this._armorCandidates(slot);
+    const picked = this._cmp >= 0 ? candidates.find((c) => c.index === this._cmp) : null;
+    const cand = picked?.inst || null;
+
+    this._renderCmpRow(body, {
+      curName: worn?.name, curColor: worn ? hex(rarityColor(worn.rarity)) : null,
+      curLine: worn ? armorSummary(worn).slice(1, 3).map(([, v]) => deMultiply(v)).join('  ·  ') : 'EMPTY',
+      curLegendary: worn?.rarity === 'legendary',
+      candName: cand?.name, candColor: cand ? hex(rarityColor(cand.rarity)) : null,
+      candLine: cand ? armorSummary(cand).slice(1, 3).map(([, v]) => deMultiply(v)).join('  ·  ') : null,
+      candLegendary: cand?.rarity === 'legendary',
+      deltaRows: this._armorDeltaRows(worn, cand),
+      onEquip: cand ? () => this._equipArmor(picked.index) : null,
+      blocked: cand ? this._equipBlock(cand.base) : null,
+    });
+
     if (worn) {
-      body.appendChild(el('div', 'sect', 'EQUIPPED'));
-      body.appendChild(this._armorRow(worn, { equipped: true }));
-      const stats = el('div', 'readout');
-      for (const [k, v] of armorSummary(worn)) stats.appendChild(row(k, v));
-      body.appendChild(stats);
+      // The full readout — every field armorSummary() reports, deMultiplied
+      // the same way the weapon compare's readout is, so a set piece with
+      // five secondary rolls does not collapse to the two-field curLine.
+      const ro = el('div', 'readout');
+      for (const [k, v] of armorSummary(worn)) ro.appendChild(row(k, deMultiply(v)));
+      body.appendChild(ro);
+      if (worn.blurb) body.appendChild(el('div', 'note', worn.blurb));
       const un = el('button', 'btn ghost unequip', 'UNEQUIP');
       un.id = 'invUnequip';
       un.type = 'button';
       un.addEventListener('click', () => this._unequipArmor(slot));
       body.appendChild(un);
-      if (worn.blurb) body.appendChild(el('div', 'note', worn.blurb));
     } else {
       const note = el('div', 'note');
       note.appendChild(el('b', null, 'NOTHING EQUIPPED.  '));
@@ -909,158 +1231,151 @@ export class InventoryUI {
       body.appendChild(note);
     }
 
-    // --- the compare strip, when a candidate is under consideration
-    const candidates = this._armorCandidates(slot);
-    const picked = this._cmp >= 0 ? candidates.find((c) => c.index === this._cmp) : null;
-    if (picked) {
-      this._renderCompare(right, worn, picked);
-      return;
-    }
-
-    // --- stash, filtered to this slot
-    right.appendChild(el('div', 'sect', `IN THE STASH  (${candidates.length})`));
+    body.appendChild(el('div', 'sect candList', `IN THE STASH  (${candidates.length})`));
     if (!candidates.length) {
-      right.appendChild(el('div', 'note', slot === 'trinket'
+      body.appendChild(el('div', 'note', slot === 'trinket'
         ? 'No spare trinkets. Gates are their only source.'
         : 'No spare pieces for this slot. Gates drop armour by rank.'));
       return;
     }
-    for (const c of candidates) {
-      right.appendChild(this._armorRow(c.inst, { index: c.index, worn }));
-    }
+    for (const c of candidates) body.appendChild(this._armorCandidateRow(c, worn));
   }
 
-  _armorRow(a, { equipped = false, index = -1, worn = null } = {}) {
-    const btn = el('button', 'gate');
-    btn.type = 'button';
-    if (equipped) btn.classList.add('on');
-    if (a.rarity === 'legendary') btn.classList.add('leg');
-
-    const box = el('i');
-    box.setAttribute('style', iconStyle(a.base.icon, 34));
-    box.style.borderStyle = 'solid';
-    box.style.borderWidth = '2px';
-    box.style.borderColor = hex(rarityColor(a.rarity));
-    if (a.slot === 'legs') box.classList.add('desat');
-    btn.appendChild(box);
-
-    const meta = el('span', 'meta');
-    const name = el('b', null, a.name);
-    name.style.color = hex(rarityColor(a.rarity));
-    meta.appendChild(name);
-    const setName = a.setId ? SETS[a.setId]?.name : null;
-    const blocked = equipped ? null : this._equipBlock(a.base);
-    meta.appendChild(el('small', null, blocked
-      // The Exchange's exact refusal wording, on the row itself, so a player
-      // knows WHY before ever opening the strip.
-      ? blocked
-      : `${a.rarityName} ${setName || 'Trinket'}  ·  LV ${a.level}`));
-    btn.appendChild(meta);
-
-    if (equipped) {
-      btn.appendChild(el('span', 'tagline', 'EQUIPPED'));
-      btn.disabled = true;
-    } else {
-      if (blocked) btn.classList.add('locked');
-      // Same single-comparable-number tag the weapon list carries; scores are
-      // comparable within a slot because rollArmor builds them from the same
-      // AP-first formula for every piece of a kind.
-      const better = worn ? a.score - worn.score : 1;
-      const tag = el('span', 'tagline', better > 0 ? `+${Math.round(better)}` : `${Math.round(better)}`);
-      tag.style.color = better > 0 ? '#54e08a' : 'var(--danger)';
-      btn.appendChild(tag);
-      // Tap opens the COMPARE STRIP — never equips directly. An armour swap
-      // changes combat numbers, and the numbers come first (the strip's EQUIP
-      // button is the commit).
-      btn.addEventListener('click', () => { this.audio?.ui?.(); this._cmp = index; this.render(); });
-    }
-    return btn;
-  }
-
-  /** Label / equipped / candidate(delta), then EQUIP + BACK. */
-  _renderCompare(pane, worn, picked) {
-    const a = picked.inst;
-    pane.appendChild(el('div', 'sect', 'COMPARE'));
-    const strip = el('div', 'cmp');
-    strip.id = 'invCompare';
-
-    // Name header, candidate coloured by rarity.
-    const head = el('div', 'crow');
-    const nm = el('b', 'cand', a.name);
-    nm.style.color = hex(rarityColor(a.rarity));
-    nm.style.textAlign = 'left';
-    head.appendChild(nm);
-    strip.appendChild(head);
-
-    const crow = (label, cur, cand, delta, deltaText) => {
-      const r = el('div', 'crow');
-      r.appendChild(el('span', null, label));
-      r.appendChild(el('span', 'cur', cur));
-      const c = el('b', 'cand');
-      c.appendChild(document.createTextNode(cand));
-      if (delta !== 0) {
-        // Never a bare number: "42 (+10)" reads, "42" does not (the spec's own
-        // phrasing). Green is the shipped uncommon green; worse is --danger.
-        const d = el('span', `delta ${delta > 0 ? 'up' : 'down'}`, `  (${deltaText})`);
-        c.appendChild(d);
-      }
-      r.appendChild(c);
-      strip.appendChild(r);
-    };
-
-    if (a.kind === 't') {
-      // Trinkets carry ONE effect each; when the two effects differ the strip
-      // shows both rows so the player sees what he gives up, not a fake delta
-      // between incommensurable numbers.
-      const keys = [...new Set([worn?.effect?.key, a.effect.key].filter(Boolean))];
+  /** Delta rows for the armour/trinket compare strip. Trinkets carry ONE
+   *  effect each; when the two effects differ both rows are shown so the
+   *  player sees what they give up, not a fake delta between incommensurable
+   *  numbers — the same rule the original compare strip enforced. */
+  _armorDeltaRows(worn, cand) {
+    if (!cand) return null;
+    const rows = [];
+    if (cand.kind === 't') {
+      const keys = [...new Set([worn?.effect?.key, cand.effect.key].filter(Boolean))];
       for (const key of keys) {
         const cur = worn?.effect?.key === key ? worn.effect.mag : 0;
-        const cand = a.effect.key === key ? a.effect.mag : 0;
-        const d = cand - cur;
-        const dText = key === 'mpRegen'
-          ? `${d >= 0 ? '+' : ''}${d.toFixed(1)}/s`
-          : `${d >= 0 ? '+' : ''}${(d * 100).toFixed(1)}%`;
-        crow(TRINKET_LABEL[key] || key,
-          cur ? trinketFmt(key, cur) : '—',
-          cand ? trinketFmt(key, cand) : '—',
-          // A delta between two DIFFERENT effects is not a number; only show
-          // the glyph when both rows measure the same thing.
-          keys.length === 1 ? d : 0,
-          dText);
+        const val = cand.effect.key === key ? cand.effect.mag : 0;
+        const d = val - cur;
+        const dText = key === 'mpRegen' ? `${d >= 0 ? '+' : ''}${d.toFixed(1)}/s` : bonusFrac(d);
+        rows.push({
+          label: TRINKET_LABEL[key] || key,
+          cur: cur ? trinketFmt(key, cur) : '—', cand: val ? trinketFmt(key, val) : '—',
+          delta: keys.length === 1 ? dText : '', up: d > 0,
+        });
       }
     } else {
       for (const [label, get, fmt, dfmt] of CMP_ROWS) {
         const cur = worn ? get(worn) : 0;
-        const cand = get(a);
-        if (!cur && !cand) continue;   // row means nothing to either piece
-        // Deltas under half a display unit round to a "(+0)" glyph that reads
-        // as noise; suppress the glyph, keep the row.
-        const delta = cand - cur;
-        crow(label, cur ? fmt(cur) : '—', cand ? fmt(cand) : '—',
-          Math.abs(delta) > 1e-9 ? delta : 0, dfmt(delta));
+        const val = get(cand);
+        if (!cur && !val) continue;
+        const delta = val - cur;
+        rows.push({
+          label, cur: cur ? fmt(cur) : '—', cand: val ? fmt(val) : '—',
+          delta: Math.abs(delta) > 1e-9 ? dfmt(delta) : '', up: delta > 0,
+        });
       }
       const wornSet = worn?.setId ? SETS[worn.setId]?.name : '—';
-      const candSet = a.setId ? SETS[a.setId]?.name : '—';
-      crow('Set', wornSet, candSet, 0, '');
+      const candSet = cand.setId ? SETS[cand.setId]?.name : '—';
+      rows.push({ label: 'Set', cur: wornSet, cand: candSet, delta: '', up: null });
     }
+    return rows;
+  }
 
+  _armorCandidateRow(c, worn) {
+    const a = c.inst;
+    const btn = el('button', 'gate');
+    btn.type = 'button';
+    if (this._cmp === c.index) btn.classList.add('sel');
+    if (a.rarity === 'legendary') btn.classList.add('leg');
+
+    const box = el('i');
+    box.setAttribute('style', iconStyle(a.base.icon, 32));
+    box.style.borderColor = hex(rarityColor(a.rarity));
+    if (a.slot === 'legs') box.classList.add('desat');
+    btn.appendChild(box);
+
+    const metaEl = el('span', 'meta');
+    metaEl.appendChild(el('span', 'code', SLOTS[a.slot]?.code || ''));
+    const name = el('b', null, a.name);
+    name.style.color = hex(rarityColor(a.rarity));
+    metaEl.appendChild(name);
+    const setName = a.setId ? SETS[a.setId]?.name : null;
     const blocked = this._equipBlock(a.base);
-    if (blocked) strip.appendChild(el('div', 'cmp-reason', blocked));
+    metaEl.appendChild(el('small', null, blocked
+      // The Exchange's exact refusal wording, on the row itself, so a player
+      // knows WHY before ever opening the strip.
+      ? blocked
+      : `${a.rarityName} ${setName || 'Trinket'}  ·  LV ${a.level}`));
+    btn.appendChild(metaEl);
+    if (blocked) btn.classList.add('locked');
 
-    const foot = el('div', 'cmp-foot');
-    const equip = el('button', 'btn primary', 'EQUIP');
+    // Same single-comparable-number tag the weapon list carries.
+    const better = worn ? a.score - worn.score : 1;
+    const tag = el('span', 'tagline', better > 0 ? `+${Math.round(better)}` : `${Math.round(better)}`);
+    tag.style.color = better > 0 ? '#54e08a' : 'var(--danger)';
+    btn.appendChild(tag);
+
+    btn.addEventListener('click', () => { this.audio?.ui?.(); this._cmp = c.index; this.render(); });
+    return btn;
+  }
+
+  /** The shared EQUIPPED | CANDIDATE | DELTAS | EQUIP row every compare sheet
+   *  (weapon, armour, trinket) is built from — the mockup's ctx object, wired
+   *  to real items instead of synthetic ones. */
+  _renderCmpRow(container, {
+    curName, curColor, curLine, curLegendary = false,
+    candName, candColor, candLine, candLegendary = false,
+    deltaRows, onEquip, blocked = null,
+  }) {
+    const rowEl = el('div', 'cmpRow');
+
+    // LEGENDARY reads as the top of the ladder here too — the same bloom
+    // .gate.leg gives a stash row, moved onto whichever card (equipped or
+    // candidate) actually holds the legendary. UI chrome, not a scene
+    // material; the no-glow-on-living-characters law governs meshes only.
+    const eq = el('div', `cmpCard eq${curLegendary ? ' leg' : ''}`);
+    eq.appendChild(el('div', 'lbl', 'EQUIPPED'));
+    const eqName = el('div', 'nm', curName || 'EMPTY');
+    if (curColor) eqName.style.color = curColor;
+    eq.appendChild(eqName);
+    eq.appendChild(el('div', 'ln', curLine || ''));
+    rowEl.appendChild(eq);
+
+    const cd = el('div', `cmpCard cand${candLegendary ? ' leg' : ''}`);
+    cd.appendChild(el('div', 'lbl', 'CANDIDATE'));
+    const cdName = el('div', 'nm', candName || 'NONE SELECTED');
+    if (candColor) cdName.style.color = candColor;
+    cd.appendChild(cdName);
+    cd.appendChild(el('div', 'ln', candLine || '—'));
+    rowEl.appendChild(cd);
+
+    const deltas = el('div', 'deltas');
+    deltas.id = 'invCompare';
+    if (deltaRows) {
+      for (const r of deltaRows) {
+        const dr = el('div', 'drow');
+        const lbl = el('span', null, r.label);
+        if (r.bold) lbl.style.color = 'var(--ink)';
+        dr.appendChild(lbl);
+        dr.appendChild(el('span', 'cur', r.cur));
+        const c = el('b', r.up === null ? '' : (r.up ? 'up' : 'down'), r.delta ? `${r.cand}  (${r.delta})` : r.cand);
+        const wrap = el('span', 'cand');
+        wrap.appendChild(c);
+        dr.appendChild(wrap);
+        deltas.appendChild(dr);
+      }
+    } else {
+      deltas.appendChild(el('div', 'hint', 'Pick a candidate below to compare.'));
+    }
+    rowEl.appendChild(deltas);
+
+    const equip = el('button', 'btn primary cmpEquip', onEquip ? 'EQUIP' : 'PICK ONE');
     equip.id = 'invEquipConfirm';
     equip.type = 'button';
-    equip.disabled = Boolean(blocked);
-    equip.addEventListener('click', () => this._equipArmor(picked.index));
-    foot.appendChild(equip);
-    const back = el('button', 'btn ghost', 'BACK');
-    back.id = 'invCompareBack';
-    back.type = 'button';
-    back.addEventListener('click', () => { this.audio?.ui?.(); this._cmp = -1; this.render(); });
-    foot.appendChild(back);
-    strip.appendChild(foot);
-    pane.appendChild(strip);
+    equip.disabled = !onEquip || Boolean(blocked);
+    if (onEquip) equip.addEventListener('click', onEquip);
+    rowEl.appendChild(equip);
+
+    container.appendChild(rowEl);
+    if (blocked) container.appendChild(el('div', 'cmp-reason', blocked));
   }
 
   /**
@@ -1092,6 +1407,8 @@ export class InventoryUI {
     this._refreshArmorLook();
     const inst = deserializeArmor(rec);
     g.ui?.toast?.(`${(inst?.name || base.name).toUpperCase()}  ·  EQUIPPED`);
+    // Close the sheet back to the paper doll — see _equip's twin comment.
+    this._sheet = null;
     this._cmp = -1;
     this.render();
     return true;
@@ -1116,6 +1433,10 @@ export class InventoryUI {
     g.refreshDerived();
     g._persistLoadout();
     this._refreshArmorLook();
+    // Close back to the paper doll — same call the equip paths make: the
+    // payoff of taking a piece off is seeing the silhouette lose it, and that
+    // silhouette lives on the stage, not behind this overlay.
+    this._sheet = null;
     this._cmp = -1;
     this.render();
     return true;
@@ -1123,7 +1444,10 @@ export class InventoryUI {
 
   /** Point the hunter's silhouette at the (just-changed) equipment and rebuild
    *  in place — the exact sequence game.setPlayerBody runs for an M/F flip.
-   *  rebuildHumanoid declines harmlessly on the procedural box-man. */
+   *  rebuildHumanoid declines harmlessly on the procedural box-man. This is
+   *  also the ENTIRE character-preview refresh: the panel's centre column
+   *  shows this same mesh live, so calling this is the whole "re-render the
+   *  preview" step — nothing else needs to know an equip happened. */
   _refreshArmorLook() {
     const g = this.game;
     setPlayerArmorLook(g.save.equipment);
@@ -1135,34 +1459,78 @@ export class InventoryUI {
     }
   }
 
-  // ------------------------------------------------------------------ stats
+  // -------------------------------------------------------------- sets sheet
 
-  _renderStats() {
+  /** One card per set — ALL FIVE, not just the worn ones: this sheet IS the
+   *  "collect a set" reward loop, and a loop the player cannot see the whole
+   *  of is not a loop (the spec's own words about legibility). Pips + tier
+   *  list, ported from the V3 mockup's SETS sheet structure. */
+  _renderSetsSheet(body) {
+    const g = this.game;
+    const counts = setProgress(g.save.equipment);
+    body.appendChild(el('div', 'note',
+      'Wearing 2 / 4 / 5 pieces of one set pays its bonuses. Partials are small '
+      + 'flat numbers; the full set is a rule. Offhand and trinket never count.'));
+    const grid = el('div', 'setGrid');
+    body.appendChild(grid);
+
+    const ordered = Object.values(SETS).sort((a, b) => a.tier - b.tier);
+    for (const set of ordered) {
+      const n = counts.get(set.id) || 0;
+      const card = el('div', 'setCard');
+      const head = el('div', 'shead');
+      const nm = el('b', null, set.name);
+      if (n > 0) nm.style.color = 'var(--accent2)';
+      head.appendChild(nm);
+      head.appendChild(el('span', null, `${n} / 5`));
+      card.appendChild(head);
+
+      const pips = el('div', 'pips');
+      for (let i = 1; i <= 5; i++) {
+        const p = el('span');
+        if (i <= n) p.classList.add('on');
+        pips.appendChild(p);
+      }
+      card.appendChild(pips);
+
+      for (const th of SET_THRESHOLDS) {
+        const b = set.bonuses[th];
+        if (!b) continue;
+        const live = n >= th;
+        const t = el('div', `tier${live ? ' live' : ''}`);
+        t.append(el('span', 'n', `${th}PC`), el('span', 't', b.text));
+        card.appendChild(t);
+      }
+      card.appendChild(el('div', 'note', set.flavour));
+      grid.appendChild(card);
+    }
+  }
+
+  // ------------------------------------------------------------- stats sheet
+
+  /** The full sheet: everything the old tabbed STATS view held, nothing cut —
+   *  IDENTITY, RESOURCES, the five spendable stats with mastery lines, the
+   *  DERIVED block now zoned OFFENSE/DEFENSE/MOBILITY/RESOURCE the way the
+   *  mockup grouped its own totals(), the armour/class/army breakdowns and
+   *  Sovereign's Will — just reachable from the STATS ticker button instead
+   *  of competing with GEAR for the same screen. */
+  _renderStatsSheet(body) {
     const g = this.game;
     const save = g.save;
-    // IDENTITY + the six spendable stats on the left, everything they DERIVE on
-    // the right: the two halves are read together ("I put a point in AGILITY,
-    // what moved?") and stacking them put the derived block a full screen below
-    // the stat it explains.
-    const [body, right] = this._panes();
-    // Same fold the game runs: applyLayers(save, derive(save, armorBonus)) —
-    // exactly refreshDerived's pipeline. Showing the naked derive here while
-    // the game folds armour and the class layer would make this panel lie
-    // about every number either touches. dBase is kept so the CLASS section
-    // can show what the class layer CONTRIBUTED, field by field.
     const dBase = derive(save, g._armorBonus || null);
     const d = applyLayers(save, dBase);
     const R = STAT_RATES;
     const dirKey = directionOf(save);
     const cls = CLASSES[save.className];
+    // `body` is already the sheet's one scrollbox (see _renderOverlay) — kept
+    // as `col` here purely so the rest of this long function reads the same
+    // as every other appendChild call below it.
+    const col = body;
 
+    col.appendChild(el('div', 'sect', 'IDENTITY'));
     const idt = el('div', 'readout');
-    body.appendChild(el('div', 'sect', 'IDENTITY'));
     idt.appendChild(row('Level', String(save.level || 1)));
     idt.appendChild(row('Rank', rankOf(save.level || 1)));
-    // Direction is DERIVED from spent points (never chosen in a menu), so the
-    // row simply names what the player has been doing. UNSWORN is a real,
-    // non-punished state and the sub-line says how to leave it.
     idt.appendChild(dirKey === 'unsworn'
       ? row('Direction', 'UNSWORN', 'no direction set — spend deeper')
       : row('Direction', DIRECTIONS[dirKey].name, `lead stat ${DIRECTIONS[dirKey].key.toUpperCase()}`));
@@ -1173,37 +1541,26 @@ export class InventoryUI {
     idt.appendChild(row('Kills', String(save.totalKills || 0)));
     idt.appendChild(row('Deaths', String(save.deaths || 0)));
     idt.appendChild(row('Gates cleared', String(Object.keys(save.cleared || {}).length)));
-    body.appendChild(idt);
+    col.appendChild(idt);
 
-    // The spec's answered open question: Emberdust lives HERE, not in the
-    // wallet strip. save.materials arrives with the ascension step (14); until
-    // a gate has dropped any, the honest number is 0 and the row still exists
-    // so the player learns the currency's name before he needs it.
-    body.appendChild(el('div', 'sect', 'RESOURCES'));
+    col.appendChild(el('div', 'sect', 'RESOURCES'));
     const rs = el('div', 'readout');
     rs.appendChild(row('Ash', String(Math.floor(save.ash || 0))));
     rs.appendChild(row('Emberdust', String(Math.floor(save.materials?.emberdust || 0)),
       'legendary fuel — B-rank gates and above'));
-    // Family sigils, only once one is held: six zero-rows would bury the two
-    // resources a pre-B player can actually read. Each named boss guards one
-    // family's sigil, and the ascension block names the one a craft needs.
     const sigils = save.materials?.sigils || {};
     for (const [boss, label] of Object.entries(SIGIL_LABEL)) {
       if ((sigils[boss] || 0) > 0) rs.appendChild(row(label, String(sigils[boss])));
     }
-    body.appendChild(rs);
+    col.appendChild(rs);
 
-    body.appendChild(el('div', 'sect', 'STATS'));
+    col.appendChild(el('div', 'sect', 'STATS'));
     const st = el('div', 'readout');
     const auto = save.autoStats || 0;
     for (const s of STATS) {
       const spent = (save.stats || {})[s.key] || 0;
       st.appendChild(row(s.name, `${effectiveStat(save, s.key)}`, `${spent} spent + ${auto} granted`));
       st.appendChild(el('div', 'note', s.desc));
-      // The mastery line (CLASSES_SPEC masteryRules uiSurface): the deepest
-      // mastery earned in THIS stat plus the next spent-point threshold.
-      // Thresholds count SPENT points only — the auto grant raises every stat
-      // equally, so counting it would hand out every mastery for free.
       const dir = DIRECTIONS[s.key];
       const tier = masteryTier(save, s.key);
       const next = MASTERY_THRESHOLDS[tier];
@@ -1214,169 +1571,129 @@ export class InventoryUI {
       if (tier > 0) m.style.color = 'var(--accent2)';
       st.appendChild(m);
     }
-    body.appendChild(st);
+    col.appendChild(st);
 
-    right.appendChild(el('div', 'sect', 'DERIVED'));
-    const dv = el('div', 'readout');
-    dv.appendChild(row('Max health', String(d.maxHp)));
-    dv.appendChild(row('Max mana', String(d.maxMp)));
-    dv.appendChild(row('Attack power', d.atk.toFixed(1)));
-    dv.appendChild(row('Move speed', d.speed.toFixed(2), `cap +${R.agi.speedCap}`));
-    dv.appendChild(row('Crit chance', pct(d.crit), `cap ${pct(R.agi.critCap)}`));
-    dv.appendChild(row('Crit damage', `x${d.critDmg.toFixed(2)}`));
-    dv.appendChild(row('Attack speed', `+${pct(d.atkSpeed)}`, `cap ${pct(R.str.atkSpeedCap)}`));
-    dv.appendChild(row('Skill power', `x${d.skillMul.toFixed(2)}`));
-    dv.appendChild(row('Cooldown cut', pct(d.cdr), `cap ${pct(R.int.cdrCap)}`));
-    dv.appendChild(row('Damage reduction', pct(d.dr), `cap ${pct(R.vit.drCap)}`));
-    dv.appendChild(row('Health regen', `${d.hpRegen.toFixed(2)}/s`));
-    dv.appendChild(row('Mana regen', `${d.mpRegen.toFixed(2)}/s`));
-    dv.appendChild(row('Damage floor', pct(d.dmgFloor), 'the low end of every roll'));
-    dv.appendChild(row('Enemy tell', `${Math.round(d.tellLeadMs)} ms`, 'warning before a hit lands'));
-    dv.appendChild(row('Dodge window', `${Math.round(d.dodgeWindow * 1000)} ms`));
-    dv.appendChild(row('Shadow damage', `x${d.shadowDmgMul.toFixed(2)}`));
-    right.appendChild(dv);
+    // DERIVED, zoned OFFENSE / DEFENSE / MOBILITY / RESOURCE — the mockup's
+    // own grp() grouping, applied to the real fold instead of synthetic
+    // totals. The headline "Damage reduction" row is the REAL combined
+    // number (armor.js's combinedDR against TOTAL_DR_CAP), answering the
+    // owner's "total cap is 72%" complaint directly; the vitality-only and
+    // armour-only components stay listed right under it so nothing that was
+    // visible before is lost.
+    col.appendChild(el('div', 'sect', 'DERIVED'));
+    const totalDR = combinedDR(d.dr, d.armorDR);
+    const zones = el('div', 'zones');
+    const zone = (title, rows) => {
+      const z = el('div', 'zone');
+      z.appendChild(el('div', 'ztitle', title));
+      const ro = el('div', 'readout');
+      for (const r of rows) ro.appendChild(r);
+      z.appendChild(ro);
+      zones.appendChild(z);
+    };
+    zone('OFFENSE', [
+      row('Attack power', d.atk.toFixed(1)),
+      row('Crit chance', pct(d.crit), `cap ${pct(R.agi.critCap)}`),
+      row('Crit damage', bonusPct(d.critDmg)),
+      row('Attack speed', bonusFrac(d.atkSpeed), `cap ${pct(R.str.atkSpeedCap)}`),
+      row('Skill power', bonusPct(d.skillMul)),
+      row('Shadow damage', bonusPct(d.shadowDmgMul)),
+    ]);
+    zone('DEFENSE', [
+      row('Damage reduction', fmtDR(totalDR), 'vitality x armour, combined'),
+      row('— vitality only', pct(d.dr), `cap ${pct(R.vit.drCap)}`),
+      row('— armour only', pct(d.armorDR)),
+      row('Max health', String(d.maxHp)),
+      row('Health regen', `${d.hpRegen.toFixed(2)}/s`),
+      row('Damage floor', pct(d.dmgFloor), 'the low end of every roll'),
+    ]);
+    zone('MOBILITY', [
+      row('Move speed', d.speed.toFixed(2), `cap +${R.agi.speedCap}`),
+      row('Dodge window', fmtDodge(d.dodgeWindow)),
+      row('Enemy tell', `${Math.round(d.tellLeadMs)}ms`, 'warning before a hit lands'),
+    ]);
+    zone('RESOURCE', [
+      row('Max mana', String(d.maxMp)),
+      row('Mana regen', `${d.mpRegen.toFixed(2)}/s`),
+      row('Cooldown cut', bonusFrac(d.cdr), `cap ${pct(R.int.cdrCap)}`),
+    ]);
+    col.appendChild(zones);
 
-    right.appendChild(el('div', 'sect', 'ARMOUR'));
-    const ab = g._armorBonus || null;
+    col.appendChild(el('div', 'sect', 'ARMOUR'));
     const ar = el('div', 'readout');
-    // The two layers are shown separately BECAUSE they stack multiplicatively
-    // in _damagePlayer — one merged percentage would hide which layer moved.
-    // The 0.72 cap is named so the player can see the ceiling rather than
-    // discover it.
-    ar.appendChild(row('Armour reduction', pct(d.armorDR), 'stacks with vitality, total capped 72%'));
-    if (d.staggerResist > 0) ar.appendChild(row('Stagger resist', pct(d.staggerResist), 'cap 60.0%'));
-    if (d.knockTakenMul !== 1) ar.appendChild(row('Knockback taken', `x${d.knockTakenMul.toFixed(2)}`));
-    right.appendChild(ar);
-    if (!ab || d.armorDR === 0) {
-      right.appendChild(el('div', 'note',
+    if (d.staggerResist > 0) ar.appendChild(row('Stagger resist', bonusFrac(d.staggerResist), 'cap 60%'));
+    if (d.knockTakenMul !== 1) ar.appendChild(row('Knockback taken', bonusPct(d.knockTakenMul)));
+    col.appendChild(ar);
+    if (!g._armorBonus || d.armorDR === 0) {
+      col.appendChild(el('div', 'note',
         `Your ${pct(d.dr)} damage reduction is all from VITALITY — no armour is worn. `
-        + 'Gates drop set pieces; fit them from the GEAR tab.'));
+        + 'Gates drop set pieces; fit them from a slot on the stage.'));
     }
 
-    // The class layer, in stacking order after armour. Drawbacks render in the
-    // SAME type size as benefits, here and everywhere, forever — a class whose
-    // downside the player did not read is a class they will blame the game
-    // for (CLASSES_SPEC risks: drawback resentment).
-    right.appendChild(el('div', 'sect', 'CLASS'));
+    // The class layer, in stacking order after armour. Drawbacks render in
+    // the SAME type size as benefits, here and everywhere, forever.
+    col.appendChild(el('div', 'sect', 'CLASS'));
     if (cls) {
       const cr = el('div', 'readout');
       const quality = save.classTier || 'base';
       const res = resonanceOf(save);
       cr.appendChild(row(cls.name, res > 0 ? `RESONANT ${res}` : 'NEUTRAL',
-        `quality ${quality} x${(CLASS_QUALITY[quality] || 1).toFixed(2)}`));
+        `quality ${quality} ${bonusPct(CLASS_QUALITY[quality] || 1)}`));
       cr.appendChild(el('div', 'note', `BENEFIT — ${cls.benefitText}`));
       cr.appendChild(el('div', 'note', `DRAWBACK — ${cls.drawbackText}`));
-      // What the layer actually DID: every derived field it moved, base ->
-      // final, off the same two blocks the game computes. An empty list means
-      // the class only carries behaviour flags, and saying so is clearer than
-      // a blank.
-      let moved = 0;
-      for (const [key, [label, fmt]] of Object.entries(CLASS_FIELD_LABEL)) {
-        const a = dBase[key];
-        const b = d[key];
-        if (b === undefined || a === b) continue;
-        const base = a !== undefined ? fmt(a) : '—';
-        cr.appendChild(row(label, `${base} > ${fmt(b)}`));
-        moved++;
-      }
-      if (!moved) cr.appendChild(el('div', 'note', 'No derived numbers moved — this class trades in behaviours.'));
-      right.appendChild(cr);
+      col.appendChild(cr);
     } else {
-      right.appendChild(el('div', 'note', (save.level || 1) >= 20
+      col.appendChild(el('div', 'note', (save.level || 1) >= 20
         ? 'No class chosen. The Assay Hall in Threshold will measure you — every class carries a benefit AND a drawback, in equal type.'
         : 'Classes open at level 20, at the Assay Hall. Your direction is yours to set now: it is read from where you spend.'));
     }
 
-    right.appendChild(el('div', 'sect', 'ARMY'));
+    col.appendChild(el('div', 'sect', 'ARMY'));
     const ay = el('div', 'readout');
     const roster = save.shadows?.roster?.length || 0;
     ay.appendChild(row('Roster', `${roster} / ${shadowRosterCapacity(save)}`));
-    // game.fieldCapacity() IS the number the sim enforces (vigil 4pc + the
-    // SHADOW ARCHON's +2, inside progression's clamps) — the spec's honesty
-    // clause: the tier cap wins, and this row must show the number that
-    // actually rules.
-    ay.appendChild(row('On the field', String(g.fieldCapacity()),
-      'clamped by the live quality tier'));
-    right.appendChild(ay);
+    ay.appendChild(row('On the field', String(g.fieldCapacity()), 'clamped by the live quality tier'));
+    col.appendChild(ay);
 
     // SOVEREIGN'S WILL (CLASSES_SPEC step 8): the three-way command toggle,
-    // on the shadow panel per spec. Stance is RUN state ("one enum on the run
-    // state") — it resets to HUNT at every gate entry — so the toggle only
-    // renders where a run is live to command; in the city the army is not
-    // fielded and a control that silently reset would be a lie.
+    // on the shadow panel per spec. Stance is RUN state — it resets to HUNT
+    // at every gate entry — so the toggle only renders where a run is live.
     if (save.archon === 'shadow') {
-      right.appendChild(el('div', 'sect', "SOVEREIGN'S WILL"));
+      col.appendChild(el('div', 'sect', "SOVEREIGN'S WILL"));
       if (g.mode?.name !== 'city' && typeof g.setShadowStance === 'function') {
-        const st = el('div', 'tabs');
+        // stanceGroup: a stable hook independent of styling classes, and
+        // `.on` for the active choice — the SAME active-state convention
+        // `.gate.on` / `.slot.sel` already use elsewhere in this file, so a
+        // reader (or a test) never has to learn a second one.
+        const stanceRow = el('div', 'stageActions stanceGroup');
+        stanceRow.style.justifyContent = 'flex-start';
         for (const [key, label, hint] of [
           ['hold', 'HOLD', 'the wall — stay on you, cut down what closes'],
           ['hunt', 'HUNT', 'free rein — nearest quarry within 26 m'],
           ['focus', 'FOCUS', 'every blade on your last-marked target'],
         ]) {
-          const b = el('button', null, label);
+          const b = el('button', 'btn ghost', label);
           b.type = 'button';
           b.title = hint;
-          b.classList.toggle('on', g.shadowStance === key);
+          if (g.shadowStance === key) { b.classList.remove('ghost'); b.classList.add('on'); }
           b.addEventListener('click', () => {
             this.audio?.ui?.();
             if (g.setShadowStance(key)) this.render();
           });
-          st.appendChild(b);
+          stanceRow.appendChild(b);
         }
-        right.appendChild(st);
+        col.appendChild(stanceRow);
         const hints = {
           hold: 'HOLD — the wall. Your soldiers keep to your side and intercept anything that closes.',
           hunt: 'HUNT — free rein. Each soldier takes the nearest quarry within 26 m.',
           focus: 'FOCUS — every blade on your last-marked target, wherever it runs.',
         };
-        right.appendChild(el('div', 'note', hints[g.shadowStance] || hints.hunt));
+        col.appendChild(el('div', 'note', hints[g.shadowStance] || hints.hunt));
       } else {
-        right.appendChild(el('div', 'note',
+        col.appendChild(el('div', 'note',
           'Stances are commanded in the field. Your army answers when a rift is open.'));
       }
     }
-  }
-
-  // ------------------------------------------------------------------- sets
-
-  /** One block per set — ALL FIVE, not just the worn ones: this tab IS the
-   *  "collect a set" reward loop, and a loop the player cannot see the whole
-   *  of is not a loop (the spec's own words about legibility). */
-  _renderSets() {
-    const g = this.game;
-    const counts = setProgress(g.save.equipment);
-    const [body, right] = this._panes();
-    const panes = [body, right];
-
-    body.appendChild(el('div', 'note',
-      'Wearing 2 / 4 / 5 pieces of one set pays its bonuses. Partials are small '
-      + 'flat numbers; the full set is a rule. Offhand and trinket never count.'));
-
-    const ordered = Object.values(SETS).sort((a, b) => a.tier - b.tier);
-    ordered.forEach((set, i) => {
-      // Alternate sets between the two panes so five blocks stay within one
-      // screen-and-a-bit at 412 px instead of a five-screen single column.
-      const pane = panes[i % 2 === 0 ? 0 : 1];
-      const n = counts.get(set.id) || 0;
-      const sr = el('div', 'readout');
-      const head = row(set.name, `${n} / 5`, 'pieces worn');
-      if (n > 0) head.querySelector('b').style.color = 'var(--accent2)';
-      sr.appendChild(head);
-      for (const th of SET_THRESHOLDS) {
-        const b = set.bonuses[th];
-        if (!b) continue;
-        const live = n >= th;
-        const line = row(`${th}-piece`, live ? 'ACTIVE' : '—', b.text);
-        // Lit exactly at the thresholds armorDerive pays; dim otherwise —
-        // earned in --ink, unearned faded, per the spec's SETS tab clause.
-        line.style.opacity = live ? '1' : '0.45';
-        if (live) line.querySelector('b').style.color = 'var(--accent2)';
-        sr.appendChild(line);
-      }
-      pane.appendChild(el('div', 'sect', `${RANKS[set.minRank]}-RANK SET`));
-      pane.appendChild(sr);
-      pane.appendChild(el('div', 'note', set.flavour));
-    });
   }
 }
 

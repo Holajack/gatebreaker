@@ -303,6 +303,17 @@ const _archV = new THREE.Vector3();
 // dash-bolt's line end. Its own vector on the _aimDir/_projDir rule — _archV
 // is live as the chain's other endpoint in the same expressions.
 const _archV2 = new THREE.Vector3();
+// The inventory panel's portrait shot, same single-role rule as the pair
+// above: _updateInventoryCamera's look target and camera position only.
+const _invLook = new THREE.Vector3();
+const _invPos = new THREE.Vector3();
+// The "paper doll" framing (INVENTORY_SPEC wave 4): dead-on, chest-to-boots,
+// close enough that armour silhouette reads on a 412 px-tall phone. These are
+// NOT the gameplay follow rig's numbers — those are authored for readability
+// at running distance, not for a still character study.
+const INV_CAM_DIST = 3.4;
+const INV_CAM_HEIGHT = 1.4;
+const INV_CAM_LOOK_Y = 1.0;
 // The combustion cascade queue, module-lived and reused so a chain allocates
 // nothing after the first. Safe as a singleton: _combust drains it fully
 // before returning and nothing re-enters it mid-drain (blasts mark noStatus,
@@ -353,6 +364,11 @@ export class Game {
     // The rank of the last gate entered, so returning to the city puts the
     // player back beside the portal they walked into rather than at the spawn.
     this.lastGateRank = null;
+    // Non-null while the inventory panel's paper-doll view owns the camera —
+    // see enterInventoryView(). update()'s camera dispatch checks this before
+    // the mode's own updateCamera, so the follow rig simply stops running for
+    // as long as it is set; there is nothing else to disable.
+    this._invView = null;
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
@@ -3349,7 +3365,12 @@ export class Game {
       this._updateStance(step);
     }
 
-    if (this._mode) this._mode.updateCamera(dt);
+    // The inventory panel's portrait shot takes over the SAME camera the mode
+    // would otherwise be driving (see enterInventoryView) — checked first so
+    // the follow rig simply does not run while the panel owns the frame, and
+    // resumes on its own the instant _invView clears with no restore step.
+    if (this._invView) this._updateInventoryCamera(dt);
+    else if (this._mode) this._mode.updateCamera(dt);
     else this._updateCamera(dt);
     this.input.endFrame();
     this.glow.render(this.scene, this.camera);
@@ -5479,6 +5500,88 @@ export class Game {
     if (this.enemies.length === 0 && this.spawned >= this.gate.enemies && !this.bossActive && this.killed >= this.gate.enemies) {
       this._spawnBoss();
     }
+  }
+
+  /**
+   * Park the main (and ONLY) camera on a still portrait of the player for the
+   * inventory panel. This game has exactly one WebGLRenderer and one
+   * THREE.Scene (grep confirms it); a second GL context for a preview canvas
+   * would be this project's fourth GPU-lifecycle bug in a row (city dispose,
+   * world dispose, entity LOD already shipped three), and mobile browsers cap
+   * contexts low enough that a second one is a real cost, not a theoretical
+   * one. The player mesh already tracks equipped gear every frame
+   * (setPlayerArmorLook/rebuildHumanoid — InventoryUI calls both on every
+   * equip, exactly as game.setPlayerBody does), so pointing the EXISTING
+   * camera at it and letting the panel's centre column stay transparent is
+   * the whole trick: no new scene, no new render target, the live mesh IS
+   * the preview.
+   *
+   * update()'s camera dispatch checks _invView before the mode's own
+   * updateCamera, so the follow rig simply stops running for as long as this
+   * is set — there is no second thing to disable.
+   */
+  enterInventoryView() {
+    if (this._invView) return; // already framed — a same-frame reopen is a no-op
+    // THE HEELING COMPANION BUG: citizens.js spawns the bound shadow at
+    // roster slot 0 as 'city_companion', which walks the plaza AT THE
+    // PLAYER'S SHOULDER (COMP_HEEL) — close enough that this camera's fixed
+    // chest-height offset regularly ends up staring straight into its body
+    // instead of the player's (found empirically: reproduced 100% of runs
+    // with a bound shadow, 0% without). A live gate can have the same shape —
+    // a fielded shadow ally standing shoulder-to-shoulder when the sim
+    // pauses for this panel. Hiding both for the shot's duration is the
+    // fix: the panel's job is to show YOU, not your escort, and only
+    // meshes that were actually visible get toggled — a shadow already
+    // invisible mid-recall (see the SOVEREIGN recall path above) must not
+    // get switched back ON by this panel closing.
+    const hidden = [];
+    for (const s of this.shadows) {
+      if (s.mesh && s.mesh.visible) { s.mesh.visible = false; hidden.push(s.mesh); }
+    }
+    const companion = this.scene.getObjectByName('city_companion');
+    if (companion && companion.visible) { companion.visible = false; hidden.push(companion); }
+    this._invView = { snap: true, hidden };
+  }
+
+  /** Hand the camera back to whatever mode owns it, and restore exactly the
+   *  meshes enterInventoryView hid (never a blanket "show everything" — see
+   *  its comment). Nothing else to restore: once _invView clears, update()'s
+   *  dispatch resumes calling mode.updateCamera / _updateCamera next frame,
+   *  and that rig re-converges on the player from wherever the portrait shot
+   *  left the camera — the same lerp-back every other camera handoff in this
+   *  file already does (see the drag-orbit swing above). A hard snap back
+   *  would be a worse cut than the glide. */
+  exitInventoryView() {
+    if (this._invView) for (const m of this._invView.hidden) m.visible = true;
+    this._invView = null;
+  }
+
+  /**
+   * Dead-on, chest-to-boots: the "paper doll" framing InventoryUI's centre
+   * column is built around. The player mesh is turned to face the camera
+   * directly — rotation.y = 0 matches this._forward(0) = (0,0,1), the SAME
+   * convention _updatePlayer uses for movement facing, just aimed at the lens
+   * instead of the walk direction. Safe to stamp every frame this runs:
+   * inside a gate the sim is PAUSED while the panel is open (nothing else
+   * drives yaw), and in the city _updatePlayer already ran earlier in this
+   * same frame, so the presentation pose is simply the last word before the
+   * render — p.yaw itself is never touched, so combat math (which never
+   * reads mesh.rotation) cannot be affected.
+   */
+  _updateInventoryCamera(dt) {
+    const p = this.player;
+    _invLook.set(p.pos.x, p.pos.y + INV_CAM_LOOK_Y, p.pos.z);
+    _invPos.set(p.pos.x, p.pos.y + INV_CAM_HEIGHT, p.pos.z + INV_CAM_DIST);
+    if (this._invView.snap) {
+      // An inventory panel opening is not a place a camera glide belongs —
+      // it should be framed the instant the panel is.
+      this.camera.position.copy(_invPos);
+      this._invView.snap = false;
+    } else {
+      this.camera.position.lerp(_invPos, Math.min(1, dt * 8));
+    }
+    this.camera.lookAt(_invLook.x, _invLook.y, _invLook.z);
+    if (p.mesh) p.mesh.rotation.y = 0;
   }
 
   _updateCamera(dt) {

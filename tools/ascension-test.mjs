@@ -264,9 +264,14 @@ await page.click('#btnPlay');
 await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 30000 });
 await page.waitForTimeout(2200);
 
-// The sheet, weapon slot -> the ASCENSION block.
+// The sheet, weapon slot -> the ASCENSION block. The V3 paper-doll port
+// (src/ui/inventoryui.js) replaced the old persistent GEAR tab with rails
+// that open a per-slot compare SHEET on tap — the weapon slot must be tapped
+// before its ASCENSION block exists in the DOM.
 await page.click('#btnInventory');
 await page.waitForTimeout(450);
+await page.click('#inv .slot[data-slot="weapon"]');
+await page.waitForTimeout(300);
 const block = await page.evaluate(() => {
   const asc = document.getElementById('invAscend');
   const btn = document.getElementById('invAscendBtn');
@@ -285,7 +290,7 @@ if (SHOTS) {
   await page.evaluate(() => document.getElementById('invAscend')?.scrollIntoView({ block: 'center' }));
   await page.waitForTimeout(250);
   await page.screenshot({ path: shotPath('ascend-before.png') });
-  await page.evaluate(() => { document.getElementById('invCol').scrollTop = 0; });
+  await page.evaluate(() => { const c = document.querySelector('#invOverlayBody .scrollCol'); if (c) c.scrollTop = 0; });
 }
 
 // The craft.
@@ -294,7 +299,11 @@ await page.waitForTimeout(600);
 const after = await page.evaluate(() => {
   const g = window.__game;
   const rule = document.querySelector('#inv .rule');
-  const legRow = document.querySelector('#inv .gate.leg');
+  // The equipped weapon is now the compare sheet's EQUIPPED card, not a
+  // .gate row (.gate is the stash candidate list only) — see
+  // inventoryui.js's _renderCmpRow, which gets the SAME .leg bloom
+  // .gate.leg always had, just moved onto whichever card holds the item.
+  const legRow = document.querySelector('#invOverlay .cmpCard.eq.leg');
   return {
     rarity: g.weapon?.rarity, seed: g.weapon?.seed, name: g.weapon?.name,
     ruleName: g.weapon?.rule?.name || null,
@@ -319,7 +328,7 @@ ok(after.record?.r === 'legendary' && after.record?.s === 424242,
 if (SHOTS) {
   // Frame the legendary row + the rule box together: scroll to the top (the
   // equipped row) — the rule box sits directly under the stat readout.
-  await page.evaluate(() => { document.getElementById('invCol').scrollTop = 0; });
+  await page.evaluate(() => { const c = document.querySelector('#invOverlayBody .scrollCol'); if (c) c.scrollTop = 0; });
   await page.waitForTimeout(250);
   await page.screenshot({ path: shotPath('ascend-after.png') });
 }
