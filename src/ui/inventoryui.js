@@ -23,30 +23,37 @@
 // render(), the same pattern _panes()/bodyEl always used here.
 //
 // THE CENTRE IS A REAL CHARACTER, NOT A PREVIEW RENDER. This game owns exactly
-// one THREE.WebGLRenderer and one THREE.Scene (game.js:~357/376) and this
-// project has shipped three separate GPU-lifecycle leaks in its history (city
-// dispose, world dispose, entity LOD) — standing up a second GL context for a
-// preview canvas would be a fourth, for a feature that does not need one. The
-// player mesh already tracks equipped gear every frame this file changes it
-// (setPlayerArmorLook/rebuildHumanoid, called on every equip exactly as
-// game.setPlayerBody does), and the inventory panel is a DOM overlay that does
-// NOT stop the main render loop. So: open() points the EXISTING camera at a
-// close "paper doll" framing of the player via game.enterInventoryView(), the
-// panel's centre column carries no opaque background (only the chrome around
-// it — rails, ticker, header — has one), and close() calls
-// game.exitInventoryView() to hand the camera back. Zero new WebGL context,
-// zero new render pipeline, zero new material — the character renders through
-// the game's ordinary character material path, which is also why it carries
-// no rim/glow: that law governs meshes, and this is the same mesh.
+// one THREE.WebGLRenderer (game.js:~373) — standing up a second GL context for
+// a preview canvas would be this project's fourth GPU-lifecycle leak in a row
+// (city dispose, world dispose, entity LOD already shipped three), so this
+// panel does not do that. What it DOES do (V4, this session): a SECOND
+// THREE.Camera — game.previewCamera — sharing the one renderer, whose layer
+// mask is INV_PREVIEW_LAYER and nothing else. game.enterInventoryView() hands
+// the frame to it; every frame it stays open, game._updateInventoryCamera tags
+// the player's live rig (which already tracks equipped gear every frame this
+// file changes it, via setPlayerArmorLook/rebuildHumanoid) onto that layer and
+// orbits the camera around it. The panel's centre column still carries no
+// opaque background of its own (only the chrome around it — rails, ticker,
+// header — has one) so the render shows through, exactly as before; what
+// changed is WHAT renders there. close() calls game.exitInventoryView() to
+// drop the state; the world's own camera was never touched, so there is
+// nothing to hand back.
 //
-// A scissored second-scene sub-viewport (three.js's "multiple views, one
-// canvas" technique) was the documented alternative and was NOT taken:
-// invUI.open() is reachable from the city (unpaused) and from inside a gate
-// (main.js pauses the sim the instant the panel opens — see open() below), so
-// the world behind the framed player is either a calm plaza or a FROZEN
-// (never mid-combat-animating) dungeon frame — never the chaotic, actively
-// re-rendering combat the second-scene escape hatch exists for. Camera framing
-// was sufficient.
+// V3 (the first paper-doll ship) pointed the world's OWN camera at a close
+// portrait of the player standing exactly where they were, and left it at
+// that: the owner's follow-up feedback was that the live map and other
+// hunters were still visible behind the framed shot, and it read as
+// "massive" rather than contained to the panel's centre column. V4 answers
+// both: previewCamera's isolated layer mask means the map is not merely
+// out of frame, it is literally the only thing that camera can never see, no
+// matter where the player happens to be standing (the plaza, a paused
+// dungeon room — irrelevant now); and a full-body medium shot (framed on a
+// dedicated FOV/distance instead of the gameplay follow rig's numbers)
+// replaces the old chest-height close-up. A user-draggable spin (this file's
+// stage-centre pointer handler below, forwarding raw dx to
+// game.spinInventoryView) replaces the fixed dead-on angle — the owner's
+// explicit ask, so gear reads from more than one side without leaving the
+// panel.
 //
 // WAVE 4 (this port): the five armour slots, the trinket, and the weapon are
 // LIVE. Equipping is a deliberate two-step everywhere now — tap a slot, read
@@ -268,7 +275,8 @@ body.gb-inv #hud { display: none !important; }
    (rails, the header bar, the ticker, the stage buttons) carries its OWN
    background instead, exactly like the mockup's individual boxes; the
    negative space between them — the stage centre most of all — is where the
-   already-rendering player (see game.enterInventoryView) shows through.
+   isolated character-viewer render (see game.enterInventoryView /
+   game.previewCamera) shows through.
    Sub-sheets (compare/sets/stats) are the deliberate exception: they cover
    the stage with a real backdrop because browsing a list is not the moment
    to also be parsing a character behind it. */
@@ -281,6 +289,18 @@ body.gb-inv #hud { display: none !important; }
   background: rgba(12,14,28,.92);
 }
 #inv .headbar h2 { font-size: 14px; letter-spacing: .2em; flex: 1; text-align: left; margin: 0; }
+/* Tap-to-rename affordance (invTitleName is the <h2>): a dashed underline
+   reads as "editable" without a second icon element competing for the same
+   14px of header height. invTitleEdit is the <input> _startRename swaps in —
+   same box/type/spacing as the h2 it replaces so the header does not reflow
+   the moment you tap it. */
+#inv .headbar h2.invTitleName { cursor: pointer; border-bottom: 1px dashed rgba(124,92,255,.45); padding-bottom: 1px; width: fit-content; max-width: 100%; }
+#inv .headbar input.invTitleEdit {
+  font: inherit; font-size: 14px; letter-spacing: .2em; flex: 1; text-align: left; margin: 0;
+  color: var(--ink); background: rgba(124,92,255,.12); border: 1px solid var(--accent);
+  border-radius: 4px; padding: 2px 6px; min-width: 0;
+}
+#inv .headbar input.invTitleEdit::placeholder { color: var(--dim); letter-spacing: .05em; }
 #inv .headbar .btn { width: auto; padding: 7px 14px; font-size: 11px; min-height: 36px; }
 
 #inv .inv-wallet {
@@ -374,8 +394,15 @@ body.gb-inv #hud { display: none !important; }
   flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center;
   justify-content: center; gap: 1px; padding: 5px 3px; border-right: 1px solid rgba(124,92,255,.15);
 }
-#inv .ticker .cell .lbl { font-size: 7px; letter-spacing: .1em; color: var(--dim); white-space: nowrap; }
-#inv .ticker .cell .val { font-size: 12px; font-weight: 800; letter-spacing: .02em; white-space: nowrap; color: var(--ink); }
+/* min-width:0 on .cell lets a narrow cell shrink below its content's natural
+   width, but a nowrap child does not clip ITSELF — the ticker's own
+   overflow:hidden only catches the outer edge, so a wide value (a DR readout
+   like "42% (CAP 72%)") or label ("DMG RED.") in a ~50px cell bled into the
+   NEIGHBOUR cell instead of just disappearing off the panel. Same
+   overflow/ellipsis/max-width trio .rail .slot b already uses for the same
+   reason, applied here too. */
+#inv .ticker .cell .lbl { font-size: 7px; letter-spacing: .1em; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+#inv .ticker .cell .val { font-size: 12px; font-weight: 800; letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; color: var(--ink); }
 #inv .ticker button {
   flex: none; padding: 5px 10px; cursor: pointer; border: 0; border-left: 1px solid rgba(124,92,255,.35);
   background: rgba(124,92,255,.16); color: var(--ink); font: inherit; font-size: 9.5px;
@@ -555,6 +582,11 @@ export class InventoryUI {
     // rail tap both funnel through this, defaulting to the weapon so a bare
     // OPEN STASH tap on a fresh open has something sensible to show.
     this._slot = 'weapon';
+    // True for the span between _startRename swapping the title for an
+    // <input> and that input's own finish() swapping it back — render()'s
+    // own title refresh backs off while this is set so it cannot clobber the
+    // input mid-edit.
+    this._renaming = false;
     // null | 'compare' | 'sets' | 'stats'. Only one sheet is ever up; opening
     // one always replaces whichever was showing, matching the rest of the
     // panel's "one overlay at a time" rule.
@@ -591,7 +623,14 @@ export class InventoryUI {
     const panel = el('div', 'panel wide');
 
     const headbar = el('div', 'headbar');
-    headbar.appendChild(el('h2', null, 'THE HUNTER'));
+    // Tap to rename — see _startRename. Text content is kept live by
+    // _renderTitle (called from render()), never set again after this.
+    this.titleEl = el('h2', 'invTitleName', 'THE HUNTER');
+    this.titleEl.id = 'invTitle';
+    this.titleEl.title = 'Tap to rename';
+    this.titleEl.tabIndex = 0;
+    this.titleEl.addEventListener('click', () => this._startRename());
+    headbar.appendChild(this.titleEl);
     const close = el('button', 'btn ghost', 'CLOSE');
     close.id = 'invClose';
     close.type = 'button';
@@ -625,8 +664,9 @@ export class InventoryUI {
     stageCenter.id = 'invStageCenter';
     // The REAL character shows through THIS element — see the CSS comment
     // above. Nothing is ever drawn into it; it is a deliberately empty window
-    // onto the live scene, positioned by game.enterInventoryView's camera
-    // framing rather than by any DOM content of its own.
+    // onto game.previewCamera's isolated render, not onto any DOM content of
+    // its own. _bindSpin below turns a drag anywhere in this window into a
+    // camera orbit, via game.spinInventoryView.
     const idL = el('div', 'idBox left');
     this.dirLabelEl = el('div', 'dir', 'UNSWORN');
     idL.append(el('div', 'lbl', 'DIRECTION'), this.dirLabelEl);
@@ -657,6 +697,14 @@ export class InventoryUI {
     });
     actions.append(this.stanceBtn, openStash);
     stageCenter.appendChild(actions);
+    this._bindSpin(stageCenter);
+    // The character-viewer render is hard-clipped to THIS rectangle every
+    // frame (see game.js's _renderInventoryPreview) — registered once since
+    // stageCenter itself is only ever built once (this file's own header
+    // comment), and read live rather than snapshotted so a device rotation or
+    // a responsive rail-width breakpoint while the panel is open is honoured
+    // immediately instead of leaving the render clipped to a stale rectangle.
+    this.game?.setInventoryStageRectProvider?.(() => stageCenter.getBoundingClientRect());
     stage.appendChild(stageCenter);
 
     this.railRightEl = el('div', 'rail');
@@ -699,6 +747,55 @@ export class InventoryUI {
     this.root = screen;
   }
 
+  /** Drag anywhere on the character window to spin it — the same touch+mouse
+   *  dual-binding shape input.js's world orbit-drag uses (see its own
+   *  _bindOrbit), scoped to this one element so it can never fight the world
+   *  camera's own drag: the panel already sits above the canvas in stacking
+   *  order (z-index 60 vs canvas being the lowest paint), so a touch that
+   *  starts here never reaches Input's canvas listener at all — the exact
+   *  same "buttons keep winning without any geometry checks" fact input.js's
+   *  own comment documents for the skill buttons. Starts on the stance/open
+   *  buttons are explicitly excluded so a tap on either still reads as a tap,
+   *  not a zero-distance drag. 1:1 and inertia-free, matching input.js's own
+   *  stated reason for that choice: a model that keeps spinning after the
+   *  thumb lifts is a model the player fights. */
+  _bindSpin(el2) {
+    let id = null;
+    let lastX = 0;
+    const start = (e) => {
+      if (id !== null) return;
+      if (e.target.closest?.('.stageActions')) return;
+      const t = e.changedTouches ? e.changedTouches[0] : e;
+      id = e.changedTouches ? t.identifier : 'mouse';
+      lastX = t.clientX;
+      e.preventDefault();
+    };
+    const move = (e) => {
+      if (id === null) return;
+      let t = e;
+      if (e.changedTouches) {
+        t = [...e.changedTouches].find((c) => c.identifier === id);
+        if (!t) return;
+      } else if (id !== 'mouse') return;
+      const dx = t.clientX - lastX;
+      lastX = t.clientX;
+      this.game?.spinInventoryView?.(dx);
+      e.preventDefault();
+    };
+    const end = (e) => {
+      if (id === null) return;
+      if (e.changedTouches && ![...e.changedTouches].some((c) => c.identifier === id)) return;
+      id = null;
+    };
+    el2.addEventListener('touchstart', start, { passive: false });
+    window.addEventListener('touchmove', move, { passive: false });
+    window.addEventListener('touchend', end);
+    window.addEventListener('touchcancel', end);
+    el2.addEventListener('mousedown', start);
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', end);
+  }
+
   get isOpen() { return this._open; }
 
   open() {
@@ -715,9 +812,9 @@ export class InventoryUI {
       this.game.pause(true);
       this._pausedByUs = true;
     }
-    // Point the ONE live camera at a still portrait of the player — see the
-    // header comment and game.js's enterInventoryView for why this is the
-    // whole character-preview mechanism, not a placeholder for one.
+    // Hand the frame to the isolated character-viewer camera — see the header
+    // comment and game.js's enterInventoryView for why this, not a placeholder
+    // render, is the whole character-preview mechanism.
     this.game.enterInventoryView?.();
     // THE STALE-LABEL FIX (shipped 3-A bug). In the city the sim keeps running
     // under the sheet, so the auto-stow policy can sheathe the sword while the
@@ -758,6 +855,7 @@ export class InventoryUI {
     const g = this.game;
     if (!g) return;
     const save = g.save;
+    this._renderTitle();
     this.lvValue.textContent = String(save.level || 1);
     this.rankValue.textContent = rankOf(save.level || 1);
     const need = xpForLevel(save.level || 1);
@@ -884,6 +982,58 @@ export class InventoryUI {
     // Re-render off the stance that actually APPLIED — a refused change (e.g.
     // mid-swing) leaves the label exactly as it was, which is the truth.
     this._renderStanceBtn();
+  }
+
+  /** Keeps the headbar title honest — never set outside this and the input
+   *  swap in _startRename, so a save loaded from a different tab or a rename
+   *  committed elsewhere is never stale for longer than the next render(). */
+  _renderTitle() {
+    if (this._renaming) return; // an <input> owns the slot right now — see _startRename
+    this.titleEl.textContent = this.game.save.hunterName || 'THE HUNTER';
+  }
+
+  /** Swap the header title for a text input, in place, on tap. save.hunterName
+   *  is null-default (see save.js's own comment on that field), so an empty
+   *  commit is a deliberate "clear the name" rather than a rejected input —
+   *  it just falls back to THE HUNTER on the very next render. Persists
+   *  through game.onSave() directly: this is a single scalar field, not a
+   *  loadout write, so it does not go through _persistLoadout — see that
+   *  method's own comment for why loadout writes need the heavier path and
+   *  this one does not. */
+  _startRename() {
+    if (this._renaming) return;
+    this._renaming = true;
+    const g = this.game;
+    const current = g.save.hunterName || '';
+    const input = el('input', 'invTitleName invTitleEdit');
+    input.id = 'invTitleInput';
+    input.type = 'text';
+    input.maxLength = 20;
+    input.value = current;
+    input.placeholder = 'THE HUNTER';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    let done = false;
+    const finish = (commit) => {
+      if (done) return;
+      done = true;
+      this._renaming = false;
+      if (commit) {
+        const val = input.value.trim().slice(0, 20);
+        g.save.hunterName = val || null;
+        g.onSave?.();
+      }
+      input.replaceWith(this.titleEl);
+      this._renderTitle();
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+    this.titleEl.replaceWith(input);
+    input.focus();
+    input.select();
   }
 
   /** DIRECTION top-left, CLASS + benefit/drawback top-right — the identity

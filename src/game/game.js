@@ -303,17 +303,40 @@ const _archV = new THREE.Vector3();
 // dash-bolt's line end. Its own vector on the _aimDir/_projDir rule — _archV
 // is live as the chain's other endpoint in the same expressions.
 const _archV2 = new THREE.Vector3();
-// The inventory panel's portrait shot, same single-role rule as the pair
-// above: _updateInventoryCamera's look target and camera position only.
+// The inventory panel's isolated character-viewer shot, same single-role rule
+// as the pair above: _updateInventoryCamera's look target and camera position
+// only.
 const _invLook = new THREE.Vector3();
 const _invPos = new THREE.Vector3();
-// The "paper doll" framing (INVENTORY_SPEC wave 4): dead-on, chest-to-boots,
-// close enough that armour silhouette reads on a 412 px-tall phone. These are
-// NOT the gameplay follow rig's numbers — those are authored for readability
-// at running distance, not for a still character study.
-const INV_CAM_DIST = 3.4;
-const INV_CAM_HEIGHT = 1.4;
-const INV_CAM_LOOK_Y = 1.0;
+// _renderInventoryPreview's own scratch for renderer.getSize() (logical/CSS
+// px, required every frame the character viewer is open — see that method).
+const _invRendererSize = new THREE.Vector2();
+// The character-viewer framing (owner feedback on the first paper-doll ship:
+// the old close chest-height portrait, aimed through the SAME world camera,
+// left the live map and other hunters visible behind the player and read as
+// "massive"/not actually contained to the panel's centre column). This is a
+// full-body medium shot on a DEDICATED previewCamera (see its construction
+// below) rather than the gameplay follow rig's numbers — narrower FOV, pulled
+// back to the waist/knee line instead of the chest.
+const INV_PREVIEW_DIST = 3.2;
+const INV_PREVIEW_HEIGHT = 1.25;
+const INV_PREVIEW_LOOK_Y = 0.95;
+// GLOW_LAYER (imported above) is 1 and carries every sanctioned glow object
+// in the game (skill VFX, portals, enemy telegraphs...). This is a SEPARATE
+// layer, exclusively the live player rig, that ONLY previewCamera looks at —
+// see _renderInventoryPreview for why that isolates the character from the
+// rest of the (still-standing) world without touching GLOW_LAYER at all.
+const INV_PREVIEW_LAYER = 2;
+// Drag-to-spin sensitivity for the character viewer — a little snappier than
+// Input.js's world-orbit YAW_PER_PX (Math.PI/600) because this is a small
+// on-screen model being spun directly, not a camera boom swinging through a
+// whole 3D space.
+const INV_SPIN_PER_PX = Math.PI / 300;
+// A flat front-on default reads as a silhouette with nothing to tell it apart
+// from a mannequin; a modest 3/4 turn is the same choice most character-select
+// screens make and still starts every piece of frontal gear (chest, weapon in
+// the draw hand) in view.
+const INV_DEFAULT_YAW = Math.PI / 7;
 // The combustion cascade queue, module-lived and reused so a chain allocates
 // nothing after the first. Safe as a singleton: _combust drains it fully
 // before returning and nothing re-enters it mid-drain (blasts mark noStatus,
@@ -369,6 +392,9 @@ export class Game {
     // the mode's own updateCamera, so the follow rig simply stops running for
     // as long as it is set; there is nothing else to disable.
     this._invView = null;
+    // () => DOMRect for the inventory's stage-centre column, registered once
+    // by InventoryUI — see setInventoryStageRectProvider.
+    this._invStageRectFn = null;
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
@@ -394,6 +420,15 @@ export class Game {
     // inside the first metre, so a 4000:1 far/near ratio spent most of the
     // depth buffer's precision on empty space and z-fought the arena props.
     this.camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 1.0, 400);
+    // The inventory character-viewer's OWN camera — see _renderInventoryPreview.
+    // Near/far are tight (this only ever frames one small rig a few metres
+    // away) and its layer mask is flipped from every other camera in the game:
+    // INV_PREVIEW_LAYER only, nothing else, which is what makes the rest of
+    // the (still-standing) world invisible to it without touching a single
+    // other object's visibility flag.
+    this.previewCamera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 20);
+    this.previewCamera.layers.disableAll();
+    this.previewCamera.layers.enable(INV_PREVIEW_LAYER);
     // 13,13 rather than the long-shipped 11,11: the owner asked to pull back a
     // little, and the city moved 8,8 -> 10,10 in the same pass. dungeonmode
     // reads this same vector, so crawls and arenas stay in step.
@@ -514,6 +549,8 @@ export class Game {
     const tall = h / w > 1.7;
     this.camera.fov = tall ? 64 : 58;
     this.camera.updateProjectionMatrix();
+    this.previewCamera.aspect = w / h;
+    this.previewCamera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
     const dpr = Math.min(window.devicePixelRatio, this.quality?.current.pixelRatio ?? 2);
     this.renderer.setPixelRatio(dpr);
@@ -3365,15 +3402,22 @@ export class Game {
       this._updateStance(step);
     }
 
-    // The inventory panel's portrait shot takes over the SAME camera the mode
-    // would otherwise be driving (see enterInventoryView) — checked first so
-    // the follow rig simply does not run while the panel owns the frame, and
-    // resumes on its own the instant _invView clears with no restore step.
+    // The inventory panel's character viewer runs its OWN camera (previewCamera)
+    // rather than the mode's follow rig — checked first so the follow rig simply
+    // does not run while the panel is open, and resumes on its own the instant
+    // _invView clears. This.camera is never moved while the panel is open (see
+    // enterInventoryView), so there is nothing to hand back either — the follow
+    // rig picks up from exactly where it left off, no re-converge glide needed.
     if (this._invView) this._updateInventoryCamera(dt);
     else if (this._mode) this._mode.updateCamera(dt);
     else this._updateCamera(dt);
     this.input.endFrame();
-    this.glow.render(this.scene, this.camera);
+    // While the character viewer is open, previewCamera's isolated render
+    // REPLACES the normal world draw outright — see _renderInventoryPreview for
+    // why that, not visibility toggling, is what makes the map and every other
+    // hunter actually disappear instead of just sitting frozen out of frame.
+    if (this._invView) this._renderInventoryPreview();
+    else this.glow.render(this.scene, this.camera);
     this.quality.update(rawDt);
   }
 
@@ -5503,85 +5547,158 @@ export class Game {
   }
 
   /**
-   * Park the main (and ONLY) camera on a still portrait of the player for the
-   * inventory panel. This game has exactly one WebGLRenderer and one
-   * THREE.Scene (grep confirms it); a second GL context for a preview canvas
-   * would be this project's fourth GPU-lifecycle bug in a row (city dispose,
-   * world dispose, entity LOD already shipped three), and mobile browsers cap
-   * contexts low enough that a second one is a real cost, not a theoretical
-   * one. The player mesh already tracks equipped gear every frame
-   * (setPlayerArmorLook/rebuildHumanoid — InventoryUI calls both on every
-   * equip, exactly as game.setPlayerBody does), so pointing the EXISTING
-   * camera at it and letting the panel's centre column stay transparent is
-   * the whole trick: no new scene, no new render target, the live mesh IS
-   * the preview.
+   * Open the inventory's isolated character viewer. This does NOT move the
+   * main world camera or hide any world mesh — it hands the frame to a
+   * SEPARATE previewCamera (constructed alongside this.camera above) whose
+   * layer mask is INV_PREVIEW_LAYER and nothing else. _updateInventoryCamera
+   * tags the player's live rig onto that layer every frame this stays open,
+   * so previewCamera literally cannot see the map, the city, a dungeon room,
+   * or any other hunter — not because they are hidden, but because they were
+   * never on the one layer this camera looks at. That is also why the old
+   * "hide the shadow army / city companion so the portrait shot doesn't stare
+   * into an ally's back" workaround this function used to carry is gone: an
+   * ally mesh was never going to be on INV_PREVIEW_LAYER either, so there is
+   * nothing left for it to accidentally show.
    *
-   * update()'s camera dispatch checks _invView before the mode's own
-   * updateCamera, so the follow rig simply stops running for as long as this
-   * is set — there is no second thing to disable.
+   * This game still has exactly one WebGLRenderer (grep confirms it) — a
+   * second camera is not a second GL context, just a second lens pointed at
+   * the same one, which is the whole trick _renderInventoryPreview uses to
+   * draw the isolated shot without a second canvas or render target.
    */
   enterInventoryView() {
     if (this._invView) return; // already framed — a same-frame reopen is a no-op
-    // THE HEELING COMPANION BUG: citizens.js spawns the bound shadow at
-    // roster slot 0 as 'city_companion', which walks the plaza AT THE
-    // PLAYER'S SHOULDER (COMP_HEEL) — close enough that this camera's fixed
-    // chest-height offset regularly ends up staring straight into its body
-    // instead of the player's (found empirically: reproduced 100% of runs
-    // with a bound shadow, 0% without). A live gate can have the same shape —
-    // a fielded shadow ally standing shoulder-to-shoulder when the sim
-    // pauses for this panel. Hiding both for the shot's duration is the
-    // fix: the panel's job is to show YOU, not your escort, and only
-    // meshes that were actually visible get toggled — a shadow already
-    // invisible mid-recall (see the SOVEREIGN recall path above) must not
-    // get switched back ON by this panel closing.
-    const hidden = [];
-    for (const s of this.shadows) {
-      if (s.mesh && s.mesh.visible) { s.mesh.visible = false; hidden.push(s.mesh); }
-    }
-    const companion = this.scene.getObjectByName('city_companion');
-    if (companion && companion.visible) { companion.visible = false; hidden.push(companion); }
-    this._invView = { snap: true, hidden };
+    this._invView = { yaw: INV_DEFAULT_YAW };
   }
 
-  /** Hand the camera back to whatever mode owns it, and restore exactly the
-   *  meshes enterInventoryView hid (never a blanket "show everything" — see
-   *  its comment). Nothing else to restore: once _invView clears, update()'s
-   *  dispatch resumes calling mode.updateCamera / _updateCamera next frame,
-   *  and that rig re-converges on the player from wherever the portrait shot
-   *  left the camera — the same lerp-back every other camera handoff in this
-   *  file already does (see the drag-orbit swing above). A hard snap back
-   *  would be a worse cut than the glide. */
+  /** Registered once by InventoryUI, whose stage-centre DOM node is built
+   *  exactly once and never torn down (see that file's own header comment) —
+   *  so this is a live GETTER, not a snapshot: _renderInventoryPreview calls
+   *  it fresh every frame, which is what lets a device rotation or a
+   *  responsive breakpoint changing rail width WHILE the panel is open still
+   *  confine the render to the rectangle that actually exists right now,
+   *  instead of one measured back on open(). */
+  setInventoryStageRectProvider(fn) {
+    this._invStageRectFn = fn;
+  }
+
+  /** Drop the character-viewer state. There is nothing else to hand back —
+   *  this.camera was never touched while the panel was open (see above), so
+   *  the mode's normal follow rig simply resumes next frame from wherever it
+   *  already was, with no re-converge glide needed. */
   exitInventoryView() {
-    if (this._invView) for (const m of this._invView.hidden) m.visible = true;
     this._invView = null;
   }
 
+  /** Spin the character viewer by a raw horizontal drag delta in CSS pixels —
+   *  called directly by InventoryUI's own drag handler on the stage's centre
+   *  column. Scoped entirely to _invView.yaw, so it can never reach (or be
+   *  reached by) the world camera's own orbit-drag state on Input — the two
+   *  cannot fight because dragging over the panel never reaches the world
+   *  canvas in the first place (the panel sits above it in stacking order;
+   *  see input.js's own comment on that same fact). A no-op while the panel
+   *  is closed, so InventoryUI never needs to guard the call itself. */
+  spinInventoryView(dxPixels) {
+    if (!this._invView) return;
+    this._invView.yaw -= dxPixels * INV_SPIN_PER_PX;
+  }
+
   /**
-   * Dead-on, chest-to-boots: the "paper doll" framing InventoryUI's centre
-   * column is built around. The player mesh is turned to face the camera
-   * directly — rotation.y = 0 matches this._forward(0) = (0,0,1), the SAME
-   * convention _updatePlayer uses for movement facing, just aimed at the lens
-   * instead of the walk direction. Safe to stamp every frame this runs:
-   * inside a gate the sim is PAUSED while the panel is open (nothing else
-   * drives yaw), and in the city _updatePlayer already ran earlier in this
-   * same frame, so the presentation pose is simply the last word before the
-   * render — p.yaw itself is never touched, so combat math (which never
-   * reads mesh.rotation) cannot be affected.
+   * Every frame the character viewer is open: tag the player's CURRENT rig
+   * onto INV_PREVIEW_LAYER (never cached — armour/weapon swaps rebuild
+   * sub-meshes live via setPlayerArmorLook/rebuildHumanoid while this panel
+   * is open, and a freshly built mesh must be visible to previewCamera the
+   * same frame it exists, not lag a tag pass that only ran on open), then
+   * orbit previewCamera around the player at the current spin yaw. The player
+   * mesh itself is held at a stable rotation.y = 0 (the same convention
+   * _updatePlayer's facing math uses) — the CAMERA orbits, the rig doesn't,
+   * which is what lets a drag spin the model without ever touching p.yaw or
+   * anything combat math reads.
    */
   _updateInventoryCamera(dt) {
     const p = this.player;
-    _invLook.set(p.pos.x, p.pos.y + INV_CAM_LOOK_Y, p.pos.z);
-    _invPos.set(p.pos.x, p.pos.y + INV_CAM_HEIGHT, p.pos.z + INV_CAM_DIST);
-    if (this._invView.snap) {
-      // An inventory panel opening is not a place a camera glide belongs —
-      // it should be framed the instant the panel is.
-      this.camera.position.copy(_invPos);
-      this._invView.snap = false;
-    } else {
-      this.camera.position.lerp(_invPos, Math.min(1, dt * 8));
+    if (p.mesh) {
+      p.mesh.traverse((o) => { if (o.layers) o.layers.enable(INV_PREVIEW_LAYER); });
+      p.mesh.rotation.y = 0;
     }
-    this.camera.lookAt(_invLook.x, _invLook.y, _invLook.z);
-    if (p.mesh) p.mesh.rotation.y = 0;
+    const yaw = this._invView.yaw;
+    _invLook.set(p.pos.x, p.pos.y + INV_PREVIEW_LOOK_Y, p.pos.z);
+    _invPos.set(
+      p.pos.x + Math.sin(yaw) * INV_PREVIEW_DIST,
+      p.pos.y + INV_PREVIEW_HEIGHT,
+      p.pos.z + Math.cos(yaw) * INV_PREVIEW_DIST,
+    );
+    this.previewCamera.position.copy(_invPos);
+    this.previewCamera.lookAt(_invLook.x, _invLook.y, _invLook.z);
+  }
+
+  /**
+   * The isolated character-viewer render pass. Bypasses glow.js on purpose —
+   * nothing on a living player is glow-tagged (rim/glow on living characters
+   * stays banned; GLOW_LAYER is a wholly different layer from
+   * INV_PREVIEW_LAYER), so the bloom pass would composite literally nothing
+   * extra here, and skipping it avoids feeding an unfamiliar second camera
+   * through a method whose render-target/layer juggling is tuned for the one
+   * camera it runs every other frame of the game. scene.background/fog are
+   * forced off for the duration: previewCamera's layer mask already keeps it
+   * from SEEING any world geometry, but background/fog are scene-level, not
+   * per-camera, and paint regardless of what the camera can see — dungeon.js
+   * sets scene.background to a biome sky colour, so without this the "empty"
+   * space around the character would tint whatever colour the paused gate
+   * happens to be, not the plain black void the panel asks for.
+   *
+   * THE CONTAINMENT FIX. The first cut of this feature aimed previewCamera at
+   * roughly the middle of the FULL canvas and trusted distance/FOV math to
+   * make the character line up with the stage's centre column — nothing
+   * physically stopped it from spilling past that column's actual edges, and
+   * on the owner's real device it did (rendered "massive", poking above the
+   * headbar). This version does the opposite: read InventoryUI's stage-centre
+   * DOM rectangle (via setInventoryStageRectProvider) and hard-clip the
+   * render to EXACTLY that rectangle with a GPU scissor + viewport, so the
+   * character CANNOT render outside the rails/ticker/headbar no matter what
+   * the framing numbers are. The full canvas is cleared to black first (with
+   * scissor test off, so the clear reaches every pixel, not just the stage
+   * rectangle) — that is what makes the rest of the screen the plain void the
+   * panel asks for, independent of this fitted sub-render.
+   */
+  _renderInventoryPreview() {
+    const r = this.renderer;
+    r.setRenderTarget(null);
+    r.setScissorTest(false);
+    r.setClearColor(0x000000, 1);
+    r.clear(true, true, false);
+
+    const rect = this._invStageRectFn?.();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return; // panel mid-layout — next frame catches it
+
+    // setViewport/setScissor take LOGICAL (CSS) pixels, the SAME units
+    // setSize does and getBoundingClientRect already returns — three.js
+    // multiplies by the pixel ratio internally. Passing device pixels here
+    // (this file's first cut of this fix did, via a manual *dpr) double-scales
+    // the rect and is exactly what put the character outside the panel
+    // instead of confining it — a scissor rect scaled up by pixelRatio a
+    // second time reaches well past the actual DOM box on any dpr!=1 screen.
+    r.getSize(_invRendererSize); // logical width/height — NOT canvas.width/height (those are device px)
+    const vx = rect.left;
+    const vw = rect.width;
+    const vh = rect.height;
+    // DOM rects are measured top-down from the logical viewport; a GL
+    // viewport's origin is bottom-left of the same logical frame.
+    const vy = _invRendererSize.height - rect.bottom;
+
+    this.previewCamera.aspect = rect.width / rect.height;
+    this.previewCamera.updateProjectionMatrix();
+
+    const bg = this.scene.background, fog = this.scene.fog;
+    this.scene.background = null;
+    this.scene.fog = null;
+    r.setViewport(vx, vy, vw, vh);
+    r.setScissor(vx, vy, vw, vh);
+    r.setScissorTest(true);
+    r.render(this.scene, this.previewCamera);
+    r.setScissorTest(false);
+    r.setViewport(0, 0, _invRendererSize.width, _invRendererSize.height);
+    this.scene.background = bg;
+    this.scene.fog = fog;
   }
 
   _updateCamera(dt) {

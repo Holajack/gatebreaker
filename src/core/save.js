@@ -38,6 +38,12 @@ export function freshSave() {
     stats: { str: 0, agi: 0, vit: 0, int: 0, per: 0 },
     autoStats: 0,       // the +1-to-everything counter; one per level gained
     playerBody: 'male', // 'male' | 'female' — the combat layer picks the rig off this
+    // null means "no custom name set" — the inventory header falls back to
+    // the generic "THE HUNTER" label. Absent-means-default, the same
+    // save.shop/save.worldTime precedent: a save written before this field
+    // existed reads identically to one that explicitly has it unset, so this
+    // is not a schema bump.
+    hunterName: null,
     cleared: {},        // { E: bestTimeSeconds }
     shadows: { roster: [], deployed: [], nextId: 1 },
     ash: 0,
