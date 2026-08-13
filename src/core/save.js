@@ -72,6 +72,38 @@ export function freshSave() {
     // has always opened on. Deliberately NOT a schema bump: a missing field
     // reads as 15.0 and that is the whole migration.
     worldTime: 15.0,
+    // --- The four CLASSES_SPEC fields. All additive, all defaulting to "the
+    // system does not exist for this save", which is exactly the state every
+    // profile written before Wave 3-B is in — so, on the shop/worldTime
+    // precedent, NOT a schema bump. className is the Assay Hall choice;
+    // archon is the endgame path; both null until the player commits.
+    // classTier (above) is deliberately untouched: it is reinterpreted as
+    // class QUALITY by classes.js and stays owned by progression.js.
+    className: null,
+    archon: null,
+    respecTokens: 0,
+    archonState: freshArchonState(),
+  };
+}
+
+// The archon layer's persistent block: the resource meter, ASHEN SIGILS for
+// re-ascension, the pact-beast records, and the five affinity counters that
+// decide which paths the trial offers. The two booleans are one-shot grant
+// guards (see migrate): they live in here rather than as top-level fields so
+// the whole classes footprint stays four keys.
+export function freshArchonState() {
+  return {
+    resource: 0,
+    sigils: 0,
+    ascendedAt: 0,
+    pacts: [],
+    affinity: { shadow: 0, flame: 0, frost: 0, storm: 0, beast: 0 },
+    migTokenGranted: false,
+    classTokenGranted: false,
+    // STEP 5's third one-shot guard: the first class RE-choice is free (an
+    // Assay Seal on the house — every player deserves one look at a class they
+    // picked from a menu at level 20); after this flips, reseals cost ash.
+    freeSealUsed: false,
   };
 }
 
@@ -90,6 +122,55 @@ function sanitiseHours(v) {
 function sanitiseAsh(v) {
   if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return 0;
   return Math.floor(v);
+}
+
+// The class/archon key allowlists, duplicated as local consts on the same
+// trade sanitiseShop() already made with weapons.js: game/classes.js is the
+// source of truth for both lists, and this module deliberately does not
+// import it merely to validate a string. If a key is added there, add it
+// here, or the new class silently unsaves.
+const CLASS_KEYS = ['vanguard', 'berserker', 'bladedancer', 'hexweaver', 'binder', 'oracle', 'templar', 'reaver'];
+const ARCHON_PATH_KEYS = ['shadow', 'flame', 'frost', 'storm', 'beast'];
+
+// An unknown string — a future build's class, a hand-edit — must NOT reach
+// classes.applyLayers(); null ("no class") is always safe and always sane.
+function sanitiseClassName(v) {
+  return CLASS_KEYS.includes(v) ? v : null;
+}
+
+function sanitiseArchon(v) {
+  return ARCHON_PATH_KEYS.includes(v) ? v : null;
+}
+
+// Same defensive posture as sanitiseAsh: tokens are spendable currency, so a
+// corrupted wallet must never reach respec() as NaN (every NaN comparison is
+// false, which would make the token path silently unreachable).
+function sanitiseRespecTokens(v) {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return 0;
+  return Math.min(99, Math.floor(v));
+}
+
+// Structural only, mirroring sanitiseShop(): whether a pact id still names a
+// live roster entry is game/classes.js's business, not this module's. Every
+// number is coerced finite and non-negative; affinity counters clamp to the
+// spec's 9999 overflow guard with missing keys filled to 0.
+function sanitiseArchonState(v) {
+  const out = freshArchonState();
+  if (!v || typeof v !== 'object') return out;
+  const num = (x) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : 0);
+  out.resource = num(v.resource);
+  out.sigils = Math.floor(num(v.sigils));
+  out.ascendedAt = Math.floor(num(v.ascendedAt));
+  out.pacts = Array.isArray(v.pacts)
+    ? v.pacts.filter((p) => p && typeof p === 'object' && Number.isFinite(p.id))
+    : [];
+  for (const k of ARCHON_PATH_KEYS) {
+    out.affinity[k] = Math.max(0, Math.min(9999, Math.floor(num(v.affinity?.[k]))));
+  }
+  out.migTokenGranted = v.migTokenGranted === true;
+  out.classTokenGranted = v.classTokenGranted === true;
+  out.freeSealUsed = v.freeSealUsed === true;
+  return out;
 }
 
 // Structural only. Whether a `sold` entry names a weapon that still exists is
@@ -171,7 +252,7 @@ function _migrate(raw) {
   const playerBody = raw.playerBody === 'female' ? 'female' : 'male';
   if (raw.version === SCHEMA_VERSION && raw.shadows && Array.isArray(raw.shadows.roster)) {
     // Already v2: merge onto fresh so a build that adds a field stays safe.
-    return {
+    return withClassFields({
       ...base,
       ...raw,
       version: SCHEMA_VERSION,
@@ -188,7 +269,7 @@ function _migrate(raw) {
         nextId: raw.shadows.nextId || raw.shadows.roster.length + 1,
       },
       stash: Array.isArray(raw.stash) ? raw.stash.slice() : [],
-    };
+    }, raw);
   }
 
   // --- v1 -> v2 ---
@@ -226,6 +307,26 @@ function _migrate(raw) {
     });
   }
   out.shadows = { roster, deployed: [], nextId: count + 1 };
+  return withClassFields(out, raw);
+}
+
+// The classes-layer half of the migration, applied to BOTH the v1 and v2
+// paths. Sanitises the four additive fields (the `...raw` spread above can
+// carry hand-edited garbage for any of them), then performs the spec's one
+// retroactive grant: a save already past the level-20 class gate gets one
+// respec token, because directions and masteries change what a stat spread is
+// worth and a player who spread flat under the old rules deserves one free
+// look at the new ones. migTokenGranted is the once-guard — migrate() runs on
+// EVERY load, and without the boolean each boot would mint another token.
+function withClassFields(out, raw) {
+  out.className = sanitiseClassName(raw.className);
+  out.archon = sanitiseArchon(raw.archon);
+  out.respecTokens = sanitiseRespecTokens(raw.respecTokens);
+  out.archonState = sanitiseArchonState(raw.archonState);
+  if (out.level >= 20 && !out.archonState.migTokenGranted) {
+    out.archonState.migTokenGranted = true;
+    out.respecTokens = Math.min(99, out.respecTokens + 1);
+  }
   return out;
 }
 

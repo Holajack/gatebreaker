@@ -61,6 +61,7 @@ const _q = new THREE.Quaternion();
 const _s = new THREE.Vector3();
 const _off = new THREE.Vector3();
 const _c = new THREE.Color();
+const UP = new THREE.Vector3(0, 1, 0);
 const HIDDEN = new THREE.Matrix4().makeScale(0, 0, 0);
 
 export class DecalPool {
@@ -256,5 +257,141 @@ export class DecalPool {
     const i = handle & KIND_MASK;
     const cap = kind === RING ? this.ringCap : this.barCap;
     return i < cap ? i : -1;
+  }
+}
+
+// ------------------------------------------------------------- ground fx
+//
+// The CLASSES_SPEC step-4 decal channel: transient ground telegraphy for the
+// direction masteries — RESIDUE's lingering skill fields (discs) and READING's
+// enemy-swing arcs (sectors), with the FLAME archon's Ashfall due to share the
+// disc half later (performanceBudget: the channels are SHARED, never added).
+//
+// Two InstancedMeshes, IMMEDIATE-MODE: the game pushes transforms every frame
+// between begin() and commit(), and commit() sets .count to what was pushed.
+// three r169's WebGLBufferRenderer.renderInstances early-returns at
+// primcount === 0, so an idle channel costs ZERO draw calls — the whole pool
+// submits nothing until a mastery actually fires, which is what keeps the
+// shipped dungeon budget (<= 24 E/D) untouched for every existing save. Live,
+// the cost is at most +2 submissions however many fields and arcs are up.
+//
+// Deliberately OFF the glow layer, like the character rings above: these are
+// READABILITY marks on the floor, and the review that produced RING_ALPHA
+// measured what a glowing ground sheet does to a dark arena. The sanctioned
+// telegraph-VFX glow path stays Effects.ring() for transient shockwaves.
+//
+// No per-frame allocation: matrices compose through the module scratch
+// (_m/_p/_q/_s), colours through _c, and the instance buffers are allocated
+// once up front (adding instanceColor to a live mesh changes the program
+// cache key and costs a shader recompile mid-run — same note as the pool
+// above).
+
+// The arc sector spans the game's ACTUAL melee hit test: _enemyStrike lands
+// when dot(bearing, facing) > 0.2, i.e. inside acos(0.2) either side of
+// forward. The geometry bakes exactly that cone so what the arc shows is what
+// the swing will hit — READING is the abstract stat becoming a visible thing,
+// and an arc narrower than the truth would teach players to stand in hits.
+const ARC_HALF = Math.acos(0.2);
+
+// Above the floor slabs but under the 0.36 the character rings ride at, so a
+// ring standing inside a field still reads. Arcs sit a step above discs: a
+// telegraph arc crossing a RESIDUE field must win the overdraw, because the
+// arc is the one that is about to hurt.
+const FX_DISC_Y = 0.12;
+const FX_ARC_Y = 0.16;
+
+export class GroundFxPool {
+  constructor(scene, { discs = 8, arcs = 6 } = {}) {
+    this.scene = scene;
+    this.discCap = discs;
+    this.arcCap = arcs;
+    this.liveDiscs = 0;
+    this.liveArcs = 0;
+
+    const discGeo = new THREE.CircleGeometry(1, 28);
+    discGeo.rotateX(-Math.PI / 2);
+    // Sector bisector on local -Y in plane space (thetaStart centred on
+    // -PI/2), which rotateX(-PI/2) maps onto local +Z — the same axis a yaw
+    // quaternion turns into the entity's _forward, so pushArc can hand the
+    // enemy's yaw straight through.
+    const arcGeo = new THREE.CircleGeometry(1, 20, -Math.PI / 2 - ARC_HALF, ARC_HALF * 2);
+    arcGeo.rotateX(-Math.PI / 2);
+
+    this.discMesh = new THREE.InstancedMesh(discGeo, new THREE.MeshBasicMaterial({
+      transparent: true, opacity: 0.20, depthWrite: false,
+    }), discs);
+    this.arcMesh = new THREE.InstancedMesh(arcGeo, new THREE.MeshBasicMaterial({
+      transparent: true, opacity: 0.30, depthWrite: false,
+    }), arcs);
+    for (const m of [this.discMesh, this.arcMesh]) {
+      // Transforms live in instance matrices, so the mesh's own bounds never
+      // reflect where anything is — culling by them would blank live fields.
+      m.frustumCulled = false;
+      m.count = 0;
+      m.instanceColor = new THREE.InstancedBufferAttribute(
+        new Float32Array((m === this.discMesh ? discs : arcs) * 3), 3,
+      );
+      scene.add(m);
+    }
+  }
+
+  /** Open the frame: everything not re-pushed before commit() disappears. */
+  begin() {
+    this.liveDiscs = 0;
+    this.liveArcs = 0;
+  }
+
+  /** A full-circle ground field (RESIDUE, the boss slam's READING disc). */
+  pushDisc(x, z, radius, color, brightness = 1) {
+    if (this.liveDiscs >= this.discCap) return;
+    const i = this.liveDiscs++;
+    _m.compose(_p.set(x, FX_DISC_Y, z), _q.identity(), _s.set(radius, 1, radius));
+    this.discMesh.setMatrixAt(i, _m);
+    // Per-instance alpha is unavailable on a shared material — dim the colour
+    // instead, the same trade acquireRing documents above.
+    this.discMesh.setColorAt(i, _c.setHex(color).multiplyScalar(Math.min(1, brightness)));
+  }
+
+  /** A swing-cone sector: `yaw` is the striker's facing, `radius` its reach. */
+  pushArc(x, z, yaw, radius, color) {
+    if (this.liveArcs >= this.arcCap) return;
+    const i = this.liveArcs++;
+    _q.setFromAxisAngle(UP, yaw);
+    _m.compose(_p.set(x, FX_ARC_Y, z), _q, _s.set(radius, 1, radius));
+    this.arcMesh.setMatrixAt(i, _m);
+    this.arcMesh.setColorAt(i, _c.setHex(color));
+  }
+
+  /** Close the frame: set the live counts and upload what was pushed. */
+  commit() {
+    this.discMesh.count = this.liveDiscs;
+    this.arcMesh.count = this.liveArcs;
+    if (this.liveDiscs > 0) {
+      this.discMesh.instanceMatrix.needsUpdate = true;
+      this.discMesh.instanceColor.needsUpdate = true;
+    }
+    if (this.liveArcs > 0) {
+      this.arcMesh.instanceMatrix.needsUpdate = true;
+      this.arcMesh.instanceColor.needsUpdate = true;
+    }
+  }
+
+  /** Hide everything without tearing down — a mode swap, not a disposal. */
+  clear() {
+    this.liveDiscs = 0;
+    this.liveArcs = 0;
+    this.discMesh.count = 0;
+    this.arcMesh.count = 0;
+  }
+
+  /** Full teardown: geometries and materials back to the renderer. */
+  dispose() {
+    for (const m of [this.discMesh, this.arcMesh]) {
+      m.parent?.remove(m);
+      m.geometry.dispose();
+      m.material.dispose();
+      m.dispose();
+    }
+    this.scene = null;
   }
 }

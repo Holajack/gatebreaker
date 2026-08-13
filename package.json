@@ -28,6 +28,7 @@
     "test:citylife": "node tools/citylife-test.mjs",
     "test:shop": "node tools/shop-test.mjs",
     "test:progression": "node tools/progression-test.mjs",
+    "test:classes": "node tools/classes-test.mjs",
     "test:frameclock": "node tools/frameclock-test.mjs",
     "test:entities": "node tools/entity-test.mjs",
     "test:fight": "node tools/fight-test.mjs",

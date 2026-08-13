@@ -16,6 +16,11 @@
 // markup sink whatever you believe about its inputs today.
 
 import { PORTAL_COLORS } from '../world/city.js';
+import {
+  CLASS_LIST, CLASS_QUALITY, DIRECTIONS,
+  directionOf, masteryTier, canChooseClass, chooseClass,
+  canRechooseClass, rechooseClass, rechooseCost,
+} from '../game/classes.js';
 
 const CSS = `
 #cityUi { position: fixed; inset: 0; pointer-events: none; z-index: 40;
@@ -249,6 +254,384 @@ export class CityUI {
     this.confirmEl.removeEventListener('click', this._fire);
     this.root.remove();
     document.body.classList.remove('gb-city');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// THE ASSAY HALL DESK — the class-choice panel (CLASSES_SPEC STEP 5).
+//
+// An OVERLAY, not an AppState screen, for exactly the reason shopui.js records:
+// routing through the router would tear down and rebuild the whole city every
+// time the player closed a menu he opened by standing in a doorway. Same
+// pattern throughout — shipped .panel / .btn / .gate classes, own injected
+// sheet for only what no existing screen has, createElement/textContent for
+// every node (class names and texts are authored in classes.js, but a markup
+// sink is a markup sink whatever you believe about its inputs today).
+//
+// THE ONE PRESENTATION RULE THAT IS NOT NEGOTIABLE (spec risk "drawback
+// resentment"): drawbacks render in the SAME TYPE SIZE as benefits, on this
+// panel, forever. A class whose downside a player did not read is a class they
+// will blame the game for. Both lines are 11.5px below; only the colour
+// differs.
+
+const ASSAY_CSS = `
+#assayPanel { z-index: 60; }
+body.gb-assay #cityUi { display: none !important; }
+
+#assayPanel .assay-strip {
+  display: flex; justify-content: space-between; gap: 12px;
+  border: 1px solid var(--edge); border-radius: 10px;
+  padding: 8px 14px; font-size: 12px; letter-spacing: .1em;
+  background: rgba(124,92,255,.07);
+}
+#assayPanel .assay-strip b { color: var(--gold); }
+#assayPanel .assay-strip .right { color: var(--dim); }
+#assayPanel .assay-strip .right b { color: var(--ink); }
+
+#assayPanel .assay-list { max-height: min(52vh, 360px); overflow-y: auto; }
+/* The fold must never lie (fixup 1): on a 412 px-tall landscape phone the
+   flex column squeezed the list to exactly one row, cut clean at the row
+   boundary — the panel read as "BERSERKER — PICK A CLASS" and seven classes
+   were invisible with no affordance at all. Two fixes below: _snapPeek()
+   caps the list at n-and-a-half rows whenever at least 1.5 fit (a torn row
+   IS the affordance), and .assay-more is the honest counter for viewports
+   too short even for that. */
+#assayPanel .assay-more {
+  text-align: center; font-size: 10.5px; font-weight: 800;
+  letter-spacing: .14em; color: var(--gold); line-height: 1.2;
+  min-height: 13px; margin-top: -4px;
+}
+#assayPanel .assay-more.off { visibility: hidden; }
+/* Short landscape phones: the flavour sentence costs a third of the
+   roster's room, and the rows already carry the whole pitch (benefit AND
+   drawback in equal type) — the panel sheds its subtitle before it hides a
+   class. */
+@media (max-height: 520px) {
+  #assayPanel .panel-sub { display: none; }
+  #assayPanel .panel { gap: 8px; padding: 14px 16px; }
+}
+/* The roster row is a .gate; these are only the parts a gate row has no slot
+   for. The affinity pill reuses the gate list's swatch geometry. */
+#assayPanel .gate { padding: 9px 12px; align-items: flex-start; }
+#assayPanel .gate .aff {
+  width: 44px; min-width: 44px; display: grid; place-items: center;
+  border-radius: 9px; font-size: 10px; font-weight: 800; letter-spacing: .06em;
+  padding: 6px 2px; border: 1px solid var(--edge); color: var(--dim);
+  text-align: center; line-height: 1.4;
+}
+#assayPanel .gate.resonant .aff { color: var(--gold); border-color: rgba(255,194,75,.55); }
+#assayPanel .gate .meta { min-width: 0; }
+#assayPanel .gate .badge {
+  display: inline-block; margin-left: 8px; font-size: 10px; font-weight: 800;
+  letter-spacing: .12em; color: var(--gold);
+}
+#assayPanel .gate .fant { display: block; color: var(--dim); font-size: 11px; font-style: italic; }
+/* Benefit and drawback: SAME SIZE, colour is the only difference. */
+#assayPanel .gate .ben, #assayPanel .gate .dbk {
+  display: block; font-size: 11.5px; line-height: 1.45; letter-spacing: .02em;
+  white-space: normal;
+}
+#assayPanel .gate .ben { color: var(--accent2); }
+#assayPanel .gate .dbk { color: var(--danger); }
+#assayPanel .gate.sel { border-color: var(--gold); background: rgba(255,194,75,.08); }
+#assayPanel .gate .sworn {
+  margin-left: auto; white-space: nowrap; font-size: 10.5px; font-weight: 800;
+  letter-spacing: .12em; color: var(--gold);
+}
+#assayPanel .assay-actions { display: flex; gap: 10px; }
+#assayPanel .assay-actions .btn { flex: 1; }
+#assayPanel .btn.confirm { border-color: rgba(255,194,75,.6); color: var(--gold); }
+#assayPanel .btn.confirm:disabled { opacity: .45; }
+`;
+
+let _assayStyleEl = null;
+function ensureAssayStyle() {
+  if (_assayStyleEl && _assayStyleEl.isConnected) return;
+  _assayStyleEl = document.createElement('style');
+  _assayStyleEl.id = 'assayUiStyle';
+  _assayStyleEl.textContent = ASSAY_CSS;
+  document.head.appendChild(_assayStyleEl);
+}
+
+function el(tag, className, text) {
+  const n = document.createElement(tag);
+  if (className) n.className = className;
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+const QUALITY_LABEL = { base: 'BASE', advanced: 'ADVANCED', sovereign: 'SOVEREIGN' };
+
+export class AssayUI {
+  /**
+   * @param {{game:object, audio?:object, root?:HTMLElement}} opts
+   *   `game` is the live Game: the panel reads game.save, commits through
+   *   game/classes.js, re-derives through game.refreshDerived() (the single
+   *   computation site) and persists through game.onSave() — one writer, so
+   *   the choice and the wallet land in localStorage in the same write.
+   */
+  constructor({ game, audio = null, root = document.body } = {}) {
+    ensureAssayStyle();
+    this.game = game || null;
+    this.audio = audio || game?.audio || null;
+    this._open = false;
+    this._selected = null;
+
+    const screen = el('div', 'screen overlay hidden');
+    screen.id = 'assayPanel';
+
+    const panel = el('div', 'panel wide');
+    panel.appendChild(el('h2', null, 'THE ASSAY HALL'));
+    panel.appendChild(el('p', 'panel-sub',
+      'The assayer measures what you already are. A class is a shape, not a strength — every benefit below is paid for.'));
+
+    this.stripEl = el('div', 'assay-strip');
+    this.stripPath = el('span');
+    this.stripRight = el('span', 'right');
+    this.stripEl.appendChild(this.stripPath);
+    this.stripEl.appendChild(this.stripRight);
+    panel.appendChild(this.stripEl);
+
+    this.listEl = el('div', 'gate-list assay-list');
+    this.listEl.id = 'assayList';
+    panel.appendChild(this.listEl);
+
+    // The below-the-fold counter ("▼ 6 MORE CLASSES BELOW"): visibility, not
+    // display, so hiding it at the bottom of the scroll cannot reflow the
+    // list it describes. Updated on scroll and on every render.
+    this.moreEl = el('div', 'assay-more off');
+    this.moreEl.id = 'assayMore';
+    panel.appendChild(this.moreEl);
+    this.listEl.addEventListener('scroll', () => this._syncMore());
+
+    const actions = el('div', 'assay-actions');
+    this.confirmBtn = el('button', 'btn confirm', 'CHOOSE');
+    this.confirmBtn.id = 'assayConfirm';
+    this.confirmBtn.type = 'button';
+    this.confirmBtn.addEventListener('click', () => this._confirm());
+    actions.appendChild(this.confirmBtn);
+    panel.appendChild(actions);
+
+    const footer = el('div', 'assay-actions');
+    // The desk keeps its old job: the fast-travel list is one tap away, so
+    // adding classes to the Assay Hall never took RIFT CONTRACTS off it.
+    const gates = el('button', 'btn ghost', 'RIFT CONTRACTS');
+    gates.id = 'assayGates';
+    gates.type = 'button';
+    gates.addEventListener('click', () => {
+      this.audio?.ui?.();
+      this.close();
+      this.game?.appState?.go('gates', { from: 'city' });
+    });
+    const close = el('button', 'btn ghost', 'LEAVE');
+    close.id = 'assayClose';
+    close.type = 'button';
+    close.addEventListener('click', () => { this.audio?.ui?.(); this.close(); });
+    footer.appendChild(gates);
+    footer.appendChild(close);
+    panel.appendChild(footer);
+
+    screen.appendChild(panel);
+    root.appendChild(screen);
+    this.root = screen;
+  }
+
+  get isOpen() { return this._open; }
+
+  /**
+   * Open the desk. Returns false below level 20 — the assayer has nothing to
+   * measure yet, and citymode falls back to the shipped contracts list.
+   */
+  open() {
+    const save = this.game?.save;
+    if (!save || (save.level || 0) < 20) return false;
+    this._selected = null;
+    // Unhide BEFORE render: _snapPeek measures real row geometry, and a
+    // display:none subtree measures as zero everywhere.
+    this.root.classList.remove('hidden');
+    document.body.classList.add('gb-assay');
+    this._open = true;
+    this.render();
+    // The migration's promise (CLASSES_SPEC migration step 2): a save already
+    // past the gate is told, in gold, that the choice is on the table.
+    if (canChooseClass(save)) this.game?.ui?.toast?.('YOUR CLASS AWAITS', 'gold');
+    return true;
+  }
+
+  close() {
+    this.root.classList.add('hidden');
+    document.body.classList.remove('gb-assay');
+    this._open = false;
+  }
+
+  /** Rebuild the roster from the save. Eight rows — cheap enough to re-render on every commit. */
+  render() {
+    const save = this.game?.save;
+    if (!save) return;
+    const dir = directionOf(save);
+    const dirTier = dir === 'unsworn' ? 0 : masteryTier(save, dir);
+
+    // The header the spec asks for by name: legibility does more work than
+    // the 12% does.
+    this.stripPath.textContent = '';
+    this.stripPath.appendChild(document.createTextNode('YOUR PATH SO FAR READS AS '));
+    this.stripPath.appendChild(el('b', null, dir === 'unsworn' ? 'UNSWORN' : DIRECTIONS[dir].name));
+    this.stripRight.textContent = '';
+    if (canRechooseClass(save)) {
+      // Reseal mode: the wallet matters, so show it beside the price.
+      const cost = rechooseCost(save);
+      this.stripRight.appendChild(document.createTextNode(cost > 0 ? `RESEAL ${cost} · ASH ` : 'FIRST RESEAL FREE · ASH '));
+      this.stripRight.appendChild(el('b', null, String(Math.floor(save.ash || 0))));
+    } else {
+      // Choice mode: the earned quality is already banked for a post-40 save.
+      this.stripRight.appendChild(document.createTextNode('CLASS QUALITY '));
+      this.stripRight.appendChild(el('b', null, save.classTier
+        ? `${QUALITY_LABEL[save.classTier]} x${CLASS_QUALITY[save.classTier].toFixed(2)}`
+        : 'UNTRIED'));
+    }
+
+    // Resonant classes first (spec matchingPolicy.encouragementBeyondNumbers);
+    // sort stability keeps CLASSES declaration order within each half.
+    const roster = CLASS_LIST.slice().sort(
+      (a, b) => Number(b.affinity.includes(dir)) - Number(a.affinity.includes(dir)),
+    );
+    this.listEl.textContent = '';
+    for (const cls of roster) {
+      this.listEl.appendChild(this._rowNode(cls, save, dir, dirTier));
+    }
+    this._syncConfirm();
+    // Geometry passes after the DOM lands: rAF so the rows have laid out.
+    requestAnimationFrame(() => { this._snapPeek(); });
+  }
+
+  /**
+   * Never let the fold coincide with a row boundary (the failure a 412 px
+   * landscape phone shipped with: exactly one fully-visible row, zero
+   * scrollbar, and a panel that read as a single-class offer). Whenever at
+   * least one-and-a-half rows fit, cap the list at n full rows plus half the
+   * next — a torn row is a scroll affordance no one misreads. When even that
+   * does not fit, leave the CSS height alone and let _syncMore's counter
+   * carry the message.
+   */
+  _snapPeek() {
+    const list = this.listEl;
+    if (!list.isConnected || this.root.classList.contains('hidden')) return;
+    list.style.maxHeight = '';                    // measure at the CSS ceiling
+    const rows = list.children;
+    if (rows.length >= 2 && list.scrollHeight > list.clientHeight + 4) {
+      const r0 = rows[0].getBoundingClientRect();
+      const r1 = rows[1].getBoundingClientRect();
+      const pitch = r1.top - r0.top;              // row height + list gap
+      if (pitch > 0) {
+        const k = Math.floor((list.clientHeight - pitch * 0.5) / pitch);
+        if (k >= 1) list.style.maxHeight = `${Math.round((k + 0.5) * pitch)}px`;
+      }
+    }
+    this._syncMore();
+  }
+
+  /** The honest fold counter: how many class rows sit below the visible edge. */
+  _syncMore() {
+    const list = this.listEl;
+    const more = this.moreEl;
+    if (!more) return;
+    const lim = list.getBoundingClientRect().bottom;
+    let below = 0;
+    // A row counts as "below" until a meaningful slice of it (12 px) shows.
+    for (const row of list.children) {
+      if (row.getBoundingClientRect().top > lim - 12) below++;
+    }
+    if (below <= 0) {
+      more.classList.add('off');
+    } else {
+      more.textContent = `▼ ${below} MORE ${below === 1 ? 'CLASS' : 'CLASSES'} BELOW`;
+      more.classList.remove('off');
+    }
+  }
+
+  _rowNode(cls, save, dir, dirTier) {
+    const resonant = cls.affinity.includes(dir);
+    const row = el('button', 'gate');
+    row.type = 'button';
+    row.dataset.classKey = cls.key;
+    if (resonant) row.classList.add('resonant');
+    if (this._selected === cls.key) row.classList.add('sel');
+
+    const aff = el('span', 'aff', cls.affinity.map((k) => k.toUpperCase()).join(' + '));
+    row.appendChild(aff);
+
+    const meta = el('span', 'meta');
+    const name = el('b', null, cls.name);
+    if (resonant) {
+      // Gold, and tiered: RESONANT 0 is a match with no depth yet, and saying
+      // the number is how the panel teaches that depth is what pays.
+      name.appendChild(el('span', 'badge', dirTier > 0 ? `RESONANT ${dirTier}` : 'RESONANT'));
+    }
+    meta.appendChild(name);
+    meta.appendChild(el('small', 'fant', cls.fantasy));
+    meta.appendChild(el('small', 'ben', cls.benefitText));
+    meta.appendChild(el('small', 'dbk', cls.drawbackText));
+    row.appendChild(meta);
+
+    if (save.className === cls.key) row.appendChild(el('span', 'sworn', 'SWORN'));
+
+    row.addEventListener('click', () => {
+      this.audio?.ui?.();
+      this._selected = this._selected === cls.key ? null : cls.key;
+      this.render();
+    });
+    return row;
+  }
+
+  /** The confirm button says exactly what committing costs, or why it cannot. */
+  _syncConfirm() {
+    const save = this.game?.save;
+    const btn = this.confirmBtn;
+    const cls = CLASS_LIST.find((c) => c.key === this._selected);
+    if (!cls) {
+      btn.textContent = canRechooseClass(save) ? 'PICK A CLASS TO RESEAL' : 'PICK A CLASS';
+      btn.disabled = true;
+      return;
+    }
+    if (save.className === cls.key) {
+      btn.textContent = 'YOUR CURRENT OATH';
+      btn.disabled = true;
+      return;
+    }
+    if (canChooseClass(save)) {
+      btn.textContent = `BECOME ${cls.name}`;
+      btn.disabled = false;
+      return;
+    }
+    const cost = rechooseCost(save);
+    btn.textContent = cost > 0 ? `RESEAL AS ${cls.name} · ${cost} ASH` : `RESEAL AS ${cls.name} · FREE`;
+    btn.disabled = cost > (save.ash || 0);
+  }
+
+  _confirm() {
+    const g = this.game;
+    const save = g?.save;
+    const cls = CLASS_LIST.find((c) => c.key === this._selected);
+    if (!g || !save || !cls) return;
+    this.audio?.ui?.();
+    if (canChooseClass(save)) {
+      if (!chooseClass(save, cls.key)) return;
+      g.ui?.toast?.(`SWORN: ${cls.name} · +1 RESPEC TOKEN`, 'gold');
+    } else {
+      const cost = rechooseCost(save);
+      if (!rechooseClass(save, cls.key)) {
+        g.ui?.toast?.('NOT ENOUGH ASH', 'danger');
+        return;
+      }
+      g.ui?.toast?.(cost > 0 ? `RESEALED: ${cls.name} · -${cost} ASH` : `RESEALED: ${cls.name} · SEAL SPENT`, 'gold');
+    }
+    // The single computation site folds the new class in; onSave persists the
+    // choice and (on a reseal) the spend in the same write — one writer, no
+    // drift, exactly the shopui.js discipline.
+    g.refreshDerived();
+    g.onSave?.();
+    this._selected = null;
+    this.render();
   }
 }
 

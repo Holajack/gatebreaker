@@ -167,8 +167,13 @@ console.log('\nA. THE LAWS\n');
   ok(canAscend(s, r.weapon).reason === 'ALREADY ASCENDED', 'a legendary cannot re-ascend');
   ok(canAscend(s, rollWeapon('riftedge', 1, { rarity: 'rare', level: 5 })).reason === 'ONLY AN EPIC CAN ASCEND',
     'a rare cannot ascend');
-  ok(canAscend(s, rollWeapon('vigil', 9, { rarity: 'epic', level: 20 })).reason === 'NO SIGIL EXISTS FOR THIS FAMILY',
-    'the polearm family reports NO SIGIL (the spec map has no seventh boss)');
+  // FAMILY_SIGIL deliberately maps polearm onto the WARDEN's sigil (its own
+  // comment: six bosses cover seven families by sharing — reach weapons drill
+  // in the sword's martial line, and NO SIGIL walled Vigil/Voidglaive out of
+  // ascension entirely). The refusal for an unfunded polearm epic is therefore
+  // the ordinary missing-sigil one, not the family wall.
+  ok(canAscend(s, rollWeapon('vigil', 9, { rarity: 'epic', level: 20 })).reason === 'NEEDS 1 WARDEN SIGIL',
+    'the polearm family ascends on the WARDEN sigil (shared — no seventh boss, no walled-out family)');
 }
 
 // --- THE LAW, structurally --------------------------------------------------

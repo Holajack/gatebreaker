@@ -8,6 +8,12 @@ import {
   LEVEL_CAP, POINTS_PER_LEVEL, AUTO_STAT_PER_LEVEL, DAILY_CONTRACT_POINTS,
   STATS, xpForLevel,
 } from './config.js';
+// For BINDER's roster term only (classModifiers reads config, never this
+// module, so the import cannot cycle). Applied INSIDE shadowRosterCapacity —
+// the one read addShadow, the panel and the tests all share — rather than as
+// a caller-supplied parameter, because a capacity three call sites could
+// each forget is a capacity that lies on exactly one of them.
+import { classModifiers } from './classes.js';
 
 const STAT_KEYS = STATS.map((s) => s.key);
 
@@ -73,18 +79,37 @@ export function allocate(save, key, count = 1) {
   return true;
 }
 
+// 80 + 14/point, CAPPED at 3000 (CLASSES_SPEC layerA_directions.respec).
+// Uncapped, the L100 all-in figure of 495 spent points priced a respec at
+// 6,010 ash — past the Exchange's entire late-game curve, so the button was
+// theoretical exactly when directions and masteries made it matter most. The
+// cap first binds at spent = 209 (80 + 14 x 209 = 3,006), so every number
+// below that — including the load-bearing spent=3 = 122 assert — is verbatim.
 export function respecCost(save) {
   const spent = STAT_KEYS.reduce((a, k) => a + (save.stats[k] || 0), 0);
-  return 80 + 14 * spent;
+  return Math.min(3000, 80 + 14 * spent);
 }
 
-/** Refund every spent point. Escalating cost is what stops free experimentation. */
+/**
+ * Refund every spent point. Escalating cost is what stops free
+ * experimentation; a respec TOKEN (granted by choosing a class, ascending,
+ * and once by the classes-wave migration) is the sanctioned exception and is
+ * consumed INSTEAD of ash, never alongside it.
+ *
+ * Note for the UI: because direction and every mastery are DERIVED from
+ * save.stats, zeroing the spread also clears them — the confirm dialog must
+ * say so by name (losing BREAKER T3 is a bigger loss than losing the points).
+ */
 export function respec(save) {
-  const cost = respecCost(save);
-  if ((save.ash || 0) < cost) return false;
   const spent = STAT_KEYS.reduce((a, k) => a + (save.stats[k] || 0), 0);
   if (spent === 0) return false;
-  save.ash -= cost;
+  if ((save.respecTokens || 0) > 0) {
+    save.respecTokens -= 1;
+  } else {
+    const cost = respecCost(save);
+    if ((save.ash || 0) < cost) return false;
+    save.ash -= cost;
+  }
   STAT_KEYS.forEach((k) => { save.stats[k] = 0; });
   save.points = (save.points || 0) + spent;
   return true;
@@ -95,9 +120,16 @@ export function effectiveStat(save, key) {
   return (save.stats?.[key] || 0) + (save.autoStats || 0);
 }
 
-/** How many shadows you may OWN. INT-driven, so army size is a build decision. */
+/** How many shadows you may OWN. INT-driven, so army size is a build decision.
+ *  BINDER's "+25% roster" (flagsScaled rosterPct, quality/resonance-scaled)
+ *  multiplies the earned figure UNDER the 120 hard cap — the worked example's
+ *  "already at the 120 hard cap, so inert" clause holds by construction.
+ *  classModifiers is null for every save without a class, so the shipped
+ *  number passes through exactly. */
 export function shadowRosterCapacity(save) {
-  return Math.min(120, 6 + Math.floor(effectiveStat(save, 'int') * 0.35) + Math.floor(save.level * 0.6));
+  const earned = 6 + Math.floor(effectiveStat(save, 'int') * 0.35) + Math.floor(save.level * 0.6);
+  const rosterPct = classModifiers(save)?.flags?.rosterPct || 0;
+  return Math.min(120, Math.floor(earned * (1 + rosterPct)));
 }
 
 /**

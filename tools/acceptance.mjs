@@ -991,6 +991,205 @@ try {
     compAgain.node && compAgain.companion === true, JSON.stringify(compAgain));
   await page.screenshot({ path: shotPath('acc-12-companion.png'), timeout: 90000 });
 
+  // ======================================================= 6. SOULS (3-B2)
+  // CLASSES_SPEC STEP 11: the identity layers, asked the way the owner would
+  // after playing — does the game NAME what I've been doing, does the Assay
+  // Hall remember my oath, does the endgame offer arrive when I've earned it,
+  // and does a path actually DO its thing in a live gate?
+  console.log('\n6. SOULS: DIRECTION, THE ASSAY OATH, THE ARCHON OFFER, THE STORM\n');
+
+  // ---- 6a. a class-less save plays on shipped numbers ---------------------
+  // (buildOrder: "a null-class save producing shipped numbers"). This profile
+  // has levelled and fought all session and never chosen a class, so its
+  // derived block must be field-exact to derive() — the migration guarantee,
+  // measured on the live game rather than in a unit.
+  const nullClass = await evalGame(page, async (g) => {
+    const { derive } = await import('/src/game/config.js');
+    const base = derive(g.save, g._armorBonus);
+    return {
+      className: g.save.className,
+      archon: g.save.archon,
+      diffs: Object.keys(base).filter((k) => g.derived[k] !== base[k]),
+    };
+  });
+  report.nullClass = nullClass;
+  ok('a class-less save still plays on exactly the shipped numbers',
+    nullClass.className === null && nullClass.diffs.length === 0, JSON.stringify(nullClass));
+
+  // ---- 6b. direction derives from SPENT points ----------------------------
+  const direction = await evalGame(page, async (g) => {
+    const { directionOf } = await import('/src/game/classes.js');
+    const saved = { ...g.save.stats };
+    g.save.stats = { str: 0, agi: 0, vit: 0, int: 120, per: 0 };
+    const read = directionOf(g.save);
+    g.ui._renderStats();
+    const header = document.querySelector('#statGrid .readout b')?.textContent || '';
+    g.save.stats = saved;
+    g.refreshDerived();
+    return { read, header };
+  });
+  report.direction = direction;
+  ok('spending deep into INTELLECT reads as a direction and the panel names it',
+    direction.read === 'int' && /EMBERMIND/.test(direction.header),
+    `${direction.read} / "${direction.header}"`);
+
+  // ---- 6c. the Assay Hall oath ------------------------------------------
+  // Walk the door the way a player does (the prompt at the assayer's desk),
+  // swear BERSERKER through the real panel controls, and demand the derived
+  // block repricess by EXACTLY the modelled amounts — applyLayers is the one
+  // pricing authority ("a class-chosen save producing the modelled numbers").
+  const assay = await evalGame(page, async (g) => {
+    const c = g.mode.city;
+    const it = c.interactables.find((x) => x.id === 'assay');
+    g.save.level = Math.max(22, g.save.level);
+    g.save.autoStats = Math.max(21, g.save.autoStats);
+    g.save.stats.str = Math.max(60, g.save.stats.str | 0);
+    g.save.className = null;
+    g.refreshDerived(true);
+    g.player.body.reset(it.pos.x, c.heightAt(it.pos.x, it.pos.z), it.pos.z);
+    g.mode._updatePrompt();
+    const sub = g.mode.prompt?.sub;
+    g.mode.confirmPrompt();
+    const open = Boolean(g.assayUI?.isOpen);
+    document.querySelector('#assayList .gate[data-class-key="berserker"]')?.click();
+    document.getElementById('assayConfirm')?.click();
+    const { applyLayers } = await import('/src/game/classes.js');
+    const { derive } = await import('/src/game/config.js');
+    const want = applyLayers(g.save, derive(g.save, g._armorBonus));
+    return {
+      sub,
+      open,
+      className: g.save.className,
+      diffs: Object.keys(want).filter((k) => g.derived[k] !== want[k]),
+      atkSpeed: g.derived.atkSpeed,
+    };
+  });
+  report.assay = assay;
+  ok('the assayer\'s desk offers the class choice at level 20+',
+    assay.sub === 'YOUR CLASS AWAITS' && assay.open, JSON.stringify({ sub: assay.sub, open: assay.open }));
+  ok('swearing BERSERKER sticks and reprices by exactly the modelled amounts',
+    assay.className === 'berserker' && assay.diffs.length === 0,
+    `class ${assay.className}, drifted fields: ${assay.diffs.join(',') || 'none'}`);
+  await page.screenshot({ path: shotPath('acc-13-assay-oath.png'), timeout: 90000 });
+  await evalGame(page, (g) => g.assayUI?.close?.());
+
+  // ---- 6d. ...and the oath survives a restart -----------------------------
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => Boolean(window.__game), null, { timeout: 30000 });
+  await page.waitForSelector('#title:not(.hidden)', { timeout: 30000 });
+  await page.waitForTimeout(800);
+  const oathAfter = await page.evaluate(() => ({
+    className: window.__game.save.className,
+    tokens: window.__game.save.respecTokens,
+  }));
+  report.oathAfter = oathAfter;
+  ok('the class oath survives a restart (save round-trip through the sanitisers)',
+    oathAfter.className === 'berserker', JSON.stringify(oathAfter));
+
+  // ---- 6e. the archon offer arrives when earned ---------------------------
+  // Level 55, the trial done, an S clear on the books, storm affinity led by
+  // this save's (scripted) play: the offer must list the top two counters
+  // plus SHADOW, and taking STORM must change NOTHING on the derived block
+  // ("an ascended save producing an unchanged derived block").
+  await enterCityUi(page);
+  const offer = await evalGame(page, (g) => {
+    g.save.level = 55;
+    g.save.autoStats = 54;
+    if (!g.save.classTier) g.save.classTier = 'base';
+    g.save.cleared.S = 1;
+    g.save.archon = null;
+    g.save.archonState.affinity.storm = 40;
+    g.save.archonState.affinity.frost = 12;
+    g.refreshDerived(true);
+    g._offerAscension();
+    return {
+      visible: !document.getElementById('archonPanel').classList.contains('hidden'),
+      rows: [...document.querySelectorAll('#archonPanel .gate')].map((r) => r.dataset.archon),
+    };
+  });
+  report.archonOffer = offer;
+  ok('an archon offer appears when earned — the top two by affinity, plus SHADOW',
+    offer.visible && offer.rows[0] === 'storm' && offer.rows.includes('shadow'),
+    JSON.stringify(offer.rows));
+  await page.screenshot({ path: shotPath('acc-14-archon-offer.png'), timeout: 90000 });
+  const ascended = await evalGame(page, (g) => {
+    const before = { ...g.derived };
+    document.querySelector('#archonPanel .gate[data-archon="storm"]')?.click();
+    return {
+      archon: g.save.archon,
+      diffs: Object.keys(before).filter((k) => g.derived[k] !== before[k]),
+    };
+  });
+  report.ascended = ascended;
+  ok('ascending STORM writes the identity and changes NOTHING on the derived block',
+    ascended.archon === 'storm' && ascended.diffs.length === 0, JSON.stringify(ascended));
+
+  // ---- 6f. the path's signature fires end-to-end in a live gate -----------
+  // A landed hit through the real damage funnel chains 55% x atk to the 8 m
+  // neighbour and spends exactly the 4-Charge discharge (the STEP 11 parity
+  // tune), and the absolute 14 u/s ceiling holds against a speed no build
+  // can reach — the two numbers the spec calls out by name.
+  const storm = await evalGame(page, (g) => {
+    const realRandom = Math.random;
+    const realRender = g.renderer.render;
+    try {
+      g.startGate(0);
+      g.renderer.render = () => {};
+      // Skip the walk-in intro: its auto-walk writes body.maxSpeed on its own
+      // (inert in play — nothing can be live during the walk-in), and the 14
+      // u/s probe below must read the FIGHT loop's clamp site.
+      for (let i = 0; i < 10; i++) {
+        if (g.mode?.intro) g.mode._introSkip = true;
+        g.update(1 / 60);
+      }
+      g.renderer.render = realRender;
+      g.killed = -99999;
+      g.spawned = 99999;
+      Math.random = () => 0.99; // deterministic: no crits, no extraction rolls
+      for (const e of [...g.enemies]) g._killEnemy(e);
+      const V = g.player.pos.constructor;
+      const mk = (x, z) => {
+        g._spawnEnemy(new V(x, 0, z), 'grunt');
+        const e = g.enemies[g.enemies.length - 1];
+        e.spawning = 0; e.attackCd = 9e9; e.hp = 1e6; e.maxHp = 1e6;
+        e.pos.set(x, 0, z);
+        return e;
+      };
+      const A = mk(g.player.pos.x + 3, g.player.pos.z);
+      const B = mk(g.player.pos.x + 5, g.player.pos.z);
+      g._archonRes.set(200);
+      const hpB = B.hp;
+      g._damageEnemy(A, 10);
+      const chained = hpB - B.hp;
+      const charge = g._archonRes.value;
+      const segs = g._archonFx?.liveCount || 0;
+      // the ceiling: a live Tempest and an absurd speed, clamped at the body
+      g._tempestT = 3;
+      const realSpeed = g.derived.speed;
+      g.derived.speed = 30;
+      g.renderer.render = () => {};
+      g.update(1 / 60);
+      const cap = g.player.body.maxSpeed;
+      g.derived.speed = realSpeed;
+      g._tempestT = 0;
+      g.update(1 / 60);
+      return {
+        chained, expected: Math.max(1, Math.round(g.derived.atk * 0.55)),
+        charge, segs, cap,
+      };
+    } finally {
+      Math.random = realRandom;
+      g.renderer.render = realRender;
+    }
+  });
+  report.storm = storm;
+  ok('STORM\'s signature fires end-to-end: a landed hit chains 55% x atk and spends 4 Charge',
+    storm.chained === storm.expected && storm.charge === 196 && storm.segs > 0,
+    JSON.stringify(storm));
+  ok('the absolute 14 u/s move-speed ceiling holds whatever pushes against it',
+    storm.cap === 14, String(storm.cap));
+  await page.screenshot({ path: shotPath('acc-15-storm-gate.png'), timeout: 90000 });
+
   ok('no uncaught page errors across the whole run', errors.length === 0,
     errors.slice(0, 2).join(' | ') || 'none');
 } catch (err) {

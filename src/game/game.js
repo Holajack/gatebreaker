@@ -20,7 +20,7 @@ import { ashForXp, grantAsh } from './shop.js';
 import { ensureEquipment } from '../core/save.js';
 import {
   autoDeploy, deployedRecords, addShadow, makeShadow, releaseWeakest,
-  shadowCombat, rosterSummary,
+  shadowCombat, rosterSummary, setDeployed,
 } from './shadows.js';
 import {
   rollDrop, equipWeapon, currentWeapon, setModelSource,
@@ -53,6 +53,45 @@ import { ProjectilePool } from './projectiles.js';
 // the ONE stacking law _damagePlayer applies: multiplicative with vitality DR,
 // hard-clamped at 0.72 total.
 import { rollArmorDrop, serializeArmor, armorDerive, combinedDR } from './armor.js';
+// The class layer (CLASSES_SPEC step 3). applyLayers folds the chosen class's
+// benefit/drawback terms over derive()'s output — ONCE, at the single
+// computation site below — and is a proven identity when save.className is
+// null, which is every save on the day this ships (the migration guarantee,
+// asserted over 200 seeded saves in tools/classes-test.mjs). Directions and
+// masteries are NOT applied here: they are behaviours for the step-4 combat
+// hooks, never derived-block multipliers. The archon layer never touches the
+// derived block at all (interlock rule; applyLayers ignores save.archon by
+// design). classModifiers/clampSumPct feed the BEHAVIOUR half of the same
+// contract: the term-set schema's flags/flagsScaled entries are "numeric
+// behaviour magnitudes the consumer (STEP 4/5 hooks) multiplies" — this file
+// IS that consumer, via the _classFlags cache refreshDerived rebuilds.
+import {
+  applyLayers, DIRECTIONS, masteryTier, classModifiers, clampSumPct,
+} from './classes.js';
+// The ascension layer (CLASSES_SPEC step 7): the S gate carries THE REACH
+// trial flag, real play bumps the five affinity counters, and killing the
+// Rift Archon while eligible presents archonOffers — top two by counter plus
+// SHADOW. ascend() writes save.archon and NOTHING else changes: the archon
+// layer reads the derived block and never enters it (interlock rule 3), so
+// path mechanics arrive in steps 8-10 without this file re-deriving anything.
+// `ascend` is renamed on import: ascension.js (the weapon craft) already owns
+// that bare name in this file — see _craftAscend below.
+import {
+  bumpAffinity, canAscend, archonOffers, ascend as ascendArchon, ARCHONS,
+  archonFieldBonus, archonResourceRules,
+} from './classes.js';
+// The archon substrate (CLASSES_SPEC step 6) configured into its first two
+// stacking paths (step 9): FLAME's Pyre/combustion/Ashfall and FROST's
+// Rime/freeze/shatter/Barrier. game.js owns only the HOOKS — the numbers are
+// ARCHON_PATHS data, the machinery is the four substrate exports, and both
+// live in archon.js so step 10's STORM cannot drift from them.
+import {
+  StatusTable, ArchonPool, ResourceMeter, tintForStacks, ARCHON_PATHS,
+} from './archon.js';
+// Ground telegraphy for the masteries (CLASSES_SPEC step 4): RESIDUE fields
+// and READING arcs share one pooled channel, allocated lazily on first use so
+// a save with no mastery pays nothing — not even the geometry.
+import { GroundFxPool } from '../render/decalpool.js';
 // The legendary craft (RPG_SPEC step 14). game.js owns WHEN materials are
 // granted (boss/elite kills, seed-derived) and the equipped-weapon craft path;
 // ascension.js owns the ledger, the recipe and the refusal reasons.
@@ -112,6 +151,82 @@ const BLEED_FRACTION = 0.30;
 // the damage lands, not how much of it there is.
 const SHADOW_WINDUP = 0.42;
 const SHADOW_STRIKE = 0.3;
+
+// SOVEREIGN'S WILL (CLASSES_SPEC step 8) — the SHADOW ARCHON's numbers live
+// as data on ARCHONS.shadow so the node suite and this file read one source.
+// Aliased here because _updateShadows is a hot loop and the mechanics below
+// name these constants a dozen times.
+const SOVEREIGN = ARCHONS.shadow.sovereignsWill;
+const LEGION_CD = ARCHONS.shadow.resourceRules.ultimateCooldown;
+
+// FLAME + FROST (CLASSES_SPEC step 9) — aliased like SOVEREIGN above: the hit
+// hooks below name these numbers per swing, and the one source stays
+// archon.js. FX colours match the substrate's own tint targets so a burning
+// enemy, its flame quads and the Ashfall floor all read as one system.
+const FLAME_P = ARCHON_PATHS.flame;
+const FROST_P = ARCHON_PATHS.frost;
+const FLAME_COLOR = 0xff6b2b;
+const FROST_COLOR = 0x66e0ff;
+// STORM + BEAST (CLASSES_SPEC step 10), same one-source rule: mechanics are
+// ARCHON_PATHS data, cooldown rules live in classes.js resourceRules (the
+// LEGION_CD precedent — a number in both files is the drift archon.js's
+// header bans).
+const STORM_P = ARCHON_PATHS.storm;
+const BEAST_P = ARCHON_PATHS.beast;
+const STORM_COLOR = 0x9dd8ff;
+const WILD_CD = ARCHONS.beast.resourceRules.ultimateCooldown;
+const WILD_CD_PER_KILL = ARCHONS.beast.resourceRules.cooldownPerKill;
+// THE absolute move-speed ceiling, one source (see the tempest config's own
+// comment in archon.js): every multiplier — TEMPO stacks, Tempest Step, Wild
+// Form, any future term — answers to this one Math.min in _updatePlayer.
+const SPEED_CAP = STORM_P.tempest.hardSpeedCap;
+// How long after the last hit dealt or taken the run still counts as combat.
+// Ember decays OUT OF COMBAT and the Barrier decays OUT OF COMBAT (their
+// classes.js rules); the meter cannot know, so this clock is the caller-side
+// boolean the ResourceMeter contract asks for. 4 s matches the pacing feel of
+// the existing 3 s kindling window plus a beat of disengage.
+const ARCHON_COMBAT_SECONDS = 4;
+
+// ------------------------------------------------- direction masteries
+//
+// CLASSES_SPEC step 4: the fifteen masteries are QUALITATIVE — a clamp, a
+// proc, a refund, a field — wired into the combat hooks below, never a flat
+// multiplier folded into the derived block (CERTAINTY's floor/critDmg and
+// TEMPO's capped stacks are the spec's two sanctioned exceptions). The
+// NUMBERS live in classes.js as data (DIRECTIONS[...].params); this table is
+// a flat read of them taken once at module load, so the hooks pay a property
+// read per event, not a walk of the mastery tables per hit. Tiers are
+// cumulative (spent >= 120 owns T1 and T2), which is why every check below
+// is `>=`, and they are per-STAT thresholds independent of directionOf() — a
+// 200/145 str/vit build runs BREAKER T3 and BULWARK T2 hooks at once.
+const MASTERY = {
+  ironhide: DIRECTIONS.vit.masteries[0].params,
+  riposte: DIRECTIONS.vit.masteries[1].params,
+  unyielding: DIRECTIONS.vit.masteries[2].params,
+  slipstream: DIRECTIONS.agi.masteries[0].params,
+  answer: DIRECTIONS.agi.masteries[1].params,
+  tempo: DIRECTIONS.agi.masteries[2].params,
+  kindling: DIRECTIONS.int.masteries[0].params,
+  residue: DIRECTIONS.int.masteries[1].params,
+  overcharge: DIRECTIONS.int.masteries[2].params,
+  sunder: DIRECTIONS.str.masteries[0].params,
+  aftershock: DIRECTIONS.str.masteries[1].params,
+  ruinous: DIRECTIONS.str.masteries[2].params,
+  reading: DIRECTIONS.per.masteries[0].params,
+  punish: DIRECTIONS.per.masteries[1].params,
+  certainty: DIRECTIONS.per.masteries[2].params,
+};
+
+// The shipped crit multiplier _damageEnemy has always applied. Named now
+// because CERTAINTY (+25%) and TEMPO (+6%/stack) finally scale it — for every
+// save without those masteries the maths below reduce to this exact constant.
+const CRIT_MUL = 1.85;
+
+// Mastery ground-fx colours. Danger-red for READING (it marks where a swing
+// will LAND — the same read as the boss slam's Effects.ring), the skill
+// palette's violet for RESIDUE (it is the skill's own aftermath).
+const READING_COLOR = 0xff4d6d;
+const RESIDUE_COLOR = 0xb98bff;
 
 // ------------------------------------------------------------- entity LOD
 //
@@ -174,6 +289,30 @@ const _bowTo = new THREE.Vector3();     // soft-lock candidate bearing only
 const _staffDir = new THREE.Vector3();  // staff aim / beam axis only
 const _staffFrom = new THREE.Vector3(); // bolt launch point only
 const _staffTo = new THREE.Vector3();   // homing bearing / beam-tick offsets only
+// Mastery-hook scratch, same single-role rule: RIPOSTE's shockwave origin and
+// nothing else. It is handed to _damageEnemy as opts.from, and _damageEnemy
+// consumes tmpV/tmpV2 internally — borrowing either would be the exact
+// aliasing the boss spread shot shipped with.
+const _mastV = new THREE.Vector3();     // riposte shockwave origin only
+
+// Archon-path scratch (step 9), same single-role rule: fx positions and quad
+// spawn points only — never handed to _damageEnemy (which consumes tmpV/tmpV2
+// internally) as opts.from; blast knockback passes the live e.pos instead.
+const _archV = new THREE.Vector3();
+// Second archon scratch (step 10): ARC's segment endpoint and the Tempest
+// dash-bolt's line end. Its own vector on the _aimDir/_projDir rule — _archV
+// is live as the chain's other endpoint in the same expressions.
+const _archV2 = new THREE.Vector3();
+// The combustion cascade queue, module-lived and reused so a chain allocates
+// nothing after the first. Safe as a singleton: _combust drains it fully
+// before returning and nothing re-enters it mid-drain (blasts mark noStatus,
+// so a nested _damageEnemy can never reach _applyPyre).
+const _combustQ = [];
+// ARC's chain-target collection, same module-lived reuse: filled, applied and
+// truncated inside one _tryArc call. Nested _damageEnemy calls can splice
+// this.enemies but only ever READ this list's captured references, so a
+// mid-chain kill cannot skip a link (the bleed pass's snapshot reasoning).
+const _arcTargets = [];
 
 // Reused steering context; steerAgent never retains it.
 const _steerCtx = {
@@ -679,8 +818,10 @@ export class Game {
    */
   _updateStance(dt) {
     const mesh = this.player?.mesh;
-    // Nothing to put away, or an archetype with no place to put it.
-    if (!mesh || !this.weapon || !STOW[this.weapon.archetype]) return;
+    // Nothing to put away, or an archetype with no place to put it. A WILD
+    // FORM has no hands to stow with either — the base mesh is hidden and a
+    // stance swap on it would just thrash attachments nobody can see.
+    if (!mesh || !this.weapon || !STOW[this.weapon.archetype] || this._wildT > 0) return;
     if (this._stanceHold > 0) { this._stanceHold -= dt; return; }
 
     const inTown = this._mode?.name === 'city';
@@ -707,10 +848,19 @@ export class Game {
   }
 
   /** Shadows allowed on the field at once, clamped by the live quality tier.
-   *  The vigil 4pc (+2) joins inside progression's clamps — the quality tier
-   *  and the hard 12 still get the final word. */
+   *  The vigil 4pc (+2) and the SHADOW ARCHON's +2 (CLASSES_SPEC step 8) both
+   *  join inside progression's clamps — the quality tier and the hard 12
+   *  still get the final word, which is the spec's low-tier-phone honesty
+   *  clause: on a small tier the path grants nothing here and is still fine,
+   *  because its damage rides gradeMultiplier and shadowDmgMul, not headcount. */
   fieldCapacity() {
-    return shadowFieldCapacity(this.save, this.quality.current, this._armorBonus?.shadowFieldAdd || 0);
+    // BINDER's +2 (an UNSCALED flag: headcount is a draw-call budget, not a
+    // knob quality may inflate) joins the same earned term as the vigil 4pc
+    // and the archon bonus — quality.js maxFieldShadows and the hard 12
+    // still get the final word.
+    return shadowFieldCapacity(this.save, this.quality.current,
+      (this._armorBonus?.shadowFieldAdd || 0) + archonFieldBonus(this.save)
+      + (this._classFlags?.fieldAdd || 0));
   }
 
   refreshDerived(fill = false) {
@@ -726,7 +876,52 @@ export class Game {
     ensureEquipment(this.save);
     this._armorBonus = armorDerive(this.save.equipment, this.save.level);
     this._rules = new Map(this._armorBonus.rules.map((r) => [r.key, r.bonus]));
-    this.derived = derive(this.save, this._armorBonus);
+    // Layer order per CLASSES_SPEC interlock: stats+armour produce the base
+    // (derive), the class layer folds once on top (applyLayers), and the
+    // archon layer reads the result without ever writing it. With no class
+    // chosen applyLayers returns a copy deep-equal to its input, so every
+    // pre-class save gets exactly the shipped numbers.
+    this.derived = applyLayers(this.save, derive(this.save, this._armorBonus));
+    // The class layer's BEHAVIOUR half, cached at the same single site: the
+    // schema's flags/flagsScaled terms (BERSERKER's rage, REAVER's leech and
+    // kill stacks, VANGUARD's deferral, ORACLE's windup bonus, HEXWEAVER's
+    // basic-attack cut, TEMPLAR's spell leech and cooldown tax, the mana
+    // surcharges, BINDER's field/roster/extraction adds) arrive PRE-SCALED by
+    // quality x resonance from classModifiers, so every combat hook below
+    // reads one scalar and never re-folds the scaling rules per hit. Null for
+    // every save without a class — each consumer guards on one falsy check
+    // and the shipped path stays byte-identical.
+    const cmods = classModifiers(this.save);
+    this._classFlags = cmods ? cmods.flags : null;
+    // BINDER's +20% shadow damage, isolated as its OWN factor for the strike
+    // seam: the INT term is already inside s.atk (shadowCombat) and the
+    // armour term already multiplies at the strike, so reading
+    // derived.shadowDmgMul there would double-count INT — while reading only
+    // the armour term (the shipped code) dropped the class term on the
+    // floor. (1 + the clamped class pct) is exactly the remainder, and it is
+    // 1.0 to the bit for every save without the term.
+    this._classShadowMul = cmods ? 1 + clampSumPct(cmods.pct.shadowDmgMul || 0) : 1;
+    // Mastery tiers, recomputed here (the single site) rather than per hit:
+    // they change only when stats change, and every event that can — allocate,
+    // respec, migration — already funnels through refreshDerived. The object
+    // is reused so this method allocates nothing after the first call.
+    const mt = this._mastery || (this._mastery = { str: 0, agi: 0, vit: 0, int: 0, per: 0 });
+    mt.str = masteryTier(this.save, 'str');
+    mt.agi = masteryTier(this.save, 'agi');
+    mt.vit = masteryTier(this.save, 'vit');
+    mt.int = masteryTier(this.save, 'int');
+    mt.per = masteryTier(this.save, 'per');
+    // CERTAINTY — one of the spec's two sanctioned derived-block exceptions
+    // (masteryRules.qualitativeNotMultiplicative). Applied HERE, not in
+    // applyLayers: masteries are earned by stats alone, so classes.js keeping
+    // its hands off the block is what makes the null-CLASS identity assert
+    // hold, while a per>=200 save legitimately reads a 100% floor and +25%
+    // crit damage on every surface. critDmg feeds the CRIT_MUL scaling in
+    // _damageEnemy, so the panel number and the felt number move together.
+    if (mt.per >= 3) {
+      this.derived.dmgFloor = MASTERY.certainty.dmgFloor;
+      this.derived.critDmg += MASTERY.certainty.critDmgAdd;
+    }
     if (fill) {
       this.player.hp = this.derived.maxHp;
       this.player.mp = this.derived.maxMp;
@@ -766,6 +961,22 @@ export class Game {
     // in the city would ever release it. Nor does a lit beam.
     if (this._bowState) { this._bowState.drawing = false; this._bowState.buffered = false; }
     this._endStaffBeam();
+    // Nor does a RESIDUE field or a READING arc: the city never runs
+    // _updateEnemies, so a live count would otherwise persist on screen.
+    this._groundFx?.clear();
+    // Nor a Pyre/Rime stack, a live Ashfall or a flame quad (step 9): the
+    // stacks reference gate enemies that are about to be disposed, and a
+    // frozen mid-air quad in Threshold would be exactly the linger the pool's
+    // one-verb teardown exists to prevent. dispose() is idempotent and the
+    // pool is rebuilt per gate entry in _beginGate.
+    this._archonStatus?.disposeAll();
+    if (this._ashfall) this._ashfall.t = 0;
+    if (this._archonFx) { this._archonFx.dispose(); this._archonFx = null; }
+    // Nor a Tempest window or a Wild Form (step 10): the city runs its own
+    // player update, so a live window would freeze mid-count — and the wild
+    // mesh must hand the base body back before the city presents the player.
+    this._tempestT = 0;
+    this._endWildForm(true);
     if (!name) return null;
     this._mode = createMode(name, this);
     this._mode.enter(payload);
@@ -871,11 +1082,130 @@ export class Game {
     // its own FORK off the gate seed — 0xcc9e2d51 is murmur3's c1, colliding
     // with none of the registered fork constants (0x9e3779b9 / 0x5f356495 /
     // 0x1f123bb5 / 0x85ebca6b / 0x27d4eb2f / 0x632be59b / 0xc2b2ae35 /
-    // 0x5ade0f) — so per-elite material rolls can never perturb the main
-    // stream's enemy/loot draws, and a replayed seed yields the same dust.
+    // 0x5ade0f / 0xb5297a4d / 0x2545f491) — so per-elite material rolls can
+    // never perturb the main stream's enemy/loot draws, and a replayed seed
+    // yields the same dust.
     this._emberRnd = mulberry32((this.seed ^ 0xcc9e2d51) >>> 0);
+    // The archon stream (CLASSES_SPEC determinism.forks): 0x2545f491 is the
+    // multiplier from SplitMix-family mixers, verified unused against the
+    // registry above. Owns the ASHEN SIGIL roll on an S boss (one per three
+    // clears, seeded — a replayed gate seed pays the same sigil) and, later,
+    // the pact-beast archetype and trial boss placement (steps 8-10).
+    this._archonRnd = mulberry32((this.seed ^ 0x2545f491) >>> 0);
     this._critRefunds = 0;      // WHISPERFANGS ASCENDANT: refunds this combo
     this._crater = null;        // GRAVEMAUL ASCENDANT: the live slow zone
+    // Direction-mastery per-run state (CLASSES_SPEC step 4). All of it dies
+    // with the run on purpose: UNYIELDING's 90 s is REAL time on the run and
+    // never persisted (spec wording), and a proc that survived a gate exit
+    // would be a saved-game field nobody sanitises. Objects are reused across
+    // runs so re-entering a gate allocates nothing here after the first.
+    this._unyieldingT = 0;      // UNYIELDING: seconds until the next cheat of death
+    this._riposteT = 0;         // RIPOSTE: internal cooldown running down
+    this._riposteFire = this._riposteFire || { armed: false, x: 0, z: 0, dmg: 0 };
+    this._riposteFire.armed = false; // banked shockwave, applied in _updateEnemies
+    this._slipT = 0;            // SLIPSTREAM: seconds of +35% attack speed left
+    this._answerT = 0;          // ANSWER: seconds the queued guaranteed crit lives
+    this._tempoStacks = 0;      // TEMPO: live stacks (max 5)
+    this._tempoChainT = 0;      // TEMPO: chain window since the last perfect dodge
+    this._tempoDecayT = 0;      // TEMPO: accumulator toward the next stack decay
+    this._kindlingT = 0;        // KINDLING: window since the last skill cast
+    this._kindlingCost = 0;     // KINDLING: that cast's mana price
+    this._kindlingPaid = 0;     // KINDLING: refunds banked so far (caps at cost)
+    this._overN = 0;            // OVERCHARGE: casts inside the rotation window
+    this._overT = 0;            // OVERCHARGE: rotation window remaining
+    this._ruinFin = 0;          // RUINOUS: finishers thrown (every 3rd staggers)
+    // Class-flag per-run state (STEP 5 consumers): REAVER's momentum and
+    // VANGUARD's deferred pool die with the run for the same reason the
+    // mastery clocks above do — a wound or a war-rhythm that survived a gate
+    // exit would be a saved-game field nobody sanitises.
+    this._killStacks = 0;       // REAVER: live kill stacks (max killStackMax)
+    this._killStackT = 0;       // REAVER: the shared 4 s window
+    this._vgPool = 0;           // VANGUARD: deferred damage still owed
+    this._vgRate = 0;           // VANGUARD: the pool's drain rate (hp/s)
+    // RESIDUE's three field slots, reused in place — max 3 live is the spec's
+    // own cap and the array never grows.
+    if (!this._residue) {
+      this._residue = [
+        { t: 0, x: 0, z: 0, acc: 0 }, { t: 0, x: 0, z: 0, acc: 0 }, { t: 0, x: 0, z: 0, acc: 0 },
+      ];
+    }
+    for (const f of this._residue) { f.t = 0; f.acc = 0; }
+    // PUNISH's cancel roll draws off its own fork of the gate seed —
+    // 0xb5297a4d is Squirrel3's noise constant, registered in the emberdust
+    // comment above — so a mastery roll can never perturb the main stream's
+    // enemy/loot draws and a replayed seed cancels the same wind-ups.
+    this._masteryRnd = mulberry32((this.seed ^ 0xb5297a4d) >>> 0);
+    // THE REACH (CLASSES_SPEC layerC unlock.trial): the S gate with a flag —
+    // not a new dungeon. Armed HERE, the one choke point every entry route
+    // funnels through (portal confirm, fast-travel list, startGate), whenever
+    // the save is ascension-eligible: level 55+, classTier set, an S clear
+    // banked, and — for a re-ascension — an ASHEN SIGIL held (canAscend owns
+    // all four conditions). Killing the Rift Archon under this flag presents
+    // the archon offer; it consumes the flag so one run offers once.
+    this._trialRun = gate.rank === 'S' && canAscend(this.save);
+    // STORM affinity's odometer: metres of real ground covered THIS run
+    // (resonanceReading: +1 per 400 m travelled inside a gate). Run state,
+    // never persisted — the counter it feeds lives on the save.
+    this._travelAcc = 0;
+    // SOVEREIGN'S WILL run state (CLASSES_SPEC step 8). All of it dies with
+    // the run on purpose — "one enum on the run state" is the spec's own
+    // wording for the stance, and a Legion cooldown that survived a gate exit
+    // would be a saved field nobody sanitises. HUNT is the default because it
+    // is the shipped behaviour: an unascended save's army runs this exact
+    // enum value down the exact pre-step-8 code path.
+    this._shadowStance = 'hunt';
+    this._legionT = 0;           // LEGION STEP cooldown running down (45 s)
+    this._summonHoldT = null;    // Bind-slot hold timer; null = no press live
+    this._lastHitTarget = null;  // FOCUS's mark: the player's last-hit enemy
+    // Path run state (CLASSES_SPEC steps 9-10). _archonPath is the gate for
+    // every hook below: null for SHADOW (its machinery predates the
+    // substrate) and every unascended save, so the shipped combat paths pay
+    // one boolean read and nothing else; the mechanic hooks themselves
+    // compare against the specific config (FLAME_P/FROST_P/STORM_P/BEAST_P),
+    // never bare truthiness. The StatusTable and the Ashfall record are
+    // session objects reused across runs (the residue-slot precedent); the
+    // ArchonPool is per-gate (built here, disposed in _setMode) because its
+    // quads must never linger into the city and dispose() is its one
+    // teardown verb.
+    this._archonPath = ARCHON_PATHS[this.save.archon] || null;
+    this._combatT = 0;           // seconds of "still in combat" remaining
+    if (!this._ashfall) this._ashfall = { t: 0, x: 0, z: 0, dmgAcc: 0, stackAcc: 0 };
+    this._ashfall.t = 0; this._ashfall.dmgAcc = 0; this._ashfall.stackAcc = 0;
+    // STORM + BEAST run state (step 10). All of it dies with the run on the
+    // legion-cooldown precedent: a Tempest window or a Wild Form that
+    // survived a gate exit would be a saved field nobody sanitises. A wild
+    // mesh lingering from a torn-down run is restored first — _endWildForm
+    // is idempotent and the base body must be back before the derive below
+    // reads a sane player.
+    this._endWildForm(true);
+    this._tempestT = 0;          // TEMPEST STEP window remaining (6 s)
+    this._wildT = 0;             // WILD FORM window remaining (12 s)
+    this._wildCd = 0;            // WILD FORM cooldown running down (90 s)
+    if (this._archonPath) {
+      if (!this._archonStatus) {
+        // BOTH kinds' rules on one table: a re-ascension can swap the path
+        // between runs and the table is kind-keyed anyway — two rules on one
+        // machine, never two machines. (Storm/beast own no kinds and simply
+        // never apply; the table idles at size 0.)
+        this._archonStatus = new StatusTable({
+          pyre: FLAME_P.stacks.pyre, rime: FROST_P.stacks.rime,
+        });
+      } else this._archonStatus.disposeAll();
+      if (!this._archonRes || this._archonResKey !== this._archonPath.key) {
+        this._archonRes = new ResourceMeter(archonResourceRules(this._archonPath.key));
+        this._archonResKey = this._archonPath.key;
+      }
+      // The bank survives gate exits (the HUD reads the same save field).
+      this._archonRes.set(this.save.archonState?.resource || 0);
+      // Pool only where the path DECLARES one — BEAST's vfx budget is "zero
+      // new pools" and its config carries no fx entry on purpose.
+      if (!this._archonFx && this._archonPath.fx) {
+        this._archonFx = new ArchonPool(this.scene, {
+          kind: this._archonPath.fx.kind,
+          maxInstances: this._archonPath.fx.maxInstances,
+        });
+      }
+    }
     this.runTime = 0;
     this.xpEarned = 0;
     this.ashEarned = 0;
@@ -886,10 +1216,20 @@ export class Game {
 
     // Carry the deployed roster into the new rift. The field cap is a draw-call
     // budget, so the quality tier gets the final word on how many come along.
+    // BEAST ARCHON with a pact bound: the pact beast IS the deployment — one
+    // ally consuming the entire allowance (its spawn refuses while any other
+    // soldier stands, and _spawnShadow refuses while it does), so the roster
+    // stays home. With no pact yet, the path plays its shipped army verbatim.
     const cap = this.fieldCapacity();
-    autoDeploy(this.save, cap);
-    for (const rec of deployedRecords(this.save)) {
-      this._spawnShadow(this.world.randomSpawn(this.rnd, this.player.pos, 4), true, rec);
+    const pact = this.save.archon === 'beast' ? this._activePact() : null;
+    if (pact && cap > 0) {
+      setDeployed(this.save, []);
+      this._spawnPactBeast(pact, true);
+    } else {
+      autoDeploy(this.save, cap);
+      for (const rec of deployedRecords(this.save)) {
+        this._spawnShadow(this.world.randomSpawn(this.rnd, this.player.pos, 4), true, rec);
+      }
     }
 
     this.state = 'playing';
@@ -1120,6 +1460,9 @@ export class Game {
   // still worth fielding forty levels later.
   _spawnShadow(pos, silent = false, record = null) {
     if (this.shadows.length >= this.fieldCapacity()) return null;
+    // The pact beast owns the whole allowance (step 10) — no soldier stands
+    // beside it, whatever the capacity number says.
+    if (this._pactFielded()) return null;
     const rec = record || makeShadow(this.save, { type: 'grunt', level: this.save.level });
     // Lazy save migration: rosters bound before creature identity existed (and
     // kills made while creatures.glb was still loading) carry no key. Deal one
@@ -1151,6 +1494,11 @@ export class Game {
       // down to the contact frame, and its start value for the animation span.
       attackCd: 0, swing: 0, telegraph: 0, telegraphMax: 0,
       target: null, life: 0, kills: 0,
+      // LEGION STEP's re-form leg (step 8): seconds until this recalled
+      // soldier stands again, and its slot in the returning column. Declared
+      // at spawn so every soldier shares one hidden class — the update loop
+      // reads reform every frame.
+      reform: 0, _reformSlot: 0,
     });
     if (!silent) {
       this.fx.ring(pos, 0x35e6ff, 4, 0.6);
@@ -1162,20 +1510,120 @@ export class Game {
   // -------------------------------------------------------------- combat
   _damageEnemy(e, amount, opts = {}) {
     if (e.hp <= 0) return false;
+    const mt = this._mastery;
+    const playerHit = opts.origin !== 'shadow';
+    // FOCUS's mark (step 8): "your last-hit target" is literally the last
+    // enemy a player-origin application touched — weapon, skill and bleed
+    // alike, because a bleed is the player's blade still working. One pointer
+    // write per hit; _killEnemy clears it so the army never chases a corpse.
+    if (playerHit) this._lastHitTarget = e;
+    // SUNDER (BREAKER T1): a finisher opened this target's armour — +18% from
+    // ALL sources, shadows included, until the clock (set in _applySwingHit,
+    // run down in _updateEnemies) lapses. Refreshes, never stacks.
+    if (e.sunderT > 0) amount *= 1 + MASTERY.sunder.bonusTakenPct;
+    // FROZEN (FROST ARCHON, step 9): a frozen enemy takes +45% from all
+    // sources — the window the ten Rime hits earned. e.frozenT is only ever
+    // written by _applyRime, so this multiplies nothing for any other save.
+    if (e.frozenT > 0) amount *= 1 + FROST_P.freeze.bonusTakenPct;
+    // WILD FORM (BEAST ARCHON, step 10): 2.2x ATTACK POWER — every
+    // player-origin application through this one funnel, which during the
+    // form is basic attacks and their riders only, because Wild Form bars
+    // the skill buttons outright ("no skills and no items"). Never the
+    // army's blows: the pact beast fights beside the form, not inside it.
+    if (this._wildT > 0 && playerHit) amount *= BEAST_P.wildForm.atkMul;
+    // The class layer's per-hit terms (STEP 5 flags, consumed at the one
+    // damage funnel — the Assay card's text is a contract, not a caption).
+    // Player-origin only: a class shapes the hunter's own hand, never the
+    // army's. All three magnitudes arrive pre-scaled by quality x resonance.
+    //   BERSERKER — "+0.45% per 1% missing HP, to +40% at the edge": both
+    //     numbers scale together (the worked example's 50.2% at advanced x
+    //     resonance 3), so the cap is min()'d here, not baked into the rate.
+    //   ORACLE — +18% while the target's telegraph clock runs: the same
+    //     read PUNISH keys on below, so "winding up" means one thing.
+    //   HEXWEAVER — -25% on BASIC output only. origin 'skill' marks skill
+    //     and proc applications, shadows mark themselves, so the penalty
+    //     lands exactly where the card says: the blade, not the rotation.
+    const CF = this._classFlags;
+    if (CF && playerHit) {
+      if (CF.rageAtkPerMissingHpPct) {
+        const missing = 100 * (1 - Math.max(0, this.player.hp) / this.derived.maxHp);
+        amount *= 1 + Math.min(CF.rageMaxAtkBonus ?? 1, CF.rageAtkPerMissingHpPct * missing);
+      }
+      if (CF.windupDmgPct && e.telegraph > 0) amount *= 1 + CF.windupDmgPct;
+      if (CF.basicAtkPct && opts.origin !== 'skill') amount *= 1 + CF.basicAtkPct;
+    }
+    // The archon combat clock: a landed hit — the player's or the army's — is
+    // combat, and Ember/Barrier hold their bank while it runs.
+    if (this._archonPath) this._combatT = ARCHON_COMBAT_SECONDS;
+    // PUNISH (AUGUR T2): a hit landed inside the wind-up — the telegraph
+    // timer the whole fairness system already keeps — deals +30%, and one roll
+    // in four cancels the strike outright: the enemy loses the attack and
+    // eats its own cooldown. The roll draws off the gate-seed fork
+    // (_masteryRnd), never Math.random, so a replayed seed cancels the same
+    // wind-ups. Player hits only: perception is the hunter's read, not the
+    // army's.
+    if (playerHit && mt && mt.per >= 2 && e.telegraph > 0 && this._masteryRnd) {
+      amount *= 1 + MASTERY.punish.bonusPct;
+      if (this._masteryRnd() < MASTERY.punish.cancelChance) {
+        if (e.attack?.active) cancelAttack(e.attack);
+        e.telegraph = 0;
+        e.swing = 0;
+        e._slam = false;
+        // "Eats its own cooldown": the full base cadence, as if the blow had
+        // been thrown — steerAgent will not re-ask before it.
+        e.attackCd = Math.max(e.attackCd || 0, e.base?.attackCd || 1.2);
+        this.fx.burst(tmpV.copy(e.pos).setY(1.3 * (e.base.scale || 1)), 10, READING_COLOR, { speed: 5, up: 2, life: 0.35 });
+      }
+    }
     // deepglass 5pc: a banked perfect dodge makes the next PLAYER hit a
     // guaranteed crit — one charge, consumed here, never by a shadow's blow
     // (they mark themselves with origin:'shadow').
-    const forced = this._riposteCrit === true && opts.origin !== 'shadow';
-    const crit = forced || Math.random() < this.derived.crit;
+    const forced = this._riposteCrit === true && playerHit;
+    // ANSWER (WINDSTEP T2): a perfect dodge queued one guaranteed crit for the
+    // next BASIC attack — weapon output only, so skill/proc applications mark
+    // themselves origin:'skill' and pass through without consuming it.
+    const answered = !forced && playerHit && mt && mt.agi >= 2
+      && this._answerT > 0 && opts.origin !== 'skill';
+    const crit = forced || answered || Math.random() < this.derived.crit;
     if (forced) this._riposteCrit = false;
-    const dmg = Math.max(1, Math.round(amount * (crit ? 1.85 : 1)));
+    if (answered) this._answerT = 0;
+    // CERTAINTY (+25%) and TEMPO (+6%/stack) scale the shipped 1.85 — the
+    // spec's two sanctioned percentage exceptions, both capped, both
+    // conditional. ANSWER's queued crit lands at 1.3x the multiplier the
+    // build has actually earned. With no masteries every term is zero and
+    // this is the shipped constant to the bit.
+    let critMul = CRIT_MUL;
+    if (crit && mt) {
+      critMul *= 1 + (mt.per >= 3 ? MASTERY.certainty.critDmgAdd : 0)
+        + (mt.agi >= 3 ? (this._tempoStacks || 0) * MASTERY.tempo.critDmgPerStack : 0);
+      if (answered) critMul *= MASTERY.answer.critMul;
+    }
+    const dmg = Math.max(1, Math.round(amount * (crit ? critMul : 1)));
     e.hp -= dmg;
     e.hurt = 0.3;
+    // Captured BEFORE the hit's own stagger applies: "killed while staggered"
+    // (FROST affinity, read in _killEnemy) means the enemy was ALREADY held
+    // when the killing blow landed — control converted to damage. Without
+    // this, every melee blow that carries stagger would count its own kill
+    // and the counter would just be a kill counter.
+    const preHitStagger = e.stagger > 0;
     if (opts.stagger) e.stagger = Math.max(e.stagger, opts.stagger);
     // Armour-layer leech (Thirsting affix + ember_ring trinket): player-origin
     // hits only. 0 with nothing worn, so the shipped path is untouched.
+    // Routed through _healPlayer (as is every incidental heal) so BERSERKER's
+    // healingTakenPct prices it — x1 exactly with no class, same clamp.
     if (opts.origin !== 'shadow' && this._armorBonus && this._armorBonus.leech > 0) {
-      this.player.hp = Math.min(this.derived.maxHp, this.player.hp + dmg * this._armorBonus.leech);
+      this._healPlayer(dmg * this._armorBonus.leech);
+    }
+    // Class-layer leeches (STEP 5 flags): REAVER's rides EVERY player-origin
+    // application ("+3% life leech on ALL damage" — weapon, skill and
+    // projectile alike); TEMPLAR's rides skill applications only ("skills
+    // heal 6% of the damage they deal"). Both pre-scaled, both through
+    // _healPlayer so a future class carrying leech AND a healing tax prices
+    // itself consistently.
+    if (CF && playerHit) {
+      if (CF.leechPct) this._healPlayer(dmg * CF.leechPct);
+      if (CF.spellLeechPct && opts.origin === 'skill') this._healPlayer(dmg * CF.spellLeechPct);
     }
 
     tmpV.copy(e.pos).setY(1.4 * (e.base.scale || 1));
@@ -1207,11 +1655,79 @@ export class Game {
       e.vel.addScaledVector(tmpV2, kb);
     }
 
-    if (e.hp <= 0) this._killEnemy(e);
+    // FLAME + FROST hit hooks (step 9). "Every hit you land" is every
+    // player-origin application through this one funnel — weapon, skill and
+    // projectile alike — EXCEPT the path's own generated damage (combustion
+    // blasts, shatter splits, the manual detonate), which marks itself
+    // opts.noStatus so an explosion cannot farm the stacks that fired it.
+    // Bleed/residue/ashfall ticks write hp directly and never arrive here.
+    // The dying take no stacks: their table row is about to be cleared by
+    // _killEnemy anyway.
+    // Frozen-ness is read BEFORE this hit's own stack lands: the 10th-stack
+    // hit FREEZES, it does not also shatter what it just froze — a shatter
+    // needs a hit on an ALREADY-frozen enemy (the same pre-hit-truth shape as
+    // preHitStagger above).
+    const preFrozen = e.frozenT > 0;
+    if (this._archonPath && playerHit && !opts.noStatus && e.hp > 0) {
+      if (this._archonPath === FLAME_P) this._applyPyre(e, 1);
+      else if (this._archonPath === FROST_P) this._applyRime(e, 1);
+    }
+    // ARC (STORM ARCHON, step 10): every landed player hit discharges
+    // STORM_P.arc.discharge Charge (4 since the STEP 11 parity tune — see
+    // archon.js) into a chain — same funnel, same noStatus exemption (a chain
+    // link or a dash bolt cannot re-chain), but NO hp>0 gate: a killing blow
+    // is still a landed hit and its lightning still leaves the body. Runs
+    // BEFORE the death branch so the chain measures from where the target
+    // stands, not from a spliced-out corpse.
+    if (this._archonPath === STORM_P && playerHit && !opts.noStatus) this._tryArc(e);
+    // SHATTER: a single hit on a frozen enemy exceeding 15% of its max HP.
+    // Checked on the FINAL rounded dmg (crit included — a crit is still "a
+    // single hit") and BEFORE the death branch, because a killing blow that
+    // clears the line shatters too — kill-chaining by control is the path.
+    // Re-entry is impossible by ordering, not by flag: _shatter thaws its
+    // target BEFORE dealing the split, so no chain can find this enemy
+    // frozen again — while a frozen NEIGHBOUR hit hard enough by the split
+    // legitimately shatters on its own inside the nested call.
+    if (preFrozen && dmg >= e.maxHp * FROST_P.shatter.hitFracOfMaxHp) {
+      this._shatter(e, dmg);
+    }
+
+    if (e.hp <= 0) {
+      // Hand _killEnemy the pre-hit stagger truth; null for every OTHER
+      // caller (bleed ticks, direct calls), which fall back to the live read
+      // — a bleed death applies no stagger of its own, so its live read IS
+      // the pre-hit truth.
+      this._staggeredKill = preHitStagger;
+      // Same handoff shape for WILD FORM's kill credit ("-6 s per kill made
+      // while transformed"): the army's blows pass false, everything the
+      // player's own damage lands passes true. Callers that bypass this
+      // funnel (bleed/burn ticks writing hp directly) default to true in
+      // _killEnemy — those wounds are the player's blade still working.
+      this._wildKill = playerHit;
+      this._killEnemy(e);
+      this._staggeredKill = null;
+      this._wildKill = null;
+    }
     // Whether this application critted — _applySwingHit feeds it to the
     // WHISPERFANGS refund. A boolean, not the damage: rules read tempo, never
     // numbers (the legendary law).
     return crit;
+  }
+
+  /**
+   * Every incidental heal — armour leech, finisher leech, REAVER's leech,
+   * TEMPLAR's spell leech — lands through here so BERSERKER's healingTakenPct
+   * (a drawback the card PROMISES: "HEALING RECEIVED -35%") prices all of it
+   * uniformly. hpRegen deliberately does NOT route here: the card lists "HP
+   * REGEN -50%" as its own term and that one is already a pct entry on
+   * derived.hpRegen — taxing regen twice would punish the class beyond its
+   * printed text. The flag is stored negative, so (1 + it) is the cut.
+   */
+  _healPlayer(amount) {
+    const CF = this._classFlags;
+    if (CF && CF.healingTakenPct) amount *= 1 + CF.healingTakenPct;
+    if (!(amount > 0)) return;
+    this.player.hp = Math.min(this.derived.maxHp, this.player.hp + amount);
   }
 
   _killEnemy(e) {
@@ -1219,6 +1735,93 @@ export class Game {
     this.killed++;
     this.player.kills++;
     this.save.totalKills++;
+    // A dead mark is no mark (FOCUS, step 8): cleared here, at the one place
+    // every death funnels through, so _shadowTarget's hp>0 read is belt on
+    // top of this brace.
+    if (this._lastHitTarget === e) this._lastHitTarget = null;
+    // A dead body burns and freezes no further (step 9): its stack row goes
+    // back to the pool here so the table can never grow past the live field.
+    // The corpse keeps whatever tint it died wearing — a charred husk reads
+    // correctly — and its cloned tint materials are freed with its mesh by
+    // the existing disposeObject3D walk.
+    if (this._archonStatus) this._archonStatus.clear(e);
+    e.frozenT = 0;
+
+    // Affinity counters (CLASSES_SPEC unlock.resonanceReading) — the save
+    // remembering HOW this player already fights, read at the trial's end by
+    // archonOffers. Bumped at the kill site because every clause below is a
+    // property of the kill itself; persistence rides the existing onSave
+    // cadence (gainXp below, the 6 s heartbeat). Read BEFORE any state is
+    // torn down: e.stagger and the tier map are still the dying enemy's own.
+    //   frost +2 — a kill on an ALREADY-staggered enemy (control converted
+    //              to damage; _damageEnemy hands over the PRE-hit stagger
+    //              truth so the killing blow's own stagger cannot count);
+    //   beast +1 — an elite (brute/lancer/howler, the same tier map
+    //              extraction weighs corpses with);
+    //   beast +3 — a boss. "Without dying" is structural, not a check: a
+    //              death ends the run on the spot (_fail), so every boss a
+    //              player kills, they killed without dying;
+    //   flame +1 — a kill by the combo FINISHER's own cone (the transient
+    //              flag _applySwingHit raises around exactly those hits).
+    if (this._staggeredKill ?? (e.stagger > 0)) bumpAffinity(this.save, 'frost', 2);
+    if (e.isBoss) bumpAffinity(this.save, 'beast', 3);
+    else if (tierWeightOf(e) === 'elite') bumpAffinity(this.save, 'beast', 1);
+    if (this._finisherBlow) bumpAffinity(this.save, 'flame', 1);
+
+    // WILD FORM's cooldown falls 6 s per kill made while transformed
+    // (classes.js resourceRules.cooldownPerKill — the BEAST path's only
+    // economy). Player kills only, via the _wildKill handoff above; a null
+    // (bleed/burn/direct callers) defaults to the player's credit.
+    if (this._wildT > 0 && (this._wildKill ?? true)) {
+      this._wildCd = Math.max(0, (this._wildCd || 0) - WILD_CD_PER_KILL);
+    }
+
+    // The class layer's kill riders (STEP 5 flags):
+    //   REAVER — "every kill grants +6% speed / +4% attack speed for 4 s,
+    //     stacking to 5": one stack banked per kill, the 4 s window
+    //     refreshing with each (a chain holds full momentum; the whole
+    //     stack sheds when it lapses — REAVER snowballs THROUGH a room, it
+    //     does not coast between fights at full tilt). Any kill counts:
+    //     momentum doesn't audit whose blade finished the job.
+    //   VANGUARD — "kill anything and the remainder is cancelled": the
+    //     deferred pool _damagePlayer banked is forgiven outright, which is
+    //     what makes the deferral aggressive rather than passive.
+    const KF = this._classFlags;
+    if (KF) {
+      if (KF.killStackMax) {
+        this._killStacks = Math.min(KF.killStackMax, (this._killStacks || 0) + 1);
+        this._killStackT = KF.killStackSeconds || 4;
+      }
+      if (KF.bleedCancelOnKill && this._vgPool > 0) {
+        this._vgPool = 0;
+        this.fx.ring(this.player.pos, 0xffc24b, 2.0, 0.22);
+      }
+    }
+
+    const mt = this._mastery;
+    // RUINOUS (BREAKER T3), half one: kills refresh the combo window, so a
+    // room chains as one long combo. The machine's own bookkeeping: `chain`
+    // only runs between steps, and refilling it to the weapon's full window
+    // is exactly what "comboTimer back to full" meant before the machine
+    // replaced that field. Mid-swing needs nothing — the chain re-arms fresh
+    // at step end anyway.
+    if (mt && mt.str >= 3) {
+      const st = this.player.attack;
+      if (st && !st.active && st.chain > 0 && this.weapon) {
+        st.chain = this.weapon.chainWindow;
+      }
+    }
+    // KINDLING (EMBERMIND T1): a kill inside 3 s of a skill cast refunds 20%
+    // of THAT cast's mana cost, kill by kill, stacking up to the full cost —
+    // a rotation payout, not a mana battery.
+    if (mt && mt.int >= 1 && this._kindlingT > 0 && this._kindlingPaid < this._kindlingCost) {
+      const chunk = Math.min(
+        this._kindlingCost * MASTERY.kindling.refundFrac,
+        this._kindlingCost - this._kindlingPaid,
+      );
+      this._kindlingPaid += chunk;
+      this.player.mp = Math.min(this.derived.maxMp, this.player.mp + chunk);
+    }
 
     this.fx.burst(e.pos.clone().setY(1), e.isBoss ? 90 : 26, e.base.glow, {
       speed: e.isBoss ? 14 : 8, up: e.isBoss ? 9 : 5, life: e.isBoss ? 1.5 : 0.8,
@@ -1309,6 +1912,48 @@ export class Game {
     if (e.isBoss) {
       this.bossActive = false;
       this.boss = null;
+      // ASHEN SIGIL (CLASSES_SPEC reascension): S bosses only, one per three
+      // clears — a 1/3 draw off the run's own archonRnd fork, never
+      // Math.random, so a replayed seed pays the same sigil. Dropped whether
+      // or not the save is ascended yet: a sigil banked before the first
+      // ascension is a re-read the player already earned. Capped like
+      // respecTokens so a farmed counter cannot grow unbounded.
+      if (this.gate?.rank === 'S' && this._archonRnd && this._archonRnd() < 1 / 3) {
+        const st = this.save.archonState;
+        if (st && (st.sigils || 0) < 99) {
+          st.sigils = (st.sigils || 0) + 1;
+          this.ui.toast('ASHEN SIGIL CLAIMED', 'gold');
+        }
+      }
+      // THE REACH resolves (CLASSES_SPEC unlock.trial): reaching and killing
+      // the Rift Archon under the trial flag is the whole trial, so the offer
+      // opens HERE, at the corpse, in both worlds — the arena's instant
+      // _clearGate below stacks the results panel UNDER the offer (z-order),
+      // and the crawl's walk-out portal simply waits behind it. Eligibility
+      // is re-checked because a mid-run migration/level change could have
+      // moved it; the flag burns either way so one run offers once.
+      if (this._trialRun) {
+        this._trialRun = false;
+        if (canAscend(this.save)) this._offerAscension();
+      }
+      // A boss leaves a corpse for a BEAST ARCHON alone (step 10): pacts are
+      // bound "from a boss or elite corpse" and bosses shipped corpseless —
+      // this is the smallest true reading, gated so every other save keeps
+      // the corpseless boss byte-for-byte. type 'boss' rides shadowCombat's
+      // own BOSS_BASE line; in the arena the instant results screen makes it
+      // moot, in a crawl the walk-out window is the binding window.
+      if (this.save.archon === 'beast') {
+        const bossCorpse = this._makeCorpseMesh(e, boundCreature);
+        bossCorpse.position.copy(e.pos);
+        bossCorpse.rotation.y = e.yaw;
+        bossCorpse.position.y = 0.25;
+        this.scene.add(bossCorpse);
+        this.corpses.push({
+          mesh: bossCorpse, pos: e.pos.clone(), life: CORPSE_WINDOW,
+          type: 'boss', creature: boundCreature,
+          enemyLevel: e.level, tierWeight: 'boss', attempts: 0,
+        });
+      }
       // DUNGEON_SPEC EDIT 6: in a crawl the walk-out exit portal owns run end
       // (STEP 5's director calls _clearGate on walk-in); the arena keeps the
       // instant clear.
@@ -1371,18 +2016,38 @@ export class Game {
   _damagePlayer(amount, from, source = null) {
     const p = this.player;
     if (!p.alive) return;
+    // Being swung on is combat, dodged or not — the Ember/Barrier banks hold
+    // while anything is still trying to kill you (step 9).
+    if (this._archonPath) this._combatT = ARCHON_COMBAT_SECONDS;
     if (p.invuln > 0) {
+      // STORM affinity (resonanceReading: +2 per dash that CLEARS an attack):
+      // this hit arrived while the dash's own i-frames were live — dashTimer
+      // only runs during the 0.26 s dash — which is the definition of the
+      // dash having cleared it. Deliberately wider than the perfect-dodge
+      // window below: a dash that dodged sloppily still dodged, and the two
+      // counters measure two different instincts (mobility vs timing).
+      if (p.dashTimer > 0) bumpAffinity(this.save, 'storm', 2);
       // Perfect dodge: this hit arrived inside the dodge window of the dash
       // that granted the current i-frames. _dodgeT only ever starts at dash
       // time, so spawn/level-up/post-hit invulnerability can never count.
-      const rip = p._dodgeT > 0 ? this._rules?.get('dodge_riposte') : null;
-      if (rip) {
-        // Refund rides EVERY perfectly dodged hit; the crit charge is one,
-        // unstackable, consumed by the next connecting hit (_damageEnemy).
-        p.mp = Math.min(this.derived.maxMp, p.mp + Math.max(1, Math.round(amount * rip.manaRefund)));
-        this._riposteCrit = true;
-        this.fx.ring(p.pos, 0x66e0ff, 3.2, 0.3);
-        this.audio.skill();
+      if (p._dodgeT > 0) {
+        // FROST affinity (+1 per perfect dodge) — on the DETECTION, not on
+        // the WINDSTEP ladder below it, which early-returns without agi
+        // masteries. The counter is about how you play, not what you own.
+        bumpAffinity(this.save, 'frost', 1);
+        const rip = this._rules?.get('dodge_riposte');
+        if (rip) {
+          // Refund rides EVERY perfectly dodged hit; the crit charge is one,
+          // unstackable, consumed by the next connecting hit (_damageEnemy).
+          p.mp = Math.min(this.derived.maxMp, p.mp + Math.max(1, Math.round(amount * rip.manaRefund)));
+          this._riposteCrit = true;
+          this.fx.ring(p.pos, 0x66e0ff, 3.2, 0.3);
+          this.audio.skill();
+        }
+        // WINDSTEP's whole ladder keys on the same detection (CLASSES_SPEC:
+        // "the perfect-dodge detection is the only new bit and it belongs
+        // next to the existing p.invuln check").
+        this._onPerfectDodge();
       }
       return;
     }
@@ -1399,8 +2064,78 @@ export class Game {
       raw *= ward.firstHitMul;
       this.fx.ring(p.pos, 0xffc24b, 2.6, 0.35);
     }
-    const dmg = Math.max(1, Math.round(raw));
+    let dmg = Math.max(1, Math.round(raw));
+    const mt = this._mastery;
+    // IRONHIDE (BULWARK T1): a hard cap on burst, applied AFTER every
+    // mitigation above — no single hit takes more than 12% of max HP. This is
+    // what lets a VIT build survive an A/S boss's opener, which raw HP cannot:
+    // the linear stat buys a bigger pool, the mastery bounds how fast one blow
+    // drains it.
+    if (mt && mt.vit >= 1) {
+      dmg = Math.min(dmg, Math.max(1, Math.round(d.maxHp * MASTERY.ironhide.maxHitFracOfMaxHp)));
+    }
+    // WILD FORM (BEAST ARCHON, step 10): 40% FLAT damage reduction for the
+    // 12 s window. After IRONHIDE like the Barrier below and for the same
+    // reason — a form that ate pre-cap damage would silently waive the cap —
+    // and floored at 1 like every damage floor in this method.
+    if (this._wildT > 0) {
+      dmg = Math.max(1, Math.round(dmg * (1 - BEAST_P.wildForm.flatDr)));
+    }
+    // GLACIAL BARRIER (FROST ARCHON, step 9): the shield absorbs before HP.
+    // The meter is denominated in PERCENT of max HP (classes.js rules: +0.4
+    // per Rime applied, cap 35, decay 2/s out of combat), so the conversion
+    // happens here, at the one spend site, and the meter itself stays a pure
+    // scalar the node suite can drive. Applied AFTER every mitigation —
+    // including IRONHIDE's burst cap — because a shield that ate pre-cap
+    // damage would silently waive the cap. Everything downstream (flinch,
+    // knockback, invuln) still runs: a blocked blow still rocks you, only
+    // the HP ledger is spared.
+    if (this._archonPath === FROST_P && this._archonRes && this._archonRes.value > 0) {
+      const shieldHp = (this._archonRes.value / 100) * d.maxHp;
+      const absorbed = Math.min(dmg, Math.floor(shieldHp));
+      if (absorbed > 0) {
+        dmg -= absorbed;
+        this._archonRes.spend((absorbed * 100) / d.maxHp);
+        this.fx.ring(p.pos, FROST_COLOR, 2.2, 0.25);
+      }
+    }
+    // VANGUARD's deferral (STEP 5 benefit flags): "25% OF EVERY HIT ARRIVES
+    // AS A 3S BLEED — KILL ANYTHING AND THE REMAINDER IS CANCELLED". The
+    // split takes the FINAL mitigated figure — after IRONHIDE and the
+    // Barrier, for the same reason those sit last: deferring pre-cap damage
+    // would silently waive the caps. The pool drains in _updatePlayer (it
+    // can kill — the escape clause is killing something, not waiting) and
+    // _killEnemy forgives it. bleedFrac is an UNSCALED shape flag: deferring
+    // MORE would not be better, which is why quality never touches it.
+    const CFP = this._classFlags;
+    if (CFP && CFP.bleedFrac > 0 && dmg > 1) {
+      const defer = Math.floor(dmg * CFP.bleedFrac);
+      if (defer > 0) {
+        dmg -= defer;
+        this._vgPool = (this._vgPool || 0) + defer;
+        // Overlapping hits share one clock: the whole pool re-amortises over
+        // a fresh 3 s window — one integer and one rate, no queue, nothing
+        // allocated per hit.
+        this._vgRate = this._vgPool / (CFP.bleedSeconds || 3);
+      }
+    }
+    const hpBefore = p.hp;
     p.hp -= dmg;
+    // RIPOSTE (BULWARK T2): taking a hit while ABOVE half health returns 25%
+    // of the post-mitigation damage as a 3.5 m shockwave, on a 0.9 s internal
+    // cooldown. The blast is BANKED here and applied at the top of
+    // _updateEnemies: _damagePlayer fires from inside the enemy for..of, and
+    // a kill splicing this.enemies mid-iteration is the documented hazard the
+    // bleed pass already routes around.
+    if (mt && mt.vit >= 2 && hpBefore > d.maxHp * MASTERY.riposte.minHpFrac
+      && (this._riposteT ?? 0) <= 0 && this._riposteFire) {
+      this._riposteT = MASTERY.riposte.cooldown;
+      this._riposteFire.armed = true;
+      this._riposteFire.x = p.pos.x;
+      this._riposteFire.z = p.pos.z;
+      this._riposteFire.dmg = dmg * MASTERY.riposte.returnFrac;
+      this.fx.ring(p.pos, 0xffc24b, MASTERY.riposte.radius, 0.35);
+    }
     // RIFTEDGE ASCENDANT's other half: the whiff no longer rewinds the combo
     // (tickAttack skips it under the rule), so TAKING A HIT is what does —
     // the clause's own wording, and the only reset the rule leaves.
@@ -1424,13 +2159,60 @@ export class Game {
       applyKnockback(p.body, tmpV2, p.body.impulseForDistance(1.6 * d.knockTakenMul));
     }
     if (p.hp <= 0) {
+      // UNYIELDING (BULWARK T3): one lethal hit per 90 s leaves 1 HP and 2 s
+      // of the invulnerability field the dash already writes. The cooldown is
+      // REAL run time (ticked on _frameDt in _updatePlayer, so hit-stop and
+      // level-up dilation cannot stretch it) and is never persisted.
+      if (mt && mt.vit >= 3 && (this._unyieldingT ?? 0) <= 0) {
+        this._unyieldingT = MASTERY.unyielding.cooldown;
+        p.hp = 1;
+        p.invuln = Math.max(p.invuln, MASTERY.unyielding.invulnSeconds);
+        this.ui.toast('UNYIELDING', 'gold');
+        this.fx.ring(p.pos, 0xffc24b, 5, 0.6);
+        this.audio.skill();
+        return;
+      }
       p.hp = 0;
       p.alive = false;
+      // A death sheds the wild shape FIRST (step 10): the base body is what
+      // plays the Death clip, and a beast mesh outliving its player would be
+      // exactly the linger _endWildForm's one-verb teardown exists to stop.
+      this._endWildForm(true);
       // The hunter falls before the fail screen reads him his rites: the Death
       // clip starts here and _updatePlayer's dead branch keeps the mixer
       // ticking, since the living animate path stops the moment alive flips.
       p.mesh.userData.character?.play('die', { fade: 0.08, once: true, clamp: true });
       this._fail();
+    }
+  }
+
+  /**
+   * WINDSTEP's mastery ladder, fired once per perfectly dodged hit (the
+   * p._dodgeT branch of _damagePlayer — a hit i-framed inside the dodge
+   * window of the dash that granted the frames).
+   *
+   *   T1 SLIPSTREAM — the dash cooldown refunds IN FULL and 0.6 s of +35%
+   *      attack speed opens (consumed as a clock scale on tickAttack, the
+   *      same lever a Quick affix pulls, so it speeds the whole swing).
+   *   T2 ANSWER — one guaranteed crit is queued for the next basic attack
+   *      landed inside 1.2 s (branch in _damageEnemy's crit roll).
+   *   T3 TEMPO — dodges chain: each within 4 s of the last banks a stack
+   *      (max 5) of +8% move speed / +6% crit damage; once the chain lapses
+   *      one stack decays every 2 s. An integer and two timers — the stacks
+   *      multiply in at the consumption sites, never into this.derived.
+   */
+  _onPerfectDodge() {
+    const mt = this._mastery;
+    if (!mt || mt.agi < 1) return;
+    const p = this.player;
+    p.cds.dash = 0;
+    this._slipT = MASTERY.slipstream.seconds;
+    this.fx.burst(p.pos.clone().setY(0.9), 10, 0x9dd8ff, { speed: 5, up: 2, life: 0.35 });
+    if (mt.agi >= 2) this._answerT = MASTERY.answer.window;
+    if (mt.agi >= 3) {
+      this._tempoStacks = Math.min(MASTERY.tempo.maxStacks, (this._tempoStacks || 0) + 1);
+      this._tempoChainT = MASTERY.tempo.chainWindow;
+      this._tempoDecayT = 0;
     }
   }
 
@@ -1495,7 +2277,11 @@ export class Game {
     // re-enters here with a fresh mana read.
     if (canAttack(p.attack, w)) {
       const ns = w.combo[p.attack.next % w.combo.length];
-      const need = ns.bolt ? STAFF.boltMp : (ns.beam ? STAFF.beam.mpPerTick : 0);
+      // The staff is the one basic attack with a mana price, so ORACLE's and
+      // REAVER's surcharge lists — which name 'attack' — price it here and
+      // at the cast/tick sites below, all through the same multiplier.
+      const need = (ns.bolt ? STAFF.boltMp : (ns.beam ? STAFF.beam.mpPerTick : 0))
+        * this._skillCostMul('attack');
       if (need > 0 && p.mp < need) { this.ui.toast('NOT ENOUGH MANA'); return; }
     }
     // Any attack input draws. A manual sheathe holds off the auto policy for a
@@ -1567,6 +2353,13 @@ export class Game {
     let stagger = hitStagger(w, step);
     if (charged && w.rule?.fx.chargedStaggerMul) stagger *= w.rule.fx.chargedStaggerMul;
     let crits = 0;
+    // FLAME affinity (+1 per enemy KILLED BY A COMBO FINISHER): a transient
+    // flag around exactly the finisher's own cone hits — _killEnemy reads it
+    // mid-_damageEnemy. The AFTERSHOCK shockwave and the emberfall detonate
+    // below deliberately do not count; they are riders, not the finisher.
+    // Cleared in the finally so an exception can never leave it stuck on.
+    this._finisherBlow = Boolean(step.finisher);
+    try {
     hits.forEach((e) => {
       if (this._damageEnemy(e, dmg, {
         knockback: hitKnockback(w, step),
@@ -1587,6 +2380,7 @@ export class Game {
         if (d > 0.3) e.vel.addScaledVector(tmpV2.divideScalar(d), Math.min(pull, d - 0.3) * 7);
       }
     });
+    } finally { this._finisherBlow = false; }
     // WHISPERFANGS ASCENDANT (tempo verb): a crit refunds recovery time, at
     // most critRefundMax per combo (counter reset when the opener starts).
     const cr = w.rule?.fx.critRefund;
@@ -1618,6 +2412,49 @@ export class Game {
         };
         this.fx.ring(p.pos, 0xc2703a, range * 0.7, 0.6);
       }
+      // BREAKER's finisher ladder (CLASSES_SPEC step 4). The finisher is the
+      // combo's whole identity, so all three masteries hang off it.
+      const mt = this._mastery;
+      if (mt && mt.str >= 1) {
+        // T1 SUNDER: every connecting finisher opens ARMOUR BREAK — the
+        // target takes +18% from all sources (read in _damageEnemy, run down
+        // in _updateEnemies) for 5 s. Refreshes, never stacks.
+        hits.forEach((e) => { if (e.hp > 0) e.sunderT = MASTERY.sunder.seconds; });
+        if (mt.str >= 2) {
+          // T2 AFTERSHOCK: the finisher also detonates a 5 m shockwave for
+          // 40% of atk, riding the existing finisher ring + shake — no new
+          // VFX asset (spec impl note). Snapshot, because _damageEnemy
+          // splices the dead out of this.enemies. origin:'skill' so the
+          // blast can never eat ANSWER's queued basic-attack crit.
+          const ar = MASTERY.aftershock.radius;
+          [...this.enemies].forEach((e) => {
+            if (e.hp > 0 && tmpV2.copy(e.pos).sub(p.pos).setY(0).length() <= ar + e.radius) {
+              this._damageEnemy(e, this.derived.atk * MASTERY.aftershock.atkFrac, {
+                from: p.pos, knockback: 4, origin: 'skill',
+              });
+            }
+          });
+          this.fx.ring(p.pos, 0xffc24b, ar, 0.4);
+          this.fx.addShake(0.35);
+        }
+        if (mt.str >= 3) {
+          // T3 RUINOUS, half two: every 3rd finisher THROWN (hit or miss —
+          // the count is cadence, like the emberfall 5pc counter above)
+          // staggers everything within 7 m for 0.8 s. Stagger is already an
+          // enemy field; no damage rides along.
+          this._ruinFin = (this._ruinFin || 0) + 1;
+          if (this._ruinFin % MASTERY.ruinous.staggerEvery === 0) {
+            const rr = MASTERY.ruinous.staggerRadius;
+            for (const e of this.enemies) {
+              if (e.hp > 0 && tmpV2.copy(e.pos).sub(p.pos).setY(0).length() <= rr + e.radius) {
+                e.stagger = Math.max(e.stagger, MASTERY.ruinous.staggerSeconds);
+              }
+            }
+            this.fx.ring(p.pos, 0xff8c3a, rr, 0.5);
+            this.fx.addShake(0.3);
+          }
+        }
+      }
     }
     // A released charge moves more air: scale the whiff-or-hit rumble with
     // what the hold earned, so a full-charge release reads without a tooltip.
@@ -1625,10 +2462,11 @@ export class Game {
     if (step.finisher) this.fx.ring(p.pos, 0x9dd8ff, 4.5, 0.35);
     if (step.finisher) {
       // emberfall 4pc: finishers leech 3% of damage DEALT — per connecting
-      // target, because dmg here is per-target.
+      // target, because dmg here is per-target. Through _healPlayer so the
+      // BERSERKER healing tax prices it like every other incidental heal.
       const fl = this._armorBonus?.finisherLeech || 0;
       if (fl > 0 && hits.length) {
-        p.hp = Math.min(this.derived.maxHp, p.hp + dmg * fl * hits.length);
+        this._healPlayer(dmg * fl * hits.length);
       }
       // emberfall 5pc: every THIRD combo finisher detonates for 60% weapon
       // damage in a 4 m ring. The counter is per-run (reset in _beginGate)
@@ -1863,12 +2701,13 @@ export class Game {
     // The cast can outlive its funding: _tryAttack read the bar 0.28 s ago
     // and a skill may have drained it since. A dry cast fizzles visibly
     // instead of casting on credit.
-    if (p.mp < STAFF.boltMp) {
+    const boltCost = STAFF.boltMp * this._skillCostMul('attack');
+    if (p.mp < boltCost) {
       this.ui.toast('NOT ENOUGH MANA');
       this.fx.burst(_staffFrom.copy(p.pos).setY(STAFF.launchY), 4, 0x9db0ff, { speed: 2, up: 1, life: 0.25 });
       return;
     }
-    p.mp -= STAFF.boltMp;
+    p.mp -= boltCost;
 
     // Same soft-lock affordance as the bow at the staff's 18 m — one learned
     // aiming skill, not two — validated with lineBlocked ONCE at cast (the
@@ -1964,9 +2803,13 @@ export class Game {
    *  channel is cheaper per second than a short one. Base cost on every
    *  instance without the rule. */
   _beamTickCost(b) {
+    // The class 'attack' surcharge multiplies the whole tick, EMBERSTAVE
+    // discount included — a taxed channel is taxed on what it actually pays.
     const fx = b?.w?.rule?.fx;
-    if (fx?.beamCheapT != null && b.t > fx.beamCheapT) return STAFF.beam.mpPerTick * (fx.beamCostMul || 1);
-    return STAFF.beam.mpPerTick;
+    const base = (fx?.beamCheapT != null && b.t > fx.beamCheapT)
+      ? STAFF.beam.mpPerTick * (fx.beamCostMul || 1)
+      : STAFF.beam.mpPerTick;
+    return base * this._skillCostMul('attack');
   }
 
   _staffBeamTick(first) {
@@ -2069,38 +2912,173 @@ export class Game {
       ? tmpV.set(mv.x, 0, mv.z).normalize()
       : this._forward(p.yaw, tmpV);
     // Authored in world units; the body solves the impulse that travels it.
-    const v0 = p.body.impulseForDistance(SKILLS.dash.distance);
+    // dashDistance/dashIframes are class-touched derived fields (VANGUARD's
+    // -20% distance, BLADEDANCER's 0.34 -> 0.42 s i-frames): applyModifiers
+    // seeds them from SKILLS.dash only when a class term touches them, so
+    // the ?? fallback IS the shipped constant for every other save.
+    const dashDist = this.derived.dashDistance ?? SKILLS.dash.distance;
+    const v0 = p.body.impulseForDistance(dashDist);
     p.body.addImpulse(dir.x * v0, 0, dir.z * v0);
     p.yaw = Math.atan2(dir.x, dir.z);
-    p.invuln = Math.max(p.invuln, SKILLS.dash.iframes);
+    p.invuln = Math.max(p.invuln, this.derived.dashIframes ?? SKILLS.dash.iframes);
     p.dashTimer = 0.26;
     // A hit i-framed within this window of the dash START is a PERFECT dodge
     // (_damagePlayer's invuln branch) — derived.dodgeWindow finally consumed.
     p._dodgeT = this.derived.dodgeWindow;
-    // derived.dashCd is SKILLS.dash.cd exactly until the issue 4pc (-0.25 s).
-    p.cds.dash = this.derived.dashCd;
+    // derived.dashCd is SKILLS.dash.cd exactly until the issue 4pc (-0.25 s)
+    // or BLADEDANCER's -0.55 s; TEMPLAR's cooldown tax multiplies on top.
+    p.cds.dash = this.derived.dashCd * this._skillCdMul();
+    // TEMPEST STEP (step 10): dash cooldown zero, and every dash leaves a
+    // bolt that deals 90% of atk along its line. The bolt resolves NOW, down
+    // the authored dash line (dir x the skill's distance) — the body solves
+    // the same travel over the next frames, so the line is the dash. Enemies
+    // within boltHalfWidth (+ their radius) of the segment take the hit,
+    // marked noStatus + origin 'skill' like every path-generated blast: a
+    // bolt must not chain an Arc or eat ANSWER's queued basic-attack crit.
+    if (this._tempestT > 0) {
+      p.cds.dash = 0;
+      const T = STORM_P.tempest;
+      const len = dashDist;   // the bolt IS the dash line, class-priced and all
+      const dmg = this.derived.atk * T.boltAtkPct;
+      // dir IS tmpV (both branches above) and _damageEnemy consumes tmpV
+      // internally — the file-header aliasing lesson — so the line lives in
+      // SCALARS and the endpoint pair before the first nested call.
+      const dirX = dir.x;
+      const dirZ = dir.z;
+      const ox = p.pos.x;
+      const oz = p.pos.z;
+      _archV.set(ox, 1.0, oz);
+      _archV2.set(ox + dirX * len, 1.0, oz + dirZ * len);
+      for (let i = this.enemies.length - 1; i >= 0; i--) {
+        const e = this.enemies[i];
+        if (e.hp <= 0 || e.spawning > 0) continue;
+        // Closest point on the segment to the enemy, in the ground plane.
+        const ex = e.pos.x - ox;
+        const ez = e.pos.z - oz;
+        const t = Math.max(0, Math.min(len, ex * dirX + ez * dirZ));
+        const dx = ex - dirX * t;
+        const dz = ez - dirZ * t;
+        if (dx * dx + dz * dz > (T.boltHalfWidth + e.radius) * (T.boltHalfWidth + e.radius)) continue;
+        this._damageEnemy(e, dmg, { from: p.pos, knockback: 3, origin: 'skill', noStatus: true });
+      }
+      if (this._archonFx) {
+        this._archonFx.spawnSegment(_archV, _archV2, { life: 0.25, scale: 1.4 });
+      }
+      this.fx.burst(_archV2.clone().setY(0.8), 10, STORM_COLOR, { speed: 6, up: 3, life: 0.3 });
+    }
     this.audio.dash();
     this.fx.burst(p.pos.clone().setY(0.7), 16, 0x9dd8ff, { speed: 4, up: 2, life: 0.4 });
+  }
+
+  /**
+   * EMBERMIND's price-and-payoff read for one skill cast, taken BEFORE the
+   * mana check so OVERCHARGE's free cast is free at the gate, not refunded
+   * after it. Pure read — nothing advances until _noteSkillCast commits.
+   *
+   * OVERCHARGE (T3): every 4th cast inside a rolling 10 s window costs 0 and
+   * deals 1.6x. The counter dies with the window, so it rewards a ROTATION,
+   * not a stockpile — three casts banked on Monday buy nothing on Tuesday.
+   */
+  _skillCastPlan(sk, key) {
+    const mt = this._mastery;
+    if (mt && mt.int >= 3) {
+      if ((this._overT ?? 0) <= 0) this._overN = 0;
+      if ((this._overN || 0) + 1 >= MASTERY.overcharge.every) {
+        return { cost: 0, mul: MASTERY.overcharge.dmgMul, free: true };
+      }
+    }
+    // The class surcharge prices the REAL cast; OVERCHARGE's free cast above
+    // stays free (nothing paid, nothing surcharged) and KINDLING refunds off
+    // plan.cost, so a taxed cast refunds off its taxed price — consistent.
+    return { cost: Math.round(sk.mp * this._skillCostMul(key)), mul: 1, free: false };
+  }
+
+  /**
+   * The class layer's mana surcharge on ONE skill (STEP 5 drawback flags):
+   * skillCostPct (pre-softened by resonance) raises the cost of exactly the
+   * skills the card names in skillCostSkills — 'attack' is the staff's
+   * bolt/beam (the one basic attack with a mana price), 'summon' is free by
+   * design so listing it prices nothing, and dash costs no mana. x1 for a
+   * class without the term and for every un-classed save.
+   */
+  _skillCostMul(key) {
+    const CF = this._classFlags;
+    if (!CF || !CF.skillCostPct || !Array.isArray(CF.skillCostSkills)) return 1;
+    return CF.skillCostSkills.includes(key) ? 1 + CF.skillCostPct : 1;
+  }
+
+  /** TEMPLAR's "ALL COOLDOWNS +15%" (drawback flag cooldownPct, resonance-
+   *  softened): one multiplier on every skill clock at its arming site —
+   *  dash, Ruin, Nova, Bind. Applied at arming rather than in the tick so
+   *  the HUD wipe and the felt wait agree. x1 without the term. */
+  _skillCdMul() {
+    return 1 + (this._classFlags?.cooldownPct || 0);
+  }
+
+  /**
+   * Commit one skill cast to the EMBERMIND masteries. Called by _trySlash and
+   * _tryNova after the cast is definitely happening.
+   *
+   *   T1 KINDLING — arm the 3 s kill-refund window on THIS cast's real cost
+   *      (a free OVERCHARGE cast arms a zero window: nothing paid, nothing
+   *      refunded); _killEnemy pays it out 20% per kill up to the full cost.
+   *   T2 RESIDUE — the cast leaves a 4 m field at the cast point for 3 s,
+   *      12% of atk per second, max 3 live (slots reused oldest-first).
+   *   T3 OVERCHARGE — advance the rotation counter and re-open the window;
+   *      the 4th wraps to 0, so the ladder repeats.
+   */
+  _noteSkillCast(plan) {
+    const mt = this._mastery;
+    if (!mt) return;
+    if (mt.int >= 1) {
+      this._kindlingT = MASTERY.kindling.window;
+      this._kindlingCost = plan.cost;
+      this._kindlingPaid = 0;
+    }
+    if (mt.int >= 2) {
+      const R = this._residue;
+      if (R) {
+        let slot = null;
+        for (const f of R) if (f.t <= 0) { slot = f; break; }
+        if (!slot) { slot = R[0]; for (const f of R) if (f.t < slot.t) slot = f; }
+        slot.x = this.player.pos.x;
+        slot.z = this.player.pos.z;
+        slot.t = MASTERY.residue.seconds;
+        slot.acc = 0;
+      }
+    }
+    if (mt.int >= 3) {
+      this._overN = ((this._overN || 0) + 1) % MASTERY.overcharge.every;
+      this._overT = MASTERY.overcharge.window;
+      if (plan.free) this.fx.ring(this.player.pos, RESIDUE_COLOR, 3, 0.35);
+    }
   }
 
   _trySlash() {
     const p = this.player;
     const sk = SKILLS.slash;
     if (p.cds.slash > 0) return;
+    // WILD FORM bars the skill buttons outright (step 10, spec verbatim:
+    // "no skills and no items") — the form's 2.2x is basic attacks' alone.
+    if (this._wildT > 0) return this.ui.toast('THE BEAST KNOWS NO SKILLS');
     if (this.save.level < sk.unlockLevel) return this.ui.toast(`RUIN UNLOCKS AT LEVEL ${sk.unlockLevel}`);
-    if (p.mp < sk.mp) return this.ui.toast('NOT ENOUGH MANA');
+    const plan = this._skillCastPlan(sk, 'slash');
+    if (p.mp < plan.cost) return this.ui.toast('NOT ENOUGH MANA');
     // A skill cast takes both hands; the channel ends first.
     this._endStaffBeam();
-    p.mp -= sk.mp;
-    p.cds.slash = sk.cd;
+    p.mp -= plan.cost;
+    this._noteSkillCast(plan);
+    p.cds.slash = sk.cd * this._skillCdMul();
     // Visual arm-swing only — the skill applies its own damage immediately and
     // never enters the weapon machine.
     p.skillSwing = 0.3;
     this._faceNearest(sk.range);
 
     const hits = this._coneTargets(p.pos, p.yaw, sk.range, sk.arc);
-    hits.forEach((e) => this._damageEnemy(e, this.derived.atk * sk.dmg * this.derived.skillMul, {
-      knockback: 7, stagger: 0.35, from: p.pos,
+    // origin:'skill' — skill damage never consumes ANSWER's queued crit
+    // (that charge belongs to the next BASIC attack, per the mastery text).
+    hits.forEach((e) => this._damageEnemy(e, this.derived.atk * sk.dmg * this.derived.skillMul * plan.mul, {
+      knockback: 7, stagger: 0.35, from: p.pos, origin: 'skill',
     }));
 
     // Draw the cleave as a flat arc of shards sweeping outward.
@@ -2120,26 +3098,36 @@ export class Game {
     const p = this.player;
     const sk = SKILLS.nova;
     if (p.cds.nova > 0) return;
+    // WILD FORM: no skills (step 10) — same bar as _trySlash, same reason.
+    if (this._wildT > 0) return this.ui.toast('THE BEAST KNOWS NO SKILLS');
     if (this.save.level < sk.unlockLevel) return this.ui.toast(`NOVA UNLOCKS AT LEVEL ${sk.unlockLevel}`);
-    if (p.mp < sk.mp) return this.ui.toast('NOT ENOUGH MANA');
+    const plan = this._skillCastPlan(sk, 'nova');
+    if (p.mp < plan.cost) return this.ui.toast('NOT ENOUGH MANA');
     // A skill cast takes both hands; the channel ends first.
     this._endStaffBeam();
-    p.mp -= sk.mp;
-    p.cds.nova = sk.cd;
+    p.mp -= plan.cost;
+    this._noteSkillCast(plan);
+    p.cds.nova = sk.cd * this._skillCdMul();
 
     const r = sk.radius;
     // Snapshot: _damageEnemy can splice the dead out of this.enemies, and
     // mutating the array being iterated made Nova silently skip targets.
+    let novaHits = 0;
     [...this.enemies].forEach((e) => {
       const d = e.pos.distanceTo(p.pos);
       if (d < r) {
+        novaHits++;
         // Falloff keeps point-blank Nova meaningfully stronger than the fringe.
         const falloff = 1 - (d / r) * 0.45;
-        this._damageEnemy(e, this.derived.atk * sk.dmg * this.derived.skillMul * falloff, {
-          knockback: 14, stagger: 0.7, from: p.pos,
+        this._damageEnemy(e, this.derived.atk * sk.dmg * this.derived.skillMul * falloff * plan.mul, {
+          knockback: 14, stagger: 0.7, from: p.pos, origin: 'skill',
         });
       }
     });
+    // FLAME affinity (resonanceReading: +2 per Nova that hits 4 or more) —
+    // counted on connection, not on cast: a panic Nova into empty air says
+    // nothing about a cascade instinct.
+    if (novaHits >= 4) bumpAffinity(this.save, 'flame', 2);
     // Nova also wipes incoming projectiles — a genuine panic button. Bolts
     // only: the player's own arrows are not "incoming", and popping a stuck
     // arrow out of the floor because you panicked reads as a bug.
@@ -2164,9 +3152,21 @@ export class Game {
     const p = this.player;
     const sk = SKILLS.summon;
     if (p.cds.summon > 0) return;
+    // WILD FORM: no skills (step 10) — Bind included; the form fights alone.
+    if (this._wildT > 0) return this.ui.toast('THE BEAST KNOWS NO SKILLS');
     if (this.save.level < sk.unlockLevel) return this.ui.toast(`BIND UNLOCKS AT LEVEL ${sk.unlockLevel}`);
 
-    const room = this.fieldCapacity() - this.shadows.length;
+    // BEAST ARCHON (step 10): a boss or elite corpse in reach binds a PACT
+    // through this same extraction verb — the spec's "existing extraction
+    // path, so it costs no new system". Handled first because a pact-worthy
+    // corpse must never be spent as a common soldier; trash corpses fall
+    // through to the shipped Bind below (which the fielded pact then starves
+    // via the room check — one ally, not thirteen).
+    if (this.save.archon === 'beast' && this._tryBindPact()) return;
+
+    // A fielded pact beast IS the whole allowance (spec: "consumes the
+    // ENTIRE field-shadow allowance — one ally, not thirteen").
+    const room = this._pactFielded() ? 0 : this.fieldCapacity() - this.shadows.length;
     if (room <= 0) return this.ui.toast('YOUR COMPANY IS AT FULL STRENGTH');
 
     const inRange = this.corpses.filter((c) => (
@@ -2174,7 +3174,7 @@ export class Game {
     ));
     if (inRange.length === 0) return this.ui.toast('NO FALLEN NEARBY');
 
-    p.cds.summon = sk.cd;
+    p.cds.summon = sk.cd * this._skillCdMul();
     let raised = 0;
     let failed = 0;
     let rosterFull = false;
@@ -2186,8 +3186,10 @@ export class Game {
         secondsSinceDeath: CORPSE_WINDOW - c.life,
         attemptIndex: c.attempts,
         // A worn Taker's Chain rides on the PER term — the trinket's one
-        // exotic effect (RPG_SPEC equipmentSlots.trinket).
-        extractAdd: this._armorBonus?.extractAdd || 0,
+        // exotic effect (RPG_SPEC equipmentSlots.trinket) — and BINDER's
+        // "+12 PTS" card term (extractAdd, quality/resonance-scaled: the
+        // worked example's +15.1 pts) rides the same flat seam.
+        extractAdd: (this._armorBonus?.extractAdd || 0) + (this._classFlags?.extractAdd || 0),
       });
       c.attempts++;
       if (Math.random() >= chance) {
@@ -2205,6 +3207,11 @@ export class Game {
       const i = this.corpses.indexOf(c);
       if (i >= 0) this.corpses.splice(i, 1);
     }
+
+    // SHADOW affinity (resonanceReading: +1 per SUCCESSFUL Bind extraction).
+    // Failures teach nothing about the player's development — the counter
+    // reads commitment to the army, and a resisted corpse is not an army.
+    if (raised > 0) bumpAffinity(this.save, 'shadow', raised);
 
     this.audio.bind();
     this.fx.ring(p.pos, 0x35e6ff, 14, 0.7);
@@ -2295,7 +3302,33 @@ export class Game {
     // would otherwise double the day length, and nothing would report it.
     // Deliberately outside the `state === 'playing'` gate: time passes while a
     // menu is up, which is what makes the hub feel like a place.
-    this.worldClock.tick(dt);
+    //
+    // ...while a menu is up IN THE WORLD. With no mode mounted there is no
+    // world for time to pass in — that is the boot title, where nothing
+    // samples the clock and no sky is drawn. Ticking there did nothing visible
+    // and made the saved-clock acceptance check a race against boot time: the
+    // check budgets 3 real seconds between loop start and its post-reload
+    // probe, and the classes wave's larger dev-server module graph pushed a
+    // margin that was already under half a second on SwiftShader past it.
+    // Freezing an unmounted clock is behaviour-identical on screen and makes
+    // "resume at the saved hour" exact instead of boot-speed-dependent.
+    if (this._mode) {
+      this.worldClock.tick(dt);
+      // The stored hour otherwise rides only the event-driven onSave cadence
+      // (equip, gate clear, level-up), which can leave it minutes of game
+      // time behind the live clock — an app killed from the switcher then
+      // resumes at the last equip's hour, and the acceptance reload check
+      // measures exactly that loss (its budget is 0.2 h = 12 real seconds).
+      // A 6-real-second heartbeat bounds the loss well inside that budget at
+      // the cost of one few-KB localStorage write — onSave() is the wrapper
+      // above, so the heartbeat stamps worldTime on the same single path as
+      // every other save and cannot introduce a second writer.
+      this._clockSaveT = (this._clockSaveT || 0) + dt;
+      if (this._clockSaveT >= 6) {
+        this._clockSaveT = 0;
+        this.onSave();
+      }
+    }
     // Atmosphere runs behind a pause, exactly as `this.world.update(dt)` did
     // when it sat here unconditionally.
     this._mode?.updateAlways(dt);
@@ -2360,6 +3393,48 @@ export class Game {
     if (p._dodgeT > 0) p._dodgeT -= dt;
     if (p.skillSwing > 0) p.skillSwing = Math.max(0, p.skillSwing - dt);
 
+    // Mastery clocks (CLASSES_SPEC step 4). All on the SIM step except
+    // UNYIELDING, whose 90 s is real time by spec ("real time, tracked on the
+    // run") — hit-stop must not stretch the one cheat of death.
+    if (this._slipT > 0) this._slipT -= dt;
+    if (this._answerT > 0) this._answerT -= dt;
+    if (this._riposteT > 0) this._riposteT -= dt;
+    if (this._overT > 0) this._overT -= dt;
+    if (this._kindlingT > 0) this._kindlingT -= dt;
+    if (this._unyieldingT > 0) this._unyieldingT -= this._frameDt;
+    // LEGION STEP's 45 s runs on the sim step like every other combat clock —
+    // hit-stop stretching a burst-window cooldown would punish the path for
+    // landing crits.
+    if (this._legionT > 0) this._legionT -= dt;
+    // TEMPEST STEP's 6 s and WILD FORM's 12 s/90 s, same sim-step reasoning
+    // (step 10): both are burst windows crits should not shorten. The form
+    // sheds itself the frame its window closes — _endWildForm restores the
+    // base body and disposes the borrowed rig, its one teardown verb.
+    if (this._tempestT > 0) {
+      this._tempestT -= dt;
+      // "Dash cooldown zero": zeroed at the top of the frame, BEFORE the
+      // input block reads it, so a cooldown banked before the window opened
+      // cannot eat the window's first dash.
+      p.cds.dash = 0;
+    }
+    if (this._wildCd > 0) this._wildCd -= dt;
+    if (this._wildT > 0) {
+      this._wildT -= dt;
+      if (this._wildT <= 0) this._endWildForm();
+    }
+    // TEMPO's chain-then-decay: stacks hold while the 4 s chain window runs,
+    // then shed one every 2 s. Integer + two timers, nothing allocated.
+    if (this._tempoStacks > 0) {
+      if (this._tempoChainT > 0) this._tempoChainT -= dt;
+      else {
+        this._tempoDecayT += dt;
+        if (this._tempoDecayT >= MASTERY.tempo.decayEvery) {
+          this._tempoDecayT -= MASTERY.tempo.decayEvery;
+          this._tempoStacks--;
+        }
+      }
+    }
+
     // issue 5pc: the ward re-arms on ROOM ENTRY, which is a room-id change —
     // the dungeon's roomAt is the same lookup the encounter director runs per
     // frame, and the arena world has no roomAt so the whole gate is one room
@@ -2373,9 +3448,36 @@ export class Game {
       }
     }
 
+    // REAVER's kill-stack window (STEP 5): refresh-style — the clock re-arms
+    // per kill in _killEnemy, and the WHOLE stack sheds when it lapses.
+    if (this._killStackT > 0) {
+      this._killStackT -= dt;
+      if (this._killStackT <= 0) this._killStacks = 0;
+    }
+
     // regen
     p.hp = Math.min(d.maxHp, p.hp + d.hpRegen * dt);
     p.mp = Math.min(d.maxMp, p.mp + d.mpRegen * dt);
+
+    // VANGUARD's deferred remainder lands here at the bleed's own pace
+    // (banked in _damagePlayer, forgiven in _killEnemy). A direct hp write
+    // like the enemy bleed ticks — routing it back through _damagePlayer
+    // would re-mitigate and re-defer the same wound forever. It CAN finish
+    // you: a deferral that could not kill would be a hidden second benefit
+    // the card never printed, so the death path below is the real one.
+    if (this._vgPool > 0) {
+      const bite = Math.min(this._vgPool, (this._vgRate || this._vgPool) * dt);
+      this._vgPool -= bite;
+      p.hp -= bite;
+      if (p.hp <= 0) {
+        p.hp = 0;
+        p.alive = false;
+        this._endWildForm(true);
+        p.mesh.userData.character?.play('die', { fade: 0.08, once: true, clamp: true });
+        this._fail();
+        return;
+      }
+    }
 
     // input. A fresh press always goes in (startAttack buffers it if the step
     // is not cancelable yet); a held button or a ripe buffer only fires once
@@ -2406,11 +3508,56 @@ export class Game {
     if (this.input.consume('dash')) this._tryDash();
     if (this.input.consume('slash')) this._trySlash();
     if (this.input.consume('nova')) this._tryNova();
-    if (this.input.consume('summon')) this._trySummon();
+    // The one contextual slot (interlock.theOneSlot). For an ascended path
+    // with a slot meaning — SHADOW = Legion Step (step 8), FLAME = Ashfall,
+    // FROST = the freeze-detonate (step 9) — the TAP is the path's active and
+    // Bind moves to a hold: the press starts a timer, holding past
+    // bindHoldSeconds fires Bind, releasing before it fires the ultimate.
+    // Every other save (unascended, and STORM/BEAST until step 10 gives them
+    // their meanings) keeps the shipped press-is-Bind verbatim. The decision
+    // happens on RELEASE for the tap, which costs the ultimate one 0.35 s
+    // confirmation — acceptable for burst-window actives, and the only shape
+    // that leaves a hold available on the same thumb.
+    if (this.save.archon === 'shadow' || this._archonPath) {
+      if (this.input.consume('summon')) this._summonHoldT = 0;
+      if (this._summonHoldT !== null) {
+        if (this.input.isHeld('summon')) {
+          this._summonHoldT += dt;
+          if (this._summonHoldT >= SOVEREIGN.bindHoldSeconds) {
+            this._summonHoldT = null;
+            this._trySummon();
+          }
+        } else {
+          this._summonHoldT = null;
+          if (this.save.archon === 'shadow') this._tryLegionStep();
+          else if (this._archonPath === FLAME_P) this._tryAshfall();
+          else if (this._archonPath === FROST_P) this._tryShatterDetonate();
+          else if (this._archonPath === STORM_P) this._tryTempest();
+          else if (this._archonPath === BEAST_P) this._tryWildForm();
+        }
+      }
+    } else if (this.input.consume('summon')) this._trySummon();
 
     // swing timing — the machine advances phases and fires _applySwingHit once
     // per damage application (the dagger finisher makes two).
-    if (w) tickAttack(p.attack, w, dt, this._onSwingHit);
+    // SLIPSTREAM (WINDSTEP T1): while the 0.6 s post-perfect-dodge window
+    // runs, the swing CLOCK advances 35% faster — the same lever a Quick
+    // affix pulls (w.rate scales the clock, not the table), so windup, active
+    // and recovery all compress together. dt * 1 exactly when the window is
+    // closed, which is every frame of every save without the mastery.
+    // REAVER's kill stacks pull the same lever (+4%/stack while the window
+    // runs) — cadence, not damage, exactly like the card's "attack speed".
+    let atkDt = dt;
+    if (this._slipT > 0) atkDt *= 1 + MASTERY.slipstream.atkSpeedBonus;
+    if (this._killStacks > 0 && this._classFlags?.killStackAtkSpeedPct) {
+      atkDt *= 1 + this._killStacks * this._classFlags.killStackAtkSpeedPct;
+    }
+    if (w) tickAttack(p.attack, w, atkDt, this._onSwingHit);
+    // TEMPEST STEP: "basic attacks ignore their cooldown" — the inter-combo
+    // cd the machine just banked is zeroed while the window runs. The steps'
+    // own windup/active/recovery timing is untouched: the storm buys cadence
+    // between combos, not faster blades inside one.
+    if (this._tempestT > 0) p.attack.cd = 0;
     // The staff's channel outlives its machine step by design — the step is
     // the CAST, the channel is what the hold buys after it.
     this._updateStaffBeam(dt);
@@ -2427,8 +3574,31 @@ export class Game {
     }
 
     // movement — the body owns integration, collision and ground contact
+    // TEMPO (WINDSTEP T3): +8% move speed per live stack, multiplied at the
+    // consumption site (this.derived is never rewritten mid-run), under the
+    // ABSOLUTE 14 u/s ceiling every speed source answers to (balance guard —
+    // STAT_RATES.agi's comment records what an uncapped speed term did).
+    // d.speed tops out at 10.8 (6 + 4.2 asymptote + 0.6 armour), so the
+    // Math.min is inert for every save without stacks.
+    // Every speed term multiplies HERE and the ceiling applies ONCE (step 10
+    // widened the tempo-only clamp): TEMPO's +8%/stack, TEMPEST STEP's +55%,
+    // WILD FORM's 1.5x — and whatever any future save carries — all answer
+    // to the same Math.min(SPEED_CAP=14). d.speed tops out at 10.8 (6 + 4.2
+    // asymptote + 0.6 armour), so with no term live the clamp is inert and
+    // the shipped number passes through exactly. Tempest and Wild cannot
+    // coexist (one archon path per save), so their product never actually
+    // compounds — the ceiling would hold even if it did.
     const body = p.body;
-    body.maxSpeed = d.speed;
+    let spdMul = 1;
+    if (this._tempoStacks > 0) spdMul *= 1 + this._tempoStacks * MASTERY.tempo.speedPctPerStack;
+    if (this._tempestT > 0) spdMul *= 1 + STORM_P.tempest.speedBonus;
+    if (this._wildT > 0) spdMul *= BEAST_P.wildForm.speedMul;
+    // REAVER's kill stacks (+6%/stack, STEP 5): the same consumption site as
+    // TEMPO, under the same one 14 u/s ceiling.
+    if (this._killStacks > 0 && this._classFlags?.killStackSpeedPct) {
+      spdMul *= 1 + this._killStacks * this._classFlags.killStackSpeedPct;
+    }
+    body.maxSpeed = Math.min(SPEED_CAP, d.speed * spdMul);
     if (this.input.consume('jump')) body.jump();
     body.setJumpHeld(this.input.isHeld('jump'));
 
@@ -2474,6 +3644,26 @@ export class Game {
     body.step(dt);
     const sp = body.groundSpeed;
 
+    // STORM affinity (+1 per 400 m travelled inside a gate). groundSpeed x dt
+    // is real ground covered by the body solver — teleports and knockbacks
+    // never pass through it, so the odometer reads walking and dashing only.
+    // _updatePlayer runs in gate mode alone (the city has its own player
+    // update), which is exactly the "inside a gate" clause.
+    this._travelAcc = (this._travelAcc || 0) + sp * dt;
+    if (this._travelAcc >= 400) {
+      this._travelAcc -= 400;
+      bumpAffinity(this.save, 'storm', 1);
+    }
+    // CHARGE (STORM ARCHON, step 10): +1 per metre travelled, off the same
+    // body-solver odometer as the affinity read above — teleports and
+    // knockbacks never pass through groundSpeed, so the meter reads walking
+    // and dashing only. Gated while TEMPEST STEP runs: "Charge is spent in
+    // full and cannot regenerate for the duration" (spec verbatim). The
+    // decay side (8/s while stationary) lives in _updateArchon's tick.
+    if (this._archonPath === STORM_P && this._archonRes && this._tempestT <= 0) {
+      this._archonRes.gain(sp * dt);
+    }
+
     if (body.justLanded && body.landSpeed > 6) {
       // Only a real drop gets a thump; stepping off a kerb should be silent.
       this.fx.burst(p.pos.clone().setY(0.3), 10, 0x9dd8ff, { speed: 3, up: 1.4, life: 0.35 });
@@ -2486,10 +3676,22 @@ export class Game {
       this.fx.burst(p.pos.clone().setY(0.6), 2, 0x9dd8ff, { speed: 1, up: 0.5, life: 0.3, gravity: -1 });
     }
 
-    // present
+    // present. During WILD FORM the borrowed rig is the body on screen: the
+    // base mesh stays parented and hidden (never disposed — the form ends by
+    // restoring it), and the invuln flicker moves to the shape the player is
+    // actually watching. rigMesh is what every pose call below drives.
+    const rigMesh = this._wildMesh || p.mesh;
+    const flicker = !(p.invuln > 0 && p.dashTimer <= 0 && Math.floor(this.time * 22) % 2 === 0);
     p.mesh.position.copy(p.pos);
     p.mesh.rotation.y = p.yaw;
-    p.mesh.visible = !(p.invuln > 0 && p.dashTimer <= 0 && Math.floor(this.time * 22) % 2 === 0);
+    if (this._wildMesh) {
+      p.mesh.visible = false;
+      this._wildMesh.position.copy(p.pos);
+      this._wildMesh.rotation.y = p.yaw;
+      this._wildMesh.visible = flicker;
+    } else {
+      p.mesh.visible = flicker;
+    }
     // attackAnim hands over everything the pose needs: phase 1 -> 0 across the
     // step, the contact frame at the REAL windup fraction (0.17/0.34 = 0.5 for
     // the sword opener — the exact number the old hardcoded 0.5 encoded), and
@@ -2498,7 +3700,7 @@ export class Game {
     // machine is idle.
     const anim = w ? attackAnim(p.attack, w) : null;
     const machineSwinging = Boolean(anim && anim.phase > 0);
-    animateRig(p.mesh, {
+    animateRig(rigMesh, {
       moving, speed: sp, t: this.time,
       attackPhase: machineSwinging ? anim.phase : (p.skillSwing > 0 ? p.skillSwing / 0.3 : 0),
       // The skinned rig warps its slash clip so the blade connects on exactly
@@ -2614,6 +3816,68 @@ export class Game {
     const p = this.player;
     // GRAVEMAUL ASCENDANT: the crater decays here, once, whatever spawned it.
     if (this._crater && (this._crater.t -= dt) <= 0) this._crater = null;
+    // Mastery ground telegraphy opens its frame: everything pushed between
+    // here and the commit at the bottom is this frame's truth, and an idle
+    // pool submits zero draw calls (count 0 — see GroundFxPool).
+    if (this._groundFx) this._groundFx.begin();
+    // RIPOSTE's banked shockwave (BULWARK T2), applied where killing is safe:
+    // _damagePlayer armed it from inside the enemy for..of below, and a
+    // splice mid-iteration is the documented hazard the bleed pass routes
+    // around the same way — reverse indexed, before anyone else iterates.
+    if (this._riposteFire?.armed) {
+      const rf = this._riposteFire;
+      rf.armed = false;
+      _mastV.set(rf.x, 0, rf.z);
+      const rr = MASTERY.riposte.radius;
+      for (let i = this.enemies.length - 1; i >= 0; i--) {
+        const e = this.enemies[i];
+        if (e.hp <= 0 || e.spawning > 0) continue;
+        const dx = e.pos.x - rf.x;
+        const dz = e.pos.z - rf.z;
+        if (dx * dx + dz * dz <= (rr + e.radius) * (rr + e.radius)) {
+          // origin:'skill': a retaliation proc is not a basic attack, so it
+          // can never consume ANSWER's queued crit.
+          this._damageEnemy(e, rf.dmg, { from: _mastV, knockback: 5, origin: 'skill' });
+        }
+      }
+    }
+    // RESIDUE fields (EMBERMIND T2): 12% of atk per second inside 4 m,
+    // banked into half-second ticks the way the axe bleed banks whole points
+    // — direct hp writes on the bleed pattern, not sixty _damageEnemy crit
+    // rolls a second. SUNDER's +18% still applies (all sources).
+    if (this._mastery?.int >= 2 && this._residue) {
+      const R = MASTERY.residue;
+      for (const f of this._residue) {
+        if (f.t <= 0) continue;
+        f.t -= dt;
+        f.acc += dt;
+        this._ensureGroundFx().pushDisc(f.x, f.z, R.radius, RESIDUE_COLOR, 0.5 + Math.min(0.5, f.t / R.seconds));
+        if (f.acc >= 0.5) {
+          f.acc -= 0.5;
+          const base = Math.max(1, Math.round(this.derived.atk * R.atkFracPerSecond * 0.5));
+          for (let i = this.enemies.length - 1; i >= 0; i--) {
+            const e = this.enemies[i];
+            if (e.hp <= 0 || e.spawning > 0) continue;
+            const dx = e.pos.x - f.x;
+            const dz = e.pos.z - f.z;
+            if (dx * dx + dz * dz > (R.radius + e.radius) * (R.radius + e.radius)) continue;
+            const tick = e.sunderT > 0 ? Math.round(base * (1 + MASTERY.sunder.bonusTakenPct)) : base;
+            e.hp -= tick;
+            e.hurt = Math.max(e.hurt, 0.15);
+            tmpV.copy(e.pos).setY(1.1 * (e.base.scale || 1));
+            this.fx.damageNumber(tmpV, tick, '');
+            if (e.hp <= 0) this._killEnemy(e);
+          }
+        }
+      }
+    }
+    // FLAME + FROST per-frame work (step 9): stack expiry, resource decay,
+    // burn ticks, the Ashfall field, tints and the quad pool. Sits INSIDE the
+    // ground-fx frame (Ashfall shares the RESIDUE disc channel — the budget's
+    // "one decalpool channel", never a second) and BEFORE the main for..of,
+    // on the bleed pass's reasoning: its ticks can kill and _killEnemy
+    // splices this.enemies.
+    this._updateArchon(dt);
     // Crowd separation happens once for the whole field, BEFORE anyone moves.
     // Doing it per-enemy after the move loop (the old _separate) left mesh
     // positions a frame behind the separated pos.
@@ -2672,7 +3936,31 @@ export class Game {
       }
       if (e.hurt > 0) e.hurt -= dt;
       if (e.stagger > 0) { e.stagger -= dt; }
-      if (e.attackCd > 0) e.attackCd -= dt;
+      // RIME (FROST ARCHON, step 9): -6% move AND attack speed per stack,
+      // floored at -60%. `edt` is this enemy's ACTION clock — attack
+      // cooldowns, wind-ups and swings all crawl together, the same single
+      // lever SLIPSTREAM pulls on the player's machine (dt scaling, never a
+      // second timing system). Movement takes the same factor at the
+      // position-advance below, the crater's sanctioned pattern. Every
+      // non-frost save reads zero stacks and edt === dt to the bit.
+      const rimeN = this._archonPath === FROST_P ? this._archonStatus.get(e, 'rime') : 0;
+      const rimeMul = rimeN > 0
+        ? Math.max(1 - FROST_P.rime.maxSlow, 1 - rimeN * FROST_P.rime.slowPerStack)
+        : 1;
+      const edt = rimeN > 0 ? dt * rimeMul : dt;
+      // FREEZE runs on REAL time (2.2 s is 2.2 s — the freeze must not slow
+      // its own thaw); stacks clear on thaw, spec wording verbatim.
+      if (e.frozenT > 0) {
+        e.frozenT -= dt;
+        if (e.frozenT <= 0) {
+          e.frozenT = 0;
+          if (this._archonStatus) this._archonStatus.clear(e);
+        }
+      }
+      if (e.attackCd > 0) e.attackCd -= edt;
+      // SUNDER's armour-break clock (set by the finisher, read by
+      // _damageEnemy and the residue tick) runs down like hurt/stagger do.
+      if (e.sunderT > 0) e.sunderT -= dt;
       if (e.attack) {
         // Armed humanoids swing through the state machine (npcStrikeWeapon:
         // windup = the steerAgent telegraph, active 0, recovery 0.3), which
@@ -2682,7 +3970,7 @@ export class Game {
         // span, the fight suite — reads them, and none of that should care how
         // the clock is kept. Deliberately unconditional, like the old
         // decrement: stagger interrupts steering, not a strike already wound.
-        tickAttack(e.attack, e.strikeW, dt, this._onNpcHit, e);
+        tickAttack(e.attack, e.strikeW, edt, this._onNpcHit, e);
         if (e.attack.active) {
           const st = e.strikeW.combo[0];
           e.telegraph = Math.max(0, st.windup - e.attack.t);
@@ -2695,12 +3983,13 @@ export class Game {
         }
       } else {
         // Unarmed (casters, howlers) and the boss keep the plain countdown —
-        // a cast and a boss pattern are not weapon swings.
+        // a cast and a boss pattern are not weapon swings. Both run on edt:
+        // Rime slows a cast's wind-up exactly as it slows a swing's.
         if (e.telegraph > 0) {
-          e.telegraph -= dt;
+          e.telegraph -= edt;
           if (e.telegraph <= 0) this._enemyStrike(e);
         }
-        if (e.swing > 0) e.swing -= dt;
+        if (e.swing > 0) e.swing -= edt;
       }
 
       const toPlayer = _aimDir.copy(p.pos).sub(e.pos).setY(0);
@@ -2713,7 +4002,10 @@ export class Game {
       let moveX = 0, moveZ = 0;
 
       if (e.isBoss) {
-        this._bossBrain(e, dt, dist, toPlayer);
+        // The boss brain runs on the ACTION clock too: ten Rime stacks slow
+        // its pattern cadence like any other attack timer. (Its movement is
+        // slowed at the shared position-advance below, like everyone's.)
+        this._bossBrain(e, edt, dist, toPlayer);
         if (e.telegraph > 0 || staggered) { moveX = 0; moveZ = 0; }
         else {
           if (!e.agent) { e.agent = makeAgent(e, 'chase'); e.agent.range = 0; }
@@ -2794,11 +4086,30 @@ export class Game {
       // frame, and knockback impulses still land at full strength.
       const cr = this._crater;
       const crSlow = (cr && Math.hypot(e.pos.x - cr.x, e.pos.z - cr.z) <= cr.r) ? cr.slow : 1;
-      e.pos.addScaledVector(e.vel, dt * crSlow);
+      // rimeMul rides the same seam as the crater: the POSITION advance is
+      // scaled, not the velocity, so a thaw restores full speed the same
+      // frame and knockback impulses still land at full strength.
+      e.pos.addScaledVector(e.vel, dt * crSlow * rimeMul);
       this.world.resolve(e.pos, e.radius, e.vel);
 
       e.mesh.position.copy(e.pos);
       e.mesh.rotation.y = e.yaw;
+
+      // READING (AUGUR T1): the telegraph the fairness system already runs
+      // becomes a VISIBLE ground arc — the actual swing cone (the acos(0.2)
+      // sector _enemyStrike tests) at the actual reach, appearing
+      // derived.tellLeadMs before contact, so more PER genuinely shows the
+      // blow earlier. Ranged casters are skipped (their output is a dodgeable
+      // bolt, not a cone); the boss's slam is radial, so it reads as the full
+      // 11 m disc _bossBrain will actually damage. Pushed per frame into the
+      // pooled channel — max 6 arcs, one draw call, zero when none are live.
+      if (this._mastery?.per >= 1 && e.telegraph > 0
+        && e.telegraph <= this.derived.tellLeadMs / 1000
+        && (e.isBoss || e.base.ai !== 'ranged')) {
+        const gfx = this._ensureGroundFx();
+        if (e.isBoss && e._slam) gfx.pushDisc(e.pos.x, e.pos.z, 11, READING_COLOR, 1);
+        else gfx.pushArc(e.pos.x, e.pos.z, e.yaw, (e.base.range || 2) + (e.isBoss ? 2.2 : 0.6), READING_COLOR);
+      }
 
       // telegraph tint: eyes flare before a strike lands
       const flare = e.telegraph > 0 ? 1 : 0;
@@ -2842,6 +4153,21 @@ export class Game {
       setHealthBar(e.bar, e.hp / e.maxHp);
       e.bar.visible = e.hp < e.maxHp || e.isBoss;
     }
+    // Close the ground-fx frame: upload what was pushed, hide the rest.
+    if (this._groundFx) this._groundFx.commit();
+  }
+
+  /**
+   * The shared mastery decal channel (READING arcs + RESIDUE fields, Ashfall
+   * later), allocated on FIRST USE: a save with no mastery never pays for the
+   * geometry, and an idle pool costs zero draw calls regardless. Session-
+   * lived once created; _setMode clears it so a field can never linger into
+   * the city, and dispose() (driven by the test harness's teardown cycle)
+   * returns both geometries and materials to the renderer.
+   */
+  _ensureGroundFx() {
+    if (!this._groundFx) this._groundFx = new GroundFxPool(this.scene);
+    return this._groundFx;
   }
 
   _enemyStrike(e) {
@@ -2951,10 +4277,794 @@ export class Game {
   _nearestShadow(from, maxDist) {
     let best = null, bestD = maxDist;
     for (const s of this.shadows) {
+      // A soldier mid-re-form (LEGION STEP) is off the field: invisible,
+      // planted, and not a body an enemy can bite.
+      if (s.reform > 0) continue;
       const d = s.pos.distanceTo(from);
       if (d < bestD) { bestD = d; best = s; }
     }
     return best ? { s: best, d: bestD } : null;
+  }
+
+  /**
+   * SOVEREIGN'S WILL target selection (CLASSES_SPEC step 8) — the three
+   * command states as three branches, no new AI. Every save that is not a
+   * SHADOW ARCHON is pinned to 'hunt', which is the shipped 26 m
+   * nearest-to-self scan VERBATIM — that pin is the migration guarantee for
+   * this function.
+   *   HOLD  — the wall: engage only what closes on the PLAYER (nearest enemy
+   *           to the player inside holdIntercept = the 4 m ring + the ~2 m
+   *           engage reach, so interception never drags a soldier off the
+   *           leash by more than its own sword). Nothing in range: fall in.
+   *   HUNT  — the shipped behaviour: nearest enemy to the SOLDIER within 26 m.
+   *   FOCUS — every blade on the player's last-hit mark, wherever it stands
+   *           (no range gate: chasing the named quarry across the room IS the
+   *           command). An expired mark falls back to HUNT so the order
+   *           "focus" never reads as "stand down".
+   */
+  _shadowTarget(s) {
+    const stance = this.save.archon === 'shadow' ? this._shadowStance : 'hunt';
+    if (stance === 'hold') return this._nearestEnemy(this.player.pos, SOVEREIGN.holdIntercept);
+    if (stance === 'focus') {
+      const t = this._lastHitTarget;
+      if (t && t.hp > 0) return t;
+    }
+    return this._nearestEnemy(s.pos, SOVEREIGN.huntRange);
+  }
+
+  /**
+   * Change the army's command state. SHADOW ARCHON only — the stance enum
+   * exists on every run but is pinned to 'hunt' for everyone else, so this
+   * setter refusing is what keeps the pin honest.
+   */
+  setShadowStance(stance) {
+    if (this.save.archon !== 'shadow') return false;
+    if (!SOVEREIGN.stances.includes(stance)) return false;
+    if (this._shadowStance === stance) return true;
+    this._shadowStance = stance;
+    return true;
+  }
+
+  get shadowStance() { return this._shadowStance; }
+
+  /**
+   * LEGION STEP (CLASSES_SPEC step 8) — the SHADOW ARCHON's one active: the
+   * answer to "my army is on the wrong side of the room". Every fielded
+   * soldier detonates where it stands for 60% of its OWN atk in a 4 m radius,
+   * is recalled instantly, and re-forms at the player's side over 6 s at 50%
+   * HP. The meshes persist across the whole cycle — recall is visibility and
+   * position, never disposal — which is both the performance rule and the
+   * step's verify clause.
+   */
+  _tryLegionStep() {
+    if (this.save.archon !== 'shadow') return;
+    if (this._legionT > 0) return;
+    // Count the soldiers actually ON the field; a press mid-re-form must not
+    // re-detonate ghosts that are not standing anywhere.
+    let n = 0;
+    for (const s of this.shadows) if (!(s.reform > 0)) n++;
+    if (n === 0) return this.ui.toast('NO LEGION TO CALL');
+    this._legionT = LEGION_CD;
+    const R = SOVEREIGN.legion.radius;
+    let slot = 0;
+    for (const s of this.shadows) {
+      if (s.reform > 0) continue;
+      // The detonation: 60% of the soldier's own atk — the same figure and
+      // the same armour + class shadowDmgMul seams as _shadowStrike, because
+      // this IS the army's blow, paid all at once. origin:'shadow' for the
+      // same reason as there: a detonation must not eat the player's banked
+      // crits or feed their leech.
+      const dmg = s.atk * SOVEREIGN.legion.detonatePct
+        * (this._armorBonus?.shadowDmgMul || 1) * this._classShadowMul;
+      for (const e of this.enemies) {
+        if (e.hp > 0 && e.pos.distanceTo(s.pos) < R + e.radius) {
+          this._damageEnemy(e, dmg, { origin: 'shadow' });
+        }
+      }
+      this.fx.ring(s.pos, 0x35e6ff, R * 1.1, 0.45);
+      this.fx.burst(s.pos.clone().setY(1), 20, 0x35e6ff, { speed: 8, up: 4, life: 0.6 });
+      // Recall: off the field NOW, back over the 6 s stagger — soldier k of n
+      // returns at (k+1)/n x 6 s, so the army walks back in as a column, not
+      // a blink. Windup state clears: a strike begun before the recall has no
+      // body to land from.
+      s.reform = SOVEREIGN.legion.reformSeconds * ((slot + 1) / n);
+      s._reformSlot = slot++;
+      s.telegraph = 0;
+      s.swing = 0;
+      s.target = null;
+      s.vel.set(0, 0, 0);
+      s.mesh.visible = false;
+    }
+    this.fx.addShake(0.5);
+    this.audio.nova();
+  }
+
+  // ------------------------------------------------- FLAME + FROST (step 9)
+
+  /**
+   * PYRE application: n stacks, combustion at 10. Called from _damageEnemy
+   * (every player hit) and the Ashfall seed tick — never from a blast, which
+   * marks itself noStatus.
+   */
+  _applyPyre(e, n) {
+    const c = this._archonStatus.apply(e, 'pyre', n);
+    if (c >= FLAME_P.combustion.atStacks) this._combust(e);
+  }
+
+  /**
+   * COMBUSTION, iterative on purpose: the blast re-seeds 4 stacks on every
+   * OTHER enemy caught, an already-stacked neighbour can reach 10 and go up
+   * too, and "in a packed room this cascades, which IS the path". A queue
+   * with a cursor instead of recursion, because a chain deep enough to matter
+   * is exactly the room where a call stack per link would hurt; the module
+   * array is reused so a cascade allocates nothing after the first.
+   *
+   * The combusting target takes no blast and keeps no seed — the worked
+   * example prices the per-target cycle at 10 stacks / 2.7 hits per second =
+   * 3.7 s, only true restarting from zero; and a self-blast landing inside
+   * the _damageEnemy call that raised the 10th stack would re-enter the
+   * outer call's own death branch and double-kill.
+   */
+  _combust(first) {
+    const q = _combustQ;
+    q.length = 0;
+    q.push(first);
+    // The chainCap watchdog (see the config's own comment): every link deals
+    // real damage to everything it seeds, so live rooms terminate the chain
+    // by dying — the cap only exists for bodies no blast can kill, and 64
+    // links is beyond anything a survivable room ever fires.
+    for (let qi = 0; qi < q.length && qi < FLAME_P.combustion.chainCap; qi++) {
+      const e = q[qi];
+      const consumed = this._archonStatus.get(e, 'pyre');
+      // An earlier link already consumed this body (double-queued when two
+      // blasts both pushed it to 10) — one explosion per stack load.
+      if (consumed < FLAME_P.combustion.atStacks) continue;
+      this._archonStatus.clear(e);
+      this._retintEnemy(e, 'pyre', 0);
+      // EMBER: +2 per Pyre stack consumed by a combustion — the meter's own
+      // gainPer is the 2, the call site passes the count (classes.js rules).
+      this._archonRes.gain(consumed);
+      const R = FLAME_P.combustion.radius;
+      const blast = this.derived.atk * FLAME_P.combustion.atkPct;
+      this.fx.ring(e.pos, FLAME_COLOR, R * 1.15, 0.5);
+      this.fx.burst(_archV.copy(e.pos).setY(1), 26, FLAME_COLOR, { speed: 9, up: 5, life: 0.6 });
+      this.fx.addShake(0.3);
+      this.audio.skill();
+      // Reverse-indexed like every blast in this file: a kill splices.
+      for (let i = this.enemies.length - 1; i >= 0; i--) {
+        const t = this.enemies[i];
+        if (t === e || t.hp <= 0 || t.spawning > 0) continue;
+        const dx = t.pos.x - e.pos.x;
+        const dz = t.pos.z - e.pos.z;
+        if (dx * dx + dz * dz > (R + t.radius) * (R + t.radius)) continue;
+        // origin:'skill' (a proc never eats ANSWER's queued basic-attack
+        // crit) + noStatus (an explosion cannot farm the stacks that fired
+        // it — the re-seed below is the explicit, spec-priced seeding).
+        this._damageEnemy(t, blast, { from: e.pos, knockback: 4, origin: 'skill', noStatus: true });
+        if (t.hp > 0) {
+          const c2 = this._archonStatus.apply(t, 'pyre', FLAME_P.combustion.reseed);
+          if (c2 >= FLAME_P.combustion.atStacks) q.push(t);
+        }
+      }
+    }
+    q.length = 0;
+  }
+
+  /**
+   * RIME application: n stacks, each granting +0.4 %-points of Barrier (the
+   * meter clamps at 35), freeze at the 10th. A frozen target takes no further
+   * stacks — it is already at the mechanic's ceiling and its stacks clear on
+   * thaw (spec wording), so mid-freeze hits buying more Barrier would make
+   * freeze windows the path's mana battery instead of its payoff.
+   */
+  _applyRime(e, n) {
+    if (e.frozenT > 0) return;
+    const c = this._archonStatus.apply(e, 'rime', n);
+    this._archonRes.gain(n);
+    if (c >= FROST_P.freeze.atStacks) {
+      e.frozenT = FROST_P.freeze.seconds;
+      // "The freeze pose is the existing stagger hold — no new animation
+      // state": the hold IS the stagger branch, pinned for the full 2.2 s.
+      e.stagger = Math.max(e.stagger, FROST_P.freeze.seconds);
+      this.fx.ring(e.pos, FROST_COLOR, 1.8 * (e.base.scale || 1), 0.4);
+      this.fx.burst(_archV.copy(e.pos).setY(1), 16, FROST_COLOR, { speed: 4, up: 2, life: 0.5 });
+      this.audio.skill();
+    }
+  }
+
+  /**
+   * SHATTER: 300% of THE TRIGGERING HIT split among all OTHER enemies within
+   * 6 m, +3 Rime to each. The target thaws FIRST — its freeze is spent, its
+   * stacks clear with it, and that ordering (not a flag) is what makes chain
+   * re-entry impossible. A frozen neighbour receiving a share past its own
+   * 15% line shatters in turn: kill-chaining by control.
+   */
+  _shatter(e, hitDmg) {
+    e.frozenT = 0;
+    this._archonStatus.clear(e);
+    this._retintEnemy(e, 'rime', 0);
+    const R = FROST_P.shatter.radius;
+    this.fx.ring(e.pos, FROST_COLOR, R, 0.5);
+    this.fx.burst(_archV.copy(e.pos).setY(1.1), 30, FROST_COLOR, { speed: 10, up: 5, life: 0.6 });
+    this.fx.addShake(0.35);
+    this.audio.skill();
+    // Count the recipients first: it is a SPLIT (300% divided among them),
+    // not 300% each — the spec's own wording, and the difference between a
+    // control payoff and a room-deleting nova FROST is not allowed to be.
+    let count = 0;
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const t = this.enemies[i];
+      if (t === e || t.hp <= 0 || t.spawning > 0) continue;
+      const dx = t.pos.x - e.pos.x;
+      const dz = t.pos.z - e.pos.z;
+      if (dx * dx + dz * dz <= (R + t.radius) * (R + t.radius)) count++;
+    }
+    if (count === 0) return;
+    const share = Math.max(1, Math.round((hitDmg * FROST_P.shatter.splitPct) / count));
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const t = this.enemies[i];
+      if (t === e || t.hp <= 0 || t.spawning > 0) continue;
+      const dx = t.pos.x - e.pos.x;
+      const dz = t.pos.z - e.pos.z;
+      if (dx * dx + dz * dz > (R + t.radius) * (R + t.radius)) continue;
+      this._damageEnemy(t, share, { from: e.pos, knockback: 3, origin: 'skill', noStatus: true });
+      if (t.hp > 0) this._applyRime(t, FROST_P.shatter.reseed);
+    }
+  }
+
+  /**
+   * ASHFALL (the FLAME slot tap, interlock.theOneSlot): at 100 Ember, spent
+   * in full, the floor burns for 8 s in a 14 m ring fixed at the cast point —
+   * a field like RESIDUE's, not an aura, so positioning the cast is the
+   * skill. The burn itself ticks in _updateArchon.
+   */
+  _tryAshfall() {
+    if (this._archonPath !== FLAME_P || !this._archonRes) return;
+    if (!this._archonRes.fireUltimate()) return this.ui.toast('EMBER NOT FULL');
+    const A = this._ashfall;
+    A.t = FLAME_P.ashfall.seconds;
+    A.x = this.player.pos.x;
+    A.z = this.player.pos.z;
+    A.dmgAcc = 0;
+    A.stackAcc = 0;
+    this.fx.ring(this.player.pos, FLAME_COLOR, FLAME_P.ashfall.radius, 0.9);
+    this.fx.addShake(0.6);
+    this.audio.nova();
+    this.ui.toast('ASHFALL', 'gold');
+  }
+
+  /**
+   * The FROST slot tap: a manual freeze-detonate on the nearest frozen (=
+   * 10-stack) target inside 16 m. It hits for 20% of the TARGET's max HP
+   * through the ordinary funnel — over the 15% shatter line by construction
+   * even before the frozen +45%, so the tap IS a shatter, with SUNDER, crits
+   * and the kill path all behaving. No cooldown and no cost (classes.js
+   * ultimateCost 0): the price is the ten hits of setup, every time.
+   */
+  _tryShatterDetonate() {
+    if (this._archonPath !== FROST_P) return;
+    let best = null;
+    let bestD = FROST_P.detonate.range;
+    for (const t of this.enemies) {
+      if (t.hp <= 0 || !(t.frozenT > 0)) continue;
+      const d = t.pos.distanceTo(this.player.pos);
+      if (d < bestD) { bestD = d; best = t; }
+    }
+    if (!best) return this.ui.toast('NO FROZEN TARGET');
+    this._damageEnemy(best, best.maxHp * FROST_P.detonate.hitFracOfMaxHp, {
+      from: this.player.pos, origin: 'skill', noStatus: true,
+    });
+  }
+
+  // ------------------------------------------------- STORM + BEAST (step 10)
+
+  /**
+   * ARC (STORM ARCHON): a landed player hit discharges STORM_P.arc.discharge
+   * Charge (4 — STEP 11 parity tune, derivation in archon.js) and chains
+   * lightning to up to 4 ADDITIONAL enemies within 8 m of the TARGET for 55%
+   * of derived.atk each. No Charge, no chain — a Storm Archon who stops
+   * moving is a plain hunter, and that is the deal. Called from _damageEnemy
+   * on the same funnel as Pyre/Rime; chain links mark noStatus so lightning
+   * can never farm itself.
+   *
+   * Targets collect FIRST (array order — deterministic under the seeded
+   * spawn stream) into the module-lived list, then the links land: a link's
+   * kill splices this.enemies, and collecting-then-applying is the same
+   * snapshot discipline the bleed pass and Nova use.
+   */
+  _tryArc(from) {
+    const res = this._archonRes;
+    if (!res || res.value < STORM_P.arc.discharge) return;
+    const R = STORM_P.arc.radius;
+    _arcTargets.length = 0;
+    for (let i = 0; i < this.enemies.length && _arcTargets.length < STORM_P.arc.chains; i++) {
+      const t = this.enemies[i];
+      if (t === from || t.hp <= 0 || t.spawning > 0) continue;
+      const dx = t.pos.x - from.pos.x;
+      const dz = t.pos.z - from.pos.z;
+      if (dx * dx + dz * dz > (R + t.radius) * (R + t.radius)) continue;
+      _arcTargets.push(t);
+    }
+    if (_arcTargets.length === 0) return;
+    // The discharge is the chain's price and it is spent on CONNECTION, not
+    // on the swing: a hit with nothing in 8 m keeps its Charge.
+    res.spend(STORM_P.arc.discharge);
+    const dmg = this.derived.atk * STORM_P.arc.atkPct;
+    // The origin endpoint is read once, before any link can kill and splice
+    // the source (its record outlives the splice; its pos never moves again).
+    for (let i = 0; i < _arcTargets.length; i++) {
+      const t = _arcTargets[i];
+      if (this._archonFx) {
+        _archV.copy(from.pos).setY(1.2 * (from.base.scale || 1));
+        _archV2.copy(t.pos).setY(1.1 * (t.base.scale || 1));
+        this._archonFx.spawnSegment(_archV, _archV2, { life: 0.18, scale: 1 });
+      }
+      this.fx.burst(_archV2.copy(t.pos).setY(1.1), 6, STORM_COLOR, { speed: 5, up: 2, life: 0.25 });
+      this._damageEnemy(t, dmg, { from: from.pos, origin: 'skill', noStatus: true });
+    }
+    _arcTargets.length = 0;
+  }
+
+  /**
+   * TEMPEST STEP (the STORM slot tap, interlock.theOneSlot): at 200 Charge,
+   * spent in full, 6 s of +55% speed under the absolute 14 u/s ceiling, zero
+   * dash cooldown, a 90%-atk bolt down every dash line (_tryDash) and basic
+   * attacks free of their cooldown (_updatePlayer). No regeneration for the
+   * duration — the gain site checks this same clock.
+   */
+  _tryTempest() {
+    if (this._archonPath !== STORM_P || !this._archonRes) return;
+    if (this._tempestT > 0) return;
+    if (!this._archonRes.fireUltimate()) return this.ui.toast('CHARGE NOT FULL');
+    this._tempestT = STORM_P.tempest.seconds;
+    this.fx.ring(this.player.pos, STORM_COLOR, 6, 0.6);
+    this.fx.burst(this.player.pos.clone().setY(1), 30, STORM_COLOR, { speed: 9, up: 5, life: 0.6 });
+    this.fx.addShake(0.5);
+    this.audio.nova();
+    this.ui.toast('TEMPEST STEP', 'gold');
+  }
+
+  /** Is the field currently held by a pact beast? (One boolean read for the
+   *  capacity rules — the pact consumes the ENTIRE allowance.) */
+  _pactFielded() {
+    for (const s of this.shadows) if (s.isPact) return true;
+    return false;
+  }
+
+  /**
+   * The pact that answers a call to the field or a Wild Form: highest band
+   * first (an S pact outranks the C one), newest id breaking ties. Null when
+   * no pact is bound — a fresh BEAST ARCHON plays their shipped army until
+   * the first boss or elite corpse takes the pact.
+   */
+  _activePact() {
+    const pacts = this.save.archonState?.pacts;
+    if (!Array.isArray(pacts) || pacts.length === 0) return null;
+    let best = null;
+    for (const rec of pacts) {
+      if (!rec || typeof rec !== 'object' || !rec.type) continue;
+      if (!best || (rec.band || 0) > (best.band || 0)
+        || ((rec.band || 0) === (best.band || 0) && (rec.id || 0) > (best.id || 0))) best = rec;
+    }
+    return best;
+  }
+
+  /**
+   * PACT binding (BEAST ARCHON): the nearest boss or elite corpse in Bind
+   * range rolls the SAME extractionChance the shipped Bind rolls — the
+   * "existing extraction path" clause — and success writes the pact into its
+   * gate-band slot (E/D share one; a re-bind in a band REPLACES, five slots
+   * total), recalls any common soldiers and fields the beast on the spot.
+   * Returns true when a pact-worthy corpse consumed the press, so _trySummon
+   * never spends a boss corpse as a common soldier.
+   */
+  _tryBindPact() {
+    const p = this.player;
+    let corpse = null;
+    let bestD = 14;                     // the shipped Bind reach
+    for (const c of this.corpses) {
+      if (c.attempts >= MAX_EXTRACT_ATTEMPTS) continue;
+      if (c.tierWeight !== 'elite' && c.tierWeight !== 'boss') continue;
+      const d = c.pos.distanceTo(p.pos);
+      if (d < bestD) { bestD = d; corpse = c; }
+    }
+    if (!corpse) return false;
+    p.cds.summon = SKILLS.summon.cd * this._skillCdMul();
+    const chance = extractionChance(this.save, {
+      enemyLevel: corpse.enemyLevel,
+      tierWeight: corpse.tierWeight,
+      secondsSinceDeath: CORPSE_WINDOW - corpse.life,
+      attemptIndex: corpse.attempts,
+      // Same seam as the shipped Bind: trinket + BINDER's class add.
+      extractAdd: (this._armorBonus?.extractAdd || 0) + (this._classFlags?.extractAdd || 0),
+    });
+    corpse.attempts++;
+    if (Math.random() >= chance) {
+      this.fx.burst(corpse.pos.clone().setY(0.9), 8, 0x35e6ff, { speed: 3, up: 2, life: 0.3 });
+      this.ui.toast('THE PACT IS REFUSED');
+      return true;
+    }
+    const st = this.save.archonState;
+    const band = BEAST_P.pact.bands[this.gate?.rank] ?? 0;
+    // Minted off the roster's own id counter so pact ids can never collide
+    // with soldier ids (save.js's sanitiser keys pacts on a finite id).
+    const id = this.save.shadows.nextId || 1;
+    this.save.shadows.nextId = id + 1;
+    const rec = {
+      id, band,
+      type: corpse.type,
+      creature: corpse.creature || null,
+      level: corpse.enemyLevel,
+      grade: BEAST_P.pact.grade,          // WARLORD — the bind grade, fixed
+      kills: 0,
+    };
+    st.pacts = st.pacts.filter((x) => x && x.band !== band);
+    st.pacts.push(rec);
+    // The corpse is spent like any bound corpse.
+    this.scene.remove(corpse.mesh);
+    disposeObject3D(corpse.mesh);
+    const ci = this.corpses.indexOf(corpse);
+    if (ci >= 0) this.corpses.splice(ci, 1);
+    // The beast takes the field alone: common soldiers are recalled (mesh
+    // teardown through the same walk their deaths use) and the deployment
+    // list empties so the next gate fields the pact too.
+    for (let i = this.shadows.length - 1; i >= 0; i--) {
+      const s = this.shadows[i];
+      this.scene.remove(s.mesh);
+      disposeObject3D(s.mesh);
+      this.shadows.splice(i, 1);
+    }
+    setDeployed(this.save, []);
+    this._spawnPactBeast(rec, false);
+    this.audio.bind();
+    this.fx.ring(p.pos, 0x35e6ff, 14, 0.7);
+    this.ui.toast(`PACT SEALED  ·  BAND ${this.gate?.rank ?? 'E'}`, 'gold');
+    this.onSave();
+    return true;
+  }
+
+  /**
+   * Field the pact beast: ONE body at 4.0x a normal shadow's shadowCombat()
+   * numbers, inside the existing shadow update/strike/dispose machinery —
+   * this.shadows carries it, _updateShadows drives it, quality's field cap
+   * still gates it (a 0-cap tier fields nothing and the path still works;
+   * Wild Form never needs the beast standing). isPact is the one flag the
+   * capacity rules key on.
+   */
+  _spawnPactBeast(rec, silent = false) {
+    if (this.fieldCapacity() <= 0) return null;
+    if (this._pactFielded()) return null;
+    const c = shadowCombat(this.save, rec);
+    const mul = BEAST_P.pact.mul;
+    // 1.25x the grade scale: "one overwhelming ally" has to read as one at
+    // a glance. Numbers carry the 4.0; the silhouette only hints it.
+    const scale = 1.25 * c.scale;
+    const pos = this.world.randomSpawn(this.rnd, this.player.pos, 4);
+    const mesh = this._makeBoundBody(rec.creature, scale) || makeHumanoid({
+      color: 0x1a2740, glow: 0x35e6ff, accent: 0x0b1220,
+      weapon: 'sword', scale, ghost: true, cloak: true,
+      archetype: 'shadow', rank: this.gate?.rank ?? 'E',
+    });
+    mesh.add(makeGroundRing(0x35e6ff, 0.85 * scale, 0.6));
+    mesh.position.copy(pos);
+    this.scene.add(mesh);
+    this.shadows.push({
+      rec,
+      isPact: true,
+      mesh, pos: pos.clone(), vel: new THREE.Vector3(), yaw: 0,
+      radius: c.radius * 1.25, speed: c.speed,
+      hp: Math.floor(c.hp * mul), maxHp: Math.floor(c.hp * mul),
+      atk: c.atk * mul,
+      attackCd: 0, swing: 0, telegraph: 0, telegraphMax: 0,
+      target: null, life: 0, kills: 0,
+      reform: 0, _reformSlot: 0,
+    });
+    if (!silent) {
+      this.fx.ring(pos, 0x35e6ff, 5, 0.7);
+      this.fx.burst(pos.clone().setY(1), 30, 0x35e6ff, { speed: 7, up: 5 });
+    }
+    return rec;
+  }
+
+  /**
+   * WILD FORM (the BEAST slot tap): 12 s in the shape of the active pact
+   * beast — 2.2x attack power (_damageEnemy), 1.5x speed under the 14 u/s
+   * ceiling (_updatePlayer), 40% flat DR (_damagePlayer), no skills and no
+   * items (the skill verbs bar themselves). 90 s cooldown, -6 s per kill
+   * made transformed (_killEnemy). The transformation is a RIG SWAP sold by
+   * silhouette + a desaturated palette + one burst/ring/shake — the player
+   * is a living character and the no-rim/no-emissive rule holds without
+   * exception (_makeWildBody enforces it mesh by mesh).
+   */
+  _tryWildForm() {
+    if (this._archonPath !== BEAST_P) return;
+    if (this._wildT > 0) return;
+    if (this._wildCd > 0) return this.ui.toast(`WILD FORM IN ${Math.ceil(this._wildCd)}s`);
+    const pact = this._activePact();
+    if (!pact) return this.ui.toast('NO PACT BOUND');
+    this._wildT = BEAST_P.wildForm.seconds;
+    this._wildCd = WILD_CD;
+    const mesh = this._makeWildBody(pact);
+    if (mesh) {
+      this._wildMesh = mesh;
+      mesh.position.copy(this.player.pos);
+      mesh.rotation.y = this.player.yaw;
+      this.scene.add(mesh);
+      this.player.mesh.visible = false;
+    }
+    // The transition IS the effect (spec: "if that does not read strongly
+    // enough on device, the fix is a longer transition and a bigger camera
+    // pull — NOT a rim").
+    this.fx.burst(this.player.pos.clone().setY(1), 40, 0x9a8f7a, { speed: 8, up: 6, life: 0.8 });
+    this.fx.ring(this.player.pos, 0x9a8f7a, 6, 0.7);
+    this.fx.addShake(0.8);
+    this.audio.nova();
+    this.ui.toast('WILD FORM', 'gold');
+  }
+
+  /**
+   * The wild body: SkeletonUtils.clone of the pact creature's rig via the
+   * same makeCreature path _makeBoundBody uses — but LIVING flags: no shadow
+   * skin (that treatment carries the army's sanctioned emissive whisper and
+   * rim, both banned on the player), no telegraph eye (GLOW_LAYER is an
+   * enemy tell). Every material is then cloned off the shared caches and
+   * pushed to a desaturated shift of itself, emissive-zeroed, with any glow
+   * layer membership stripped — the clone drops the `shared` flag so the
+   * existing disposeObject3D walk frees it with the mesh. Null when the pack
+   * is absent (offline/procedural fallback): the form still happens — buffs,
+   * fx, timer — worn by the hunter's own body, which is the honest fallback
+   * the low-poly rule asks for.
+   */
+  _makeWildBody(pact) {
+    if (!pact.creature || !creaturesReady()) return null;
+    const inst = makeCreature({
+      creature: pact.creature, rank: this.gate?.rank ?? 'E',
+      shadow: false, eyes: false, ignoreBudget: true, scale: 1,
+    });
+    if (!inst) return null;
+    const root = new THREE.Group();
+    root.add(inst.root);
+    root.userData.character = inst;
+    root.userData.appearance = inst.appearance;
+    // 1.25x the pact's own grade scale, exactly like the fielded beast: the
+    // form should read as BECOMING it, same silhouette, same size.
+    root.scale.setScalar(1.25 * shadowCombat(this.save, pact).scale);
+    root.traverse((o) => {
+      // No object in the wild body may sit on the glow layer — the player
+      // does not glow, whatever shape they wear (step 10 verify clause).
+      if (o.layers) o.layers.disable(GLOW_LAYER);
+      if (!o.isMesh) return;
+      const list = Array.isArray(o.material) ? o.material : [o.material];
+      for (let i = 0; i < list.length; i++) {
+        const m = list[i];
+        if (!m) continue;
+        let mm = m;
+        if (m.userData?.shared) {
+          mm = m.clone();
+          if (mm.userData) delete mm.userData.shared;
+          if (Array.isArray(o.material)) o.material[i] = mm;
+          else o.material = mm;
+        }
+        // Desaturated palette shift — the sanctioned "this is still you"
+        // read: 45% of the colour's own saturation survives.
+        if (mm.color) {
+          const g = 0.2126 * mm.color.r + 0.7152 * mm.color.g + 0.0722 * mm.color.b;
+          mm.color.setRGB(
+            g + (mm.color.r - g) * 0.45,
+            g + (mm.color.g - g) * 0.45,
+            g + (mm.color.b - g) * 0.45,
+          );
+        }
+        // Zero emissive, without exception: the pack's own baked eye-glow
+        // materials arrive here too, and the player root must traverse clean.
+        if (mm.emissive) {
+          mm.emissive.setRGB(0, 0, 0);
+          if ('emissiveIntensity' in mm) mm.emissiveIntensity = 0;
+        }
+      }
+    });
+    return root;
+  }
+
+  /**
+   * THE one Wild Form teardown verb: restore the base body, dispose the
+   * borrowed rig (disposeObject3D walks the cloned materials because they
+   * shed their `shared` flag at clone time, and frees the CreatureInstance
+   * through userData.character — no new teardown surface). Idempotent, and
+   * safe before the wild state has ever been touched: _beginGate calls it on
+   * entry against a mesh lingering from a torn-down run.
+   */
+  _endWildForm(silent = false) {
+    this._wildT = 0;
+    const mesh = this._wildMesh;
+    if (!mesh) return;
+    this._wildMesh = null;
+    this.scene.remove(mesh);
+    disposeObject3D(mesh);
+    if (this.player?.mesh) this.player.mesh.visible = true;
+    if (!silent) {
+      this.fx.burst(this.player.pos.clone().setY(1), 24, 0x9a8f7a, { speed: 6, up: 4, life: 0.6 });
+      this.fx.ring(this.player.pos, 0x9a8f7a, 4, 0.5);
+      this.fx.addShake(0.4);
+    }
+  }
+
+  /**
+   * The per-frame archon pass, called from _updateEnemies INSIDE the
+   * ground-fx frame (Ashfall shares the RESIDUE disc channel) and BEFORE the
+   * main enemy for..of, on the bleed pass's reasoning: these ticks can kill
+   * and _killEnemy splices this.enemies. One early return for every
+   * unascended save; STORM and BEAST pay the meter tick and the pool age and
+   * skip the stack walk (they own no stacks).
+   */
+  _updateArchon(dt) {
+    const path = this._archonPath;
+    if (!path) return;
+    if (this._combatT > 0) this._combatT -= dt;
+    const st = this._archonStatus;
+    st.tick(dt);
+    // Ember decays 3/s and Barrier 2%/s OUT OF COMBAT; Charge decays 8/s
+    // WHILE STATIONARY (classes.js rules) — the meter cannot know either
+    // condition, so the caller supplies the path's own boolean. Stationary
+    // reads the body solver's ground speed, the same odometer the gain side
+    // uses, so walking in place off a wall cannot count as motion. (Tempest
+    // holds the bank at zero anyway; the gate keeps the read honest.)
+    const decaying = path === STORM_P
+      ? this._tempestT <= 0 && (this.player.body?.groundSpeed || 0) < 0.5
+      : this._combatT <= 0;
+    this._archonRes.tick(dt, decaying);
+    // The HUD meter and the cross-gate bank read one field (ui.js step 7).
+    if (this.save.archonState) this.save.archonState.resource = this._archonRes.value;
+
+    // --- ASHFALL field (flame only) --------------------------------------
+    const A = this._ashfall;
+    if (path === FLAME_P && A.t > 0) {
+      A.t -= dt;
+      // The floor mark rides the shared decal channel, dimming as it dies.
+      this._ensureGroundFx().pushDisc(A.x, A.z, FLAME_P.ashfall.radius, FLAME_COLOR,
+        0.35 + Math.min(0.65, A.t / FLAME_P.ashfall.seconds));
+      A.dmgAcc += dt;
+      A.stackAcc += dt;
+      const doDmg = A.dmgAcc >= 0.5;
+      const doStack = A.stackAcc >= 1;
+      if (doDmg) A.dmgAcc -= 0.5;
+      if (doStack) A.stackAcc -= 1;
+      if (doDmg || doStack) {
+        // 45% of atk per second banked into half-second ticks — direct hp
+        // writes on the residue/bleed pattern, not sixty crit rolls a
+        // second. SUNDER still applies (all sources). The 1-stack-per-second
+        // seed rides _applyPyre, so a packed Ashfall cascades on its own.
+        const base = Math.max(1, Math.round(this.derived.atk * FLAME_P.ashfall.atkFracPerSecond * 0.5));
+        const R = FLAME_P.ashfall.radius;
+        let hitAny = false;
+        for (let i = this.enemies.length - 1; i >= 0; i--) {
+          const e = this.enemies[i];
+          if (e.hp <= 0 || e.spawning > 0) continue;
+          const dx = e.pos.x - A.x;
+          const dz = e.pos.z - A.z;
+          if (dx * dx + dz * dz > (R + e.radius) * (R + e.radius)) continue;
+          hitAny = true;
+          if (doDmg) {
+            const tick = e.sunderT > 0 ? Math.round(base * (1 + MASTERY.sunder.bonusTakenPct)) : base;
+            e.hp -= tick;
+            e.hurt = Math.max(e.hurt, 0.15);
+            tmpV.copy(e.pos).setY(1.1 * (e.base.scale || 1));
+            this.fx.damageNumber(tmpV, tick, '');
+          }
+          if (e.hp > 0 && doStack) this._applyPyre(e, FLAME_P.ashfall.stacksPerSecond);
+          if (e.hp <= 0) this._killEnemy(e);
+        }
+        // A floor actively burning bodies is combat; an empty ring is not,
+        // so a whiffed Ashfall does not stop the Ember decay clock.
+        if (hitAny) this._combatT = ARCHON_COMBAT_SECONDS;
+      }
+      // Ember-rain quads scattered across the ring. Math.random is sanctioned
+      // here: visual-only jitter, no sim state reads it.
+      if (this._archonFx) {
+        this._ashQuadT = (this._ashQuadT || 0) - dt;
+        if (this._ashQuadT <= 0) {
+          this._ashQuadT = 0.06;
+          const ang = Math.random() * Math.PI * 2;
+          const rr = Math.sqrt(Math.random()) * FLAME_P.ashfall.radius;
+          _archV.set(A.x + Math.cos(ang) * rr, 0.3, A.z + Math.sin(ang) * rr);
+          this._archonFx.spawn(_archV, { life: 0.7, scale: 0.9, rise: 1.6 });
+        }
+      }
+    }
+
+    // --- per-enemy: burn ticks, tints, stack quads (STACKING paths only —
+    // STORM discharges on the hit and BEAST stacks nothing, so their frame
+    // pass is the meter tick above and the pool age below) ------------------
+    if (path !== FLAME_P && path !== FROST_P) {
+      if (this._archonFx) this._archonFx.tick(dt, this.camera);
+      return;
+    }
+    const kind = path === FLAME_P ? 'pyre' : 'rime';
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const e = this.enemies[i];
+      if (e.hp <= 0) continue;
+      const n = st.get(e, kind);
+      // Tint on CHANGE only (also the restore-to-base when stacks lapse):
+      // per-frame material writes for a full room would be the churn the
+      // no-per-frame-allocation rule is really about.
+      if ((e._archonTintN || 0) !== n) this._retintEnemy(e, kind, n);
+      if (n <= 0) continue;
+      if (path === FLAME_P && !(e.spawning > 0)) {
+        // PYRE burn: 2% of atk per stack per second — 20%/s at full load —
+        // banked into half-second ticks exactly like the axe bleed.
+        e._pyreT = (e._pyreT || 0) + dt;
+        if (e._pyreT >= 0.5) {
+          e._pyreT -= 0.5;
+          let tick = Math.max(1, Math.round(this.derived.atk * FLAME_P.pyre.dotFracPerStackPerSecond * n * 0.5));
+          if (e.sunderT > 0) tick = Math.round(tick * (1 + MASTERY.sunder.bonusTakenPct));
+          e.hp -= tick;
+          e.hurt = Math.max(e.hurt, 0.15);
+          tmpV.copy(e.pos).setY(1.1 * (e.base.scale || 1));
+          this.fx.damageNumber(tmpV, tick, '');
+          if (e.hp <= 0) { this._killEnemy(e); continue; }
+        }
+      }
+      // Status quads off the one pool: flame licks rise, rime shards hang.
+      // Throttled per enemy, denser with stacks; Math.random is visual-only.
+      if (this._archonFx) {
+        e._archonFxT = (e._archonFxT || 0) - dt;
+        if (e._archonFxT <= 0) {
+          e._archonFxT = path === FLAME_P ? 0.30 - n * 0.018 : 0.55 - n * 0.03;
+          const sc = e.base.scale || 1;
+          _archV.set(
+            e.pos.x + (Math.random() - 0.5) * e.radius * 1.6,
+            (0.4 + Math.random() * 1.3) * sc,
+            e.pos.z + (Math.random() - 0.5) * e.radius * 1.6,
+          );
+          this._archonFx.spawn(_archV, path === FLAME_P
+            ? { life: 0.55, scale: 0.55 + n * 0.05, rise: 1.2 }
+            : { life: 0.85, scale: 0.45 + n * 0.04, rise: e.frozenT > 0 ? 0 : 0.25 });
+        }
+      }
+    }
+
+    // Billboard and age the quads last, after every spawn this frame.
+    if (this._archonFx) this._archonFx.tick(dt, this.camera);
+  }
+
+  /**
+   * The sanctioned stack visual on a LIVING character: a material COLOUR
+   * multiply (tintForStacks — never an emissive, never a rim; rim.js's header
+   * is the law). Built lazily per enemy on the first tinted stack: any
+   * cache-shared material (cachedMat, the GLB packs' shared skins) is cloned
+   * first, because the caches are library objects and tinting one would tint
+   * every body wearing it. Clones drop the `shared` flag, so the existing
+   * disposeObject3D walk frees them with the mesh — no new teardown surface.
+   * The base colour is remembered so the tint MULTIPLIES it (the enemy's own
+   * palette shifts toward the hue) and restores exactly at zero stacks.
+   */
+  _retintEnemy(e, kind, n) {
+    e._archonTintN = n;
+    if (!e._tintMats) {
+      if (n <= 0) return;
+      const mats = [];
+      e.mesh.traverse((o) => {
+        if (!o.isMesh || o.isDecal) return;
+        const list = Array.isArray(o.material) ? o.material : [o.material];
+        for (let i = 0; i < list.length; i++) {
+          const m = list[i];
+          if (!m || !m.color) continue;
+          let mm = m;
+          if (m.userData?.shared) {
+            mm = m.clone();
+            if (mm.userData) delete mm.userData.shared;
+            if (Array.isArray(o.material)) o.material[i] = mm;
+            else o.material = mm;
+          }
+          mats.push({ m: mm, r: mm.color.r, g: mm.color.g, b: mm.color.b });
+        }
+      });
+      e._tintMats = mats;
+    }
+    const tint = tintForStacks(kind, n);
+    for (const rec of e._tintMats) {
+      rec.m.color.setRGB(rec.r * tint.r, rec.g * tint.g, rec.b * tint.b);
+    }
   }
 
 
@@ -2969,6 +5079,30 @@ export class Game {
         this.shadows.splice(i, 1);
         continue;
       }
+      // LEGION STEP's re-form leg (CLASSES_SPEC step 8): a recalled soldier is
+      // OFF the field — invisible, untargetable, planted — until its slot in
+      // the 6 s stagger comes up, then it stands at the player's CURRENT side
+      // at 50% HP. The mesh is the same object that detonated: nothing is
+      // disposed or rebuilt across the whole cycle (the step's verify clause),
+      // only visibility, position and HP move.
+      if (s.reform > 0) {
+        s.reform -= dt;
+        if (s.reform > 0) continue;
+        const a = (s._reformSlot / Math.max(1, this.shadows.length)) * Math.PI * 2;
+        s.pos.copy(this.player.pos);
+        s.pos.x += Math.sin(a) * 2.0;
+        s.pos.z += Math.cos(a) * 2.0;
+        s.pos.y = 0;
+        this.world.resolve(s.pos, s.radius, s.vel);
+        s.vel.set(0, 0, 0);
+        // 50% HP is the cycle's price: the detonation traded the army's
+        // staying power for one burst window. Round like shadowCombat does,
+        // floored at 1 so a re-formed soldier can never arrive dead.
+        s.hp = Math.max(1, Math.round(s.maxHp * SOVEREIGN.legion.reformHpPct));
+        s.mesh.visible = true;
+        s.mesh.position.copy(s.pos);
+        this.fx.burst(s.pos.clone().setY(0.8), 14, 0x35e6ff, { speed: 5, up: 4, life: 0.5 });
+      }
       if (s.attackCd > 0) s.attackCd -= dt;
       // Windup running down to the contact frame, exactly like the enemy path:
       // the attack CLIP plays its windup while this timer runs (the soldier
@@ -2982,7 +5116,7 @@ export class Game {
       }
       if (s.swing > 0) s.swing -= dt;
 
-      const target = s.telegraph > 0 ? null : this._nearestEnemy(s.pos, 26);
+      const target = s.telegraph > 0 ? null : this._shadowTarget(s);
       let moving = false;
       if (s.telegraph > 0) {
         // Planted mid-windup, like a telegraphing enemy: no chase, no
@@ -3062,10 +5196,15 @@ export class Game {
     // the old extra level multiplier here double-dipped. The vigil 2pc's
     // +12% is the ARMOUR part of shadowDmgMul only (x1 naked) — the INT part
     // is already inside s.atk, and multiplying derived.shadowDmgMul here
-    // would double-count it. origin:'shadow' keeps a soldier's blow from
-    // eating the player's banked riposte crit.
+    // would double-count it. _classShadowMul is the CLASS part on the same
+    // logic (BINDER's +20%, isolated in refreshDerived; x1 for everyone
+    // else) — the three factors of derived.shadowDmgMul each enter exactly
+    // once. origin:'shadow' keeps a soldier's blow from eating the player's
+    // banked riposte crit.
     const before = target.hp;
-    this._damageEnemy(target, s.atk * (this._armorBonus?.shadowDmgMul || 1), { origin: 'shadow' });
+    this._damageEnemy(target,
+      s.atk * (this._armorBonus?.shadowDmgMul || 1) * this._classShadowMul,
+      { origin: 'shadow' });
     if (before > 0 && target.hp <= 0) s.kills++;
   }
 
@@ -3415,6 +5554,32 @@ export class Game {
         ['Breaker level', `${this.save.level}  (${rankOf(this.save.level)}-grade)`],
         ['Company', `${roster.count} / ${roster.capacity} bound`],
       ],
+    });
+  }
+
+  /**
+   * The trial's verdict (CLASSES_SPEC step 7): present archonOffers — the top
+   * two paths this save's own play earned, plus SHADOW if absent, never fewer
+   * than two — and commit the pick through ascend(), which enforces the SAME
+   * offer list, so there is no back door around "depending on their
+   * development". Ascending writes save.archon, banks the first-time respec
+   * token, zeroes the meter — and changes NOTHING about the derived block
+   * (interlock rule 3; refreshDerived below is a re-read, not a re-price, and
+   * the classes-test browser suite asserts byte equality across this call).
+   * Path mechanics are steps 8-10; today the meter lights and that is all.
+   */
+  _offerAscension() {
+    const offers = archonOffers(this.save);
+    this.ui.showArchonOffer({
+      save: this.save,
+      offers,
+      onChoose: (key) => {
+        if (!ascendArchon(this.save, key)) return false;
+        this.refreshDerived();
+        this.onSave();
+        this.ui.toast(`YOU ARE THE ${ARCHONS[key].name}`, 'gold');
+        return true;
+      },
     });
   }
 

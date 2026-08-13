@@ -42,7 +42,14 @@ import { shopBand } from '../game/shop.js';
 // refusal reasons straight from ascension.js — game.ascendEquipped() is the
 // commit, so this panel never touches the ledger itself.
 import { ascensionRecipe, canAscend, SIGIL_LABEL } from '../game/ascension.js';
-import { effectiveStat, shadowRosterCapacity, shadowFieldCapacity } from '../game/progression.js';
+import { effectiveStat, shadowRosterCapacity } from '../game/progression.js';
+// The identity layers (CLASSES_SPEC step 3). applyLayers is the SAME fold
+// game.refreshDerived runs, so this tab can never disagree with combat; the
+// direction/mastery/resonance readers are pure and drive the new rows.
+import {
+  DIRECTIONS, MASTERY_THRESHOLDS, CLASSES, CLASS_QUALITY,
+  directionOf, masteryTier, resonanceOf, applyLayers,
+} from '../game/classes.js';
 // Armour-look refresh (RPG_SPEC step 12 left this exact call for step 13):
 // after an equip/unequip the hunter's silhouette must follow the save, and
 // these three are the same sequence game.setPlayerBody already runs. animateRig
@@ -93,6 +100,37 @@ const CMP_ROWS = [
   ['Leech', (a) => a.leech, (v) => `+${(v * 100).toFixed(1)}%`, (d) => `${d > 0 ? '+' : ''}${(d * 100).toFixed(1)}%`],
   ['Ash found', (a) => a.ashFind, (v) => `+${Math.round(v * 100)}%`, (d) => `${d > 0 ? '+' : ''}${Math.round(d * 100)}%`],
 ];
+
+// Labels + formatters for every derived field the class layer can touch, so
+// the CLASS section can print "what this class DID to you" as base -> final
+// rows straight off the two derived blocks rather than re-deriving the term
+// maths. Keys the layer never moved simply do not appear.
+const fmtMs = (v) => `${Math.round(v * 1000)}ms`;
+const CLASS_FIELD_LABEL = {
+  maxHp: ['Max health', (v) => String(Math.round(v))],
+  maxMp: ['Max mana', (v) => String(Math.round(v))],
+  atk: ['Attack power', (v) => v.toFixed(1)],
+  speed: ['Move speed', (v) => v.toFixed(2)],
+  crit: ['Crit chance', pctLater],
+  critDmg: ['Crit damage', (v) => `x${v.toFixed(2)}`],
+  atkSpeed: ['Attack speed', pctLater],
+  skillMul: ['Skill power', (v) => `x${v.toFixed(2)}`],
+  cdr: ['Cooldown cut', pctLater],
+  dr: ['Damage reduction', pctLater],
+  hpRegen: ['Health regen', (v) => `${v.toFixed(2)}/s`],
+  mpRegen: ['Mana regen', (v) => `${v.toFixed(2)}/s`],
+  dmgFloor: ['Damage floor', pctLater],
+  tellLeadMs: ['Enemy tell', (v) => `${Math.round(v)}ms`],
+  dodgeWindow: ['Dodge window', fmtMs],
+  shadowDmgMul: ['Shadow damage', (v) => `x${v.toFixed(2)}`],
+  dashCd: ['Dash cooldown', (v) => `${v.toFixed(2)}s`],
+  dashDistance: ['Dash distance', (v) => `${v.toFixed(1)}m`],
+  dashIframes: ['Dash i-frames', fmtMs],
+  knockTakenMul: ['Knockback taken', (v) => `x${v.toFixed(2)}`],
+};
+// pct() is declared below with the other helpers; alias through a function so
+// the table above can reference it before its const initialises.
+function pctLater(v) { return pct(v); }
 
 // Trinket effect labels, shared with armorSummary's own table.
 const TRINKET_LABEL = {
@@ -1107,16 +1145,29 @@ export class InventoryUI {
     // what moved?") and stacking them put the derived block a full screen below
     // the stat it explains.
     const [body, right] = this._panes();
-    // Same fold the game runs: derive(save, armorBonus). Showing the naked
-    // derive here while refreshDerived folds armour would make this panel lie
-    // about every number armour touches.
-    const d = derive(save, g._armorBonus || null);
+    // Same fold the game runs: applyLayers(save, derive(save, armorBonus)) —
+    // exactly refreshDerived's pipeline. Showing the naked derive here while
+    // the game folds armour and the class layer would make this panel lie
+    // about every number either touches. dBase is kept so the CLASS section
+    // can show what the class layer CONTRIBUTED, field by field.
+    const dBase = derive(save, g._armorBonus || null);
+    const d = applyLayers(save, dBase);
     const R = STAT_RATES;
+    const dirKey = directionOf(save);
+    const cls = CLASSES[save.className];
 
     const idt = el('div', 'readout');
     body.appendChild(el('div', 'sect', 'IDENTITY'));
     idt.appendChild(row('Level', String(save.level || 1)));
     idt.appendChild(row('Rank', rankOf(save.level || 1)));
+    // Direction is DERIVED from spent points (never chosen in a menu), so the
+    // row simply names what the player has been doing. UNSWORN is a real,
+    // non-punished state and the sub-line says how to leave it.
+    idt.appendChild(dirKey === 'unsworn'
+      ? row('Direction', 'UNSWORN', 'no direction set — spend deeper')
+      : row('Direction', DIRECTIONS[dirKey].name, `lead stat ${DIRECTIONS[dirKey].key.toUpperCase()}`));
+    idt.appendChild(row('Class', cls ? cls.name
+      : ((save.level || 1) >= 20 ? '— the Assay Hall awaits' : '— opens at level 20')));
     idt.appendChild(row('XP', `${save.xp || 0} / ${xpForLevel(save.level || 1)}`));
     idt.appendChild(row('Unspent points', String(save.points || 0)));
     idt.appendChild(row('Kills', String(save.totalKills || 0)));
@@ -1149,6 +1200,19 @@ export class InventoryUI {
       const spent = (save.stats || {})[s.key] || 0;
       st.appendChild(row(s.name, `${effectiveStat(save, s.key)}`, `${spent} spent + ${auto} granted`));
       st.appendChild(el('div', 'note', s.desc));
+      // The mastery line (CLASSES_SPEC masteryRules uiSurface): the deepest
+      // mastery earned in THIS stat plus the next spent-point threshold.
+      // Thresholds count SPENT points only — the auto grant raises every stat
+      // equally, so counting it would hand out every mastery for free.
+      const dir = DIRECTIONS[s.key];
+      const tier = masteryTier(save, s.key);
+      const next = MASTERY_THRESHOLDS[tier];
+      const line = tier > 0
+        ? `${dir.name} · ${dir.masteries[tier - 1].name}${next ? ` — next ${spent}/${next}` : ' — mastered'}`
+        : `${dir.name} — next ${spent}/${next}`;
+      const m = el('div', 'note', line);
+      if (tier > 0) m.style.color = 'var(--accent2)';
+      st.appendChild(m);
     }
     body.appendChild(st);
 
@@ -1189,16 +1253,88 @@ export class InventoryUI {
         + 'Gates drop set pieces; fit them from the GEAR tab.'));
     }
 
+    // The class layer, in stacking order after armour. Drawbacks render in the
+    // SAME type size as benefits, here and everywhere, forever — a class whose
+    // downside the player did not read is a class they will blame the game
+    // for (CLASSES_SPEC risks: drawback resentment).
+    right.appendChild(el('div', 'sect', 'CLASS'));
+    if (cls) {
+      const cr = el('div', 'readout');
+      const quality = save.classTier || 'base';
+      const res = resonanceOf(save);
+      cr.appendChild(row(cls.name, res > 0 ? `RESONANT ${res}` : 'NEUTRAL',
+        `quality ${quality} x${(CLASS_QUALITY[quality] || 1).toFixed(2)}`));
+      cr.appendChild(el('div', 'note', `BENEFIT — ${cls.benefitText}`));
+      cr.appendChild(el('div', 'note', `DRAWBACK — ${cls.drawbackText}`));
+      // What the layer actually DID: every derived field it moved, base ->
+      // final, off the same two blocks the game computes. An empty list means
+      // the class only carries behaviour flags, and saying so is clearer than
+      // a blank.
+      let moved = 0;
+      for (const [key, [label, fmt]] of Object.entries(CLASS_FIELD_LABEL)) {
+        const a = dBase[key];
+        const b = d[key];
+        if (b === undefined || a === b) continue;
+        const base = a !== undefined ? fmt(a) : '—';
+        cr.appendChild(row(label, `${base} > ${fmt(b)}`));
+        moved++;
+      }
+      if (!moved) cr.appendChild(el('div', 'note', 'No derived numbers moved — this class trades in behaviours.'));
+      right.appendChild(cr);
+    } else {
+      right.appendChild(el('div', 'note', (save.level || 1) >= 20
+        ? 'No class chosen. The Assay Hall in Threshold will measure you — every class carries a benefit AND a drawback, in equal type.'
+        : 'Classes open at level 20, at the Assay Hall. Your direction is yours to set now: it is read from where you spend.'));
+    }
+
     right.appendChild(el('div', 'sect', 'ARMY'));
     const ay = el('div', 'readout');
     const roster = save.shadows?.roster?.length || 0;
     ay.appendChild(row('Roster', `${roster} / ${shadowRosterCapacity(save)}`));
-    // Same fieldAdd the game passes (vigil 4pc) — the spec's honesty clause:
-    // the tier cap wins, and this row must show the number that actually rules.
-    ay.appendChild(row('On the field',
-      String(shadowFieldCapacity(save, g.quality?.current, g._armorBonus?.shadowFieldAdd || 0)),
+    // game.fieldCapacity() IS the number the sim enforces (vigil 4pc + the
+    // SHADOW ARCHON's +2, inside progression's clamps) — the spec's honesty
+    // clause: the tier cap wins, and this row must show the number that
+    // actually rules.
+    ay.appendChild(row('On the field', String(g.fieldCapacity()),
       'clamped by the live quality tier'));
     right.appendChild(ay);
+
+    // SOVEREIGN'S WILL (CLASSES_SPEC step 8): the three-way command toggle,
+    // on the shadow panel per spec. Stance is RUN state ("one enum on the run
+    // state") — it resets to HUNT at every gate entry — so the toggle only
+    // renders where a run is live to command; in the city the army is not
+    // fielded and a control that silently reset would be a lie.
+    if (save.archon === 'shadow') {
+      right.appendChild(el('div', 'sect', "SOVEREIGN'S WILL"));
+      if (g.mode?.name !== 'city' && typeof g.setShadowStance === 'function') {
+        const st = el('div', 'tabs');
+        for (const [key, label, hint] of [
+          ['hold', 'HOLD', 'the wall — stay on you, cut down what closes'],
+          ['hunt', 'HUNT', 'free rein — nearest quarry within 26 m'],
+          ['focus', 'FOCUS', 'every blade on your last-marked target'],
+        ]) {
+          const b = el('button', null, label);
+          b.type = 'button';
+          b.title = hint;
+          b.classList.toggle('on', g.shadowStance === key);
+          b.addEventListener('click', () => {
+            this.audio?.ui?.();
+            if (g.setShadowStance(key)) this.render();
+          });
+          st.appendChild(b);
+        }
+        right.appendChild(st);
+        const hints = {
+          hold: 'HOLD — the wall. Your soldiers keep to your side and intercept anything that closes.',
+          hunt: 'HUNT — free rein. Each soldier takes the nearest quarry within 26 m.',
+          focus: 'FOCUS — every blade on your last-marked target, wherever it runs.',
+        };
+        right.appendChild(el('div', 'note', hints[g.shadowStance] || hints.hunt));
+      } else {
+        right.appendChild(el('div', 'note',
+          'Stances are commanded in the field. Your army answers when a rift is open.'));
+      }
+    }
   }
 
   // ------------------------------------------------------------------- sets

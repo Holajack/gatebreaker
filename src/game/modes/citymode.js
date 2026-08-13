@@ -5,6 +5,10 @@ import { CityUI } from '../../ui/cityui.js';
 import { FLAT_GROUND } from '../physics.js';
 import { animateRig } from '../entities.js';
 import { GATES } from '../config.js';
+// THE REACH (CLASSES_SPEC step 7): the S portal's prompt line goes
+// save-dependent the way the Assay Hall door did in step 5 — the trial offer
+// must be visible AT THE GATE, and this prompt is the S gate's doorstep.
+import { canAscend } from '../classes.js';
 import { makeDayState } from '../../render/daynight.js';
 
 // How far past a portal's own radius the prompt still shows. Generous, because
@@ -351,9 +355,15 @@ export class CityMode extends GameMode {
         wild: Boolean(portal.wild),
         locked: Boolean(portal.locked),
         label: `${portal.rank}-GRADE GATE`,
+        // The S portal is THE REACH for an ascension-eligible save — same
+        // save-dependent-door pattern as _assaySub. game._beginGate arms the
+        // actual trial flag; this line only makes the offer visible where the
+        // migration promised it ("gets the trial offer at the S gate").
         sub: portal.locked
           ? `SEALED · REQUIRES LEVEL ${gate?.reqLevel ?? '?'}`
-          : (gate?.name || 'ENTER THE GATE'),
+          : (portal.rank === 'S' && canAscend(this.game.save)
+            ? 'THE REACH · THE ASCENSION TRIAL AWAITS'
+            : (gate?.name || 'ENTER THE GATE')),
       });
       return;
     }
@@ -367,8 +377,9 @@ export class CityMode extends GameMode {
         label: it.label,
         // cityui.js rewrites 'NOT YET OPEN' to 'CLOSED' for the doors that
         // still lead nowhere; the two that DO lead somewhere say what is
-        // behind them.
-        sub: INTERACT_SUB[it.id] || 'NOT YET OPEN',
+        // behind them. The Assay Hall's line is save-dependent (STEP 5): from
+        // level 20 the assayer's desk is where classes are sworn.
+        sub: it.id === 'assay' ? this._assaySub() : (INTERACT_SUB[it.id] || 'NOT YET OPEN'),
       });
       return;
     }
@@ -378,6 +389,18 @@ export class CityMode extends GameMode {
   _setPrompt(prompt) {
     this._prompt = prompt;
     this.ui?.setPrompt(prompt);
+  }
+
+  /**
+   * What the Assay Hall door promises (CLASSES_SPEC STEP 5). Below level 20
+   * the assayer has nothing to measure and the door keeps its shipped line;
+   * from 20 the class business headlines — 'YOUR CLASS AWAITS' is the
+   * migration's flag made visible at the exact door that honours it.
+   */
+  _assaySub() {
+    const s = this.game.save;
+    if ((s?.level || 0) < 20) return INTERACT_SUB.assay;
+    return s.className ? 'CLASSES · RIFT CONTRACTS' : 'YOUR CLASS AWAITS';
   }
 
   _updateDistrict() {
@@ -572,8 +595,11 @@ export class CityMode extends GameMode {
     }
 
     if (prompt.id === 'assay') {
-      // The fast-travel desk. The gate list is a convenience for people who do
-      // not want to walk, not the way in.
+      // The assayer's desk (CLASSES_SPEC STEP 5): from level 20 the door opens
+      // the class panel, which carries the fast-travel list one tap inside it.
+      // Below 20 AssayUI.open() declines and the door stays the shipped
+      // contracts list — which is also what flow-test's level-1 save asserts.
+      if (g.assayUI?.open()) return { action: 'open', id: 'assay' };
       g.appState?.go('gates', { from: 'city' });
       return { action: 'open', id: 'assay' };
     }

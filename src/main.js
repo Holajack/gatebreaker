@@ -11,6 +11,7 @@ import { FrameClock } from './core/frameclock.js';
 import { AppState } from './core/appstate.js';
 import { preloadCity } from './world/city.js';
 import { ShopUI } from './ui/shopui.js';
+import { AssayUI } from './ui/cityui.js';
 import { InventoryUI } from './ui/inventoryui.js';
 import * as Weapons from './game/weapons.js';
 
@@ -91,6 +92,12 @@ ui.game = game;
 // layer. Deliberately NOT an AppState screen — see the header of shopui.js.
 game.shopUI = new ShopUI({ game, audio });
 
+// The Assay Hall's desk — the class-choice panel (CLASSES_SPEC STEP 5).
+// Constructed once, here, for the same reason the shop is: CityMode is torn
+// down and rebuilt on every city entry, and a panel that rebuilt its DOM each
+// time would leak an #assay node per visit.
+game.assayUI = new AssayUI({ game, audio });
+
 // The hunter's sheet. Constructed here for the same reason the shop is: it
 // outlives every city rebuild, and a panel that built its DOM per open would
 // leak an #inv node per visit. Deliberately NOT an AppState screen — see the
@@ -107,6 +114,7 @@ function toggleInventory() {
   // claim the back button, so opening one over the other would leave whichever
   // lost the race unreachable.
   if (game.shopUI?.isOpen) game.shopUI.close();
+  if (game.assayUI?.isOpen) game.assayUI.close();
   game.invUI.toggle();
 }
 document.addEventListener('click', (e) => {
@@ -172,6 +180,17 @@ function handleBack() {
   // here is about which check runs, not about nesting.
   if (game.invUI?.isOpen) { game.invUI.close(); return; }
   if (game.shopUI?.isOpen) { game.shopUI.close(); return; }
+  // The Assay Hall's desk rides the same rule: back closes the panel and
+  // leaves you standing in the doorway you opened it from.
+  if (game.assayUI?.isOpen) { game.assayUI.close(); return; }
+  // THE REACH's offer (CLASSES_SPEC step 7) rides above the results panel;
+  // back means NOT YET — decline, consume nothing, the offer returns on the
+  // next eligible S clear.
+  const archonPanel = document.getElementById('archonPanel');
+  if (archonPanel && !archonPanel.classList.contains('hidden')) {
+    archonPanel.classList.add('hidden');
+    return;
+  }
   for (const id of ['how', 'levelup']) {
     const el = document.getElementById(id);
     if (el && !el.classList.contains('hidden')) { ui.hide(id); return; }

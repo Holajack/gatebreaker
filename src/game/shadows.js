@@ -5,6 +5,11 @@
 
 import { ENEMY_TYPES, SHADOW_GRADES } from './config.js';
 import { effectiveStat, shadowRosterCapacity } from './progression.js';
+// SHADOW affinity (CLASSES_SPEC step 7): +3 per shadow promoted. promote()
+// below is the ONE place a promotion commits, so the counter bumps here —
+// classes.js is as THREE-free as this file, and the import cannot cycle
+// (classes.js reads only config.js).
+import { bumpAffinity } from './classes.js';
 
 export const GRADES = SHADOW_GRADES;
 
@@ -22,6 +27,21 @@ export function gradeName(index) {
 
 export function gradeMultiplier(index) {
   return GRADES[clampGrade(index)].mul;
+}
+
+/**
+ * ASHEN SECOND (CLASSES_SPEC step 8): the maxCount-1 ASHEN FIRST slot reads
+ * as 2 for the SHADOW ARCHON only — "one number in a path-aware read of
+ * SHADOW_GRADES", the spec's own words, and this function IS that read.
+ * Keyed to the TOP grade index rather than `maxCount === 1` so a future
+ * grade table that happens to cap another rank at 1 does not silently widen.
+ * Every other grade, and every non-shadow save, reads the table verbatim.
+ */
+export function gradeMaxCount(save, index) {
+  const g = clampGrade(index);
+  const cap = GRADES[g].maxCount;
+  if (g === GRADES.length - 1 && save?.archon === 'shadow') return cap + 1;
+  return cap;
 }
 
 // Two original word lists. Names are composed, never drawn from any existing
@@ -100,10 +120,11 @@ export function canPromote(save, record) {
   const { ash, minLevel } = promoteCost(save, record);
   if ((save.ash || 0) < ash) return false;
   if (save.level < minLevel) return false;
-  // The upper grades are rank slots, not just price tags.
-  const next = GRADES[g + 1];
+  // The upper grades are rank slots, not just price tags. The cap goes
+  // through the path-aware read so a SHADOW ARCHON's second ASHEN FIRST
+  // clears here and nowhere else.
   const held = save.shadows.roster.filter((s) => s.grade === g + 1).length;
-  return held < next.maxCount;
+  return held < gradeMaxCount(save, g + 1);
 }
 
 export function promote(save, id) {
@@ -111,6 +132,9 @@ export function promote(save, id) {
   if (!rec || !canPromote(save, rec)) return false;
   save.ash -= promoteCost(save, rec).ash;
   rec.grade = clampGrade(rec.grade + 1);
+  // Investing ash in the army is the strongest commitment signal Bind has —
+  // hence the resonanceReading table's 3, against extraction's 1.
+  bumpAffinity(save, 'shadow', 3);
   return true;
 }
 
