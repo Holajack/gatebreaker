@@ -428,12 +428,37 @@ export function legendaryRule(baseId) {
 // exactly one free enemy attack — while a whiffed dagger light costs 0.18 s,
 // which is nothing. Retune either side of that pairing and the other must
 // follow, or heavy weapons stop being a wager and become a tax.
+//
+// --- WAVE D STAGE 3: HIT FEEL PER THE MASS LAW ------------------------------
+// Light steps now carry small non-zero shake (and, at mass >= 2.0, a sliver of
+// hitStop) instead of flat zeros. The values follow RPG_SPEC weaponPhysics'
+// two authoring rules exactly:
+//   * hitStopAndShakeAreMass — the ordering stays monotonic in archetype mass
+//     across EVERY step, not just the finishers the test asserts: dagger 0.02
+//     < sword 0.05 < axe 0.08 < spear/glaive 0.10 < greatsword 0.30 shake, and
+//     hitStop 0 / 0 / 0.02 / 0.02 / 0.05 on the same ladder.
+//   * authoringFormulaForNewFamiliesOnly — "hitStop ... 0 on openers below
+//     mass 2.0": sword (1.4) and dagger (0.9) lights keep hitStop 0; the axe
+//     (2.1), spear (2.2) and glaive lights cross the mass line and gain 0.02.
+// The numbers are deliberately BELOW perception-as-lag territory (a 0.02 s
+// stop at 60 fps is one frozen frame): a light hit should register in the
+// hand, never interrupt the combo's rhythm. game.js applies hitStop only on
+// CONTACT (whiffs get none) and fx.addHitStop is max()-latched, so mashing
+// lights can never accumulate into a hitch — the cap is structural.
+//
+// momentumCarry (RPG_SPEC weaponPhysics.whatThePlayerActuallyFEELS): steps
+// tagged `lungeCurve: 'carry'` — every step of the three mass >= 3.6 families
+// (greatsword, greataxe, maul) — distribute their lunge across windup+active
+// with an ease-in instead of one impulse at press (see consumeLunge). The
+// body leans into the swing and arrives WITH the blade; light families keep
+// the shipped instant impulse, which is what makes a dagger step feel like a
+// step and a maul swing feel like falling forward.
 
 const SWORD_COMBO = [
   { windup: 0.17, active: 0.09, recovery: 0.08, lock: 0.26, cancel: 0.09,
-    arc: Math.PI * 0.62, range: 2.9, dmg: 1.00, knock: 2.5, stagger: 0,    lunge: 0.6, move: 0.35, shake: 0.00, hitStop: 0.00 },
+    arc: Math.PI * 0.62, range: 2.9, dmg: 1.00, knock: 2.5, stagger: 0,    lunge: 0.6, move: 0.35, shake: 0.05, hitStop: 0.00 },
   { windup: 0.16, active: 0.09, recovery: 0.09, lock: 0.25, cancel: 0.09,
-    arc: Math.PI * 0.62, range: 2.9, dmg: 1.12, knock: 3.0, stagger: 0,    lunge: 0.7, move: 0.35, shake: 0.00, hitStop: 0.00 },
+    arc: Math.PI * 0.62, range: 2.9, dmg: 1.12, knock: 3.0, stagger: 0,    lunge: 0.7, move: 0.35, shake: 0.05, hitStop: 0.00 },
   { windup: 0.22, active: 0.11, recovery: 0.19, lock: 0.33, cancel: 0.10,
     arc: Math.PI * 0.85, range: 3.6, dmg: 2.30, knock: 9.0, stagger: 0.45, lunge: 1.1, move: 0.25, shake: 0.30, hitStop: 0.05, finisher: true },
 ];
@@ -442,17 +467,17 @@ const SWORD_COMBO = [
 // the whole point of the archetype, so it is not a tuning accident.
 const GREATAXE_COMBO = [
   { windup: 0.42, active: 0.14, recovery: 0.34, lock: 0.90, cancel: 0.14,
-    arc: Math.PI * 1.15, range: 4.0, dmg: 2.60, knock: 13, stagger: 0.55, lunge: 1.2, move: 0.10, shake: 0.45, hitStop: 0.06 },
+    arc: Math.PI * 1.15, range: 4.0, dmg: 2.60, knock: 13, stagger: 0.55, lunge: 1.2, move: 0.10, shake: 0.45, hitStop: 0.06, lungeCurve: 'carry' },
   { windup: 0.55, active: 0.16, recovery: 0.52, lock: 1.23, cancel: 0.16,
-    arc: Math.PI * 1.35, range: 4.6, dmg: 4.30, knock: 20, stagger: 0.90, lunge: 1.6, move: 0.06, shake: 0.90, hitStop: 0.10, finisher: true },
+    arc: Math.PI * 1.35, range: 4.6, dmg: 4.30, knock: 20, stagger: 0.90, lunge: 1.6, move: 0.06, shake: 0.90, hitStop: 0.10, lungeCurve: 'carry', finisher: true },
 ];
 
 const MAUL_COMBO = [
   { windup: 0.48, active: 0.15, recovery: 0.40, lock: 1.03, cancel: 0.15,
-    arc: Math.PI * 1.20, range: 4.0, dmg: 2.90, knock: 15, stagger: 0.65, lunge: 1.0, move: 0.08, shake: 0.55, hitStop: 0.07 },
+    arc: Math.PI * 1.20, range: 4.0, dmg: 2.90, knock: 15, stagger: 0.65, lunge: 1.0, move: 0.08, shake: 0.55, hitStop: 0.07, lungeCurve: 'carry' },
   // Radial: a ground pound has no front, so the arc is the full circle.
   { windup: 0.62, active: 0.18, recovery: 0.62, lock: 1.42, cancel: 0.18,
-    arc: Math.PI * 2.00, range: 5.0, dmg: 4.80, knock: 24, stagger: 1.10, lunge: 0.4, move: 0.04, shake: 1.10, hitStop: 0.12, finisher: true },
+    arc: Math.PI * 2.00, range: 5.0, dmg: 4.80, knock: 24, stagger: 1.10, lunge: 0.4, move: 0.04, shake: 1.10, hitStop: 0.12, lungeCurve: 'carry', finisher: true },
 ];
 
 // RPG_SPEC weaponPhysics.familyTable, greatsword row: mass 3.6, windup 0.34,
@@ -469,11 +494,11 @@ const MAUL_COMBO = [
 // non-radial stagger in the game — that asymmetry IS the family.
 const GREATSWORD_COMBO = [
   { windup: 0.34, active: 0.13, recovery: 0.26, lock: 0.72, cancel: 0.12,
-    arc: Math.PI * 0.42, range: 4.6, dmg: 2.00, knock: 8.0, stagger: 0.45, lunge: 1.0, move: 0.16, shake: 0.30, hitStop: 0.05 },
+    arc: Math.PI * 0.42, range: 4.6, dmg: 2.00, knock: 8.0, stagger: 0.45, lunge: 1.0, move: 0.16, shake: 0.30, hitStop: 0.05, lungeCurve: 'carry' },
   { windup: 0.36, active: 0.14, recovery: 0.28, lock: 0.78, cancel: 0.13,
-    arc: Math.PI * 0.95, range: 4.2, dmg: 2.20, knock: 10.0, stagger: 0.55, lunge: 1.2, move: 0.14, shake: 0.40, hitStop: 0.06 },
+    arc: Math.PI * 0.95, range: 4.2, dmg: 2.20, knock: 10.0, stagger: 0.55, lunge: 1.2, move: 0.14, shake: 0.40, hitStop: 0.06, lungeCurve: 'carry' },
   { windup: 0.40, active: 0.15, recovery: 0.34, lock: 0.89, cancel: 0.14,
-    arc: Math.PI * 0.95, range: 4.6, dmg: 3.40, knock: 16.0, stagger: 0.95, lunge: 1.5, move: 0.12, shake: 0.55, hitStop: 0.08,
+    arc: Math.PI * 0.95, range: 4.6, dmg: 3.40, knock: 16.0, stagger: 0.95, lunge: 1.5, move: 0.12, shake: 0.55, hitStop: 0.08, lungeCurve: 'carry',
     charge: { time: 0.45, dmgMul: 2.1 }, finisher: true },
 ];
 
@@ -492,9 +517,9 @@ const GREATSWORD_COMBO = [
 // 0.30, so a heavier axe may not shake less. The asserted law wins by 0.02.
 const AXE_COMBO = [
   { windup: 0.21, active: 0.10, recovery: 0.14, lock: 0.38, cancel: 0.09,
-    arc: Math.PI * 0.70, range: 3.0, dmg: 1.15, knock: 5.0, stagger: 0.15, lunge: 0.8, move: 0.30, shake: 0.00, hitStop: 0.00, bleed: true },
+    arc: Math.PI * 0.70, range: 3.0, dmg: 1.15, knock: 5.0, stagger: 0.15, lunge: 0.8, move: 0.30, shake: 0.08, hitStop: 0.02, bleed: true },
   { windup: 0.20, active: 0.10, recovery: 0.15, lock: 0.37, cancel: 0.09,
-    arc: Math.PI * 0.70, range: 3.0, dmg: 1.30, knock: 5.5, stagger: 0.18, lunge: 0.9, move: 0.30, shake: 0.10, hitStop: 0.00, bleed: true },
+    arc: Math.PI * 0.70, range: 3.0, dmg: 1.30, knock: 5.5, stagger: 0.18, lunge: 0.9, move: 0.30, shake: 0.10, hitStop: 0.02, bleed: true },
   { windup: 0.26, active: 0.12, recovery: 0.24, lock: 0.50, cancel: 0.10,
     arc: Math.PI * 0.78, range: 3.2, dmg: 2.30, knock: -12.0, stagger: 0.55, lunge: 0.6, move: 0.26, shake: 0.30, hitStop: 0.05, bleed: true, finisher: true },
 ];
@@ -627,7 +652,7 @@ export const STAFF = {
 // Each light step carries a real forward step, so a full dagger combo closes
 // about 4m of ground — the archetype hunts you into the enemy's face.
 const DAGGER_LIGHT = { windup: 0.075, active: 0.05, recovery: 0.055, lock: 0.075, cancel: 0.05,
-  arc: Math.PI * 0.50, range: 2.0, knock: 0.7, stagger: 0, move: 0.62, shake: 0.00, hitStop: 0.00 };
+  arc: Math.PI * 0.50, range: 2.0, knock: 0.7, stagger: 0, move: 0.62, shake: 0.02, hitStop: 0.00 };
 
 const DAGGER_COMBO = [
   { ...DAGGER_LIGHT, dmg: 1.00, lunge: 0.9 },
@@ -641,9 +666,9 @@ const DAGGER_COMBO = [
 
 const SPEAR_COMBO = [
   { windup: 0.20, active: 0.09, recovery: 0.13, lock: 0.29, cancel: 0.10,
-    arc: Math.PI * 0.22, range: 4.6, dmg: 1.15, knock: 3.5, stagger: 0,    lunge: 1.2, move: 0.70, shake: 0.00, hitStop: 0.00 },
+    arc: Math.PI * 0.22, range: 4.6, dmg: 1.15, knock: 3.5, stagger: 0,    lunge: 1.2, move: 0.70, shake: 0.10, hitStop: 0.02 },
   { windup: 0.18, active: 0.09, recovery: 0.15, lock: 0.27, cancel: 0.10,
-    arc: Math.PI * 0.20, range: 4.9, dmg: 1.30, knock: 4.0, stagger: 0,    lunge: 1.4, move: 0.70, shake: 0.00, hitStop: 0.00 },
+    arc: Math.PI * 0.20, range: 4.9, dmg: 1.30, knock: 4.0, stagger: 0,    lunge: 1.4, move: 0.70, shake: 0.10, hitStop: 0.02 },
   { windup: 0.28, active: 0.12, recovery: 0.30, lock: 0.52, cancel: 0.12,
     arc: Math.PI * 0.26, range: 6.0, dmg: 2.50, knock: 11,  stagger: 0.50, lunge: 3.2, move: 0.55, shake: 0.35, hitStop: 0.06, finisher: true },
 ];
@@ -652,11 +677,11 @@ const SPEAR_COMBO = [
 // poke and crowd clearing depending on where you are in the chain.
 const GLAIVE_COMBO = [
   { windup: 0.19, active: 0.09, recovery: 0.12, lock: 0.28, cancel: 0.10,
-    arc: Math.PI * 0.24, range: 4.8, dmg: 1.10, knock: 3.0, stagger: 0,    lunge: 1.2, move: 0.70, shake: 0.00, hitStop: 0.00 },
+    arc: Math.PI * 0.24, range: 4.8, dmg: 1.10, knock: 3.0, stagger: 0,    lunge: 1.2, move: 0.70, shake: 0.10, hitStop: 0.02 },
   { windup: 0.22, active: 0.11, recovery: 0.14, lock: 0.33, cancel: 0.11,
-    arc: Math.PI * 0.90, range: 4.2, dmg: 1.25, knock: 5.0, stagger: 0.15, lunge: 0.8, move: 0.55, shake: 0.18, hitStop: 0.00 },
+    arc: Math.PI * 0.90, range: 4.2, dmg: 1.25, knock: 5.0, stagger: 0.15, lunge: 0.8, move: 0.55, shake: 0.18, hitStop: 0.02 },
   { windup: 0.20, active: 0.09, recovery: 0.13, lock: 0.29, cancel: 0.10,
-    arc: Math.PI * 0.26, range: 5.2, dmg: 1.35, knock: 4.0, stagger: 0,    lunge: 1.5, move: 0.70, shake: 0.00, hitStop: 0.00 },
+    arc: Math.PI * 0.26, range: 5.2, dmg: 1.35, knock: 4.0, stagger: 0,    lunge: 1.5, move: 0.70, shake: 0.10, hitStop: 0.02 },
   { windup: 0.30, active: 0.14, recovery: 0.30, lock: 0.56, cancel: 0.12,
     arc: Math.PI * 1.05, range: 5.4, dmg: 2.60, knock: 13,  stagger: 0.60, lunge: 2.2, move: 0.45, shake: 0.50, hitStop: 0.07, finisher: true },
 ];
@@ -2017,6 +2042,11 @@ export function makeAttackState() {
     cd: 0,           // shared attack cooldown
     chain: 0,        // seconds of combo window left after a step ends
     lunge: 0,        // forward impulse the caller should consume this frame
+    // momentumCarry (Wave D stage 3): fraction of a 'carry' step's lunge
+    // already handed out. consumeLunge distributes against the step's own
+    // clock (state.t), so the carry is drift-free — a frame-rate hiccup or a
+    // hit-stop slows the lean exactly as it slows the blade.
+    lungeSpent: 0,
     buffered: false, // a press arrived too early and is waiting
     // Chargeable steps (GREATSWORD_COMBO's finisher). `charging` is a LIVE
     // input flag the caller refreshes every frame before tickAttack; `chargeT`
@@ -2066,6 +2096,7 @@ export function startAttack(state, w) {
   state.cd = w.cd;
   // VEINSPLITTERS ASCENDANT (positioning verb): the finisher's lunge scales.
   state.lunge = (step.lunge || 0) * (step.finisher ? (w.rule?.fx.finisherLungeMul || 1) : 1);
+  state.lungeSpent = 0;
   state.buffered = false;
   state.chargeT = 0;
   return step;
@@ -2169,11 +2200,43 @@ export function consumeBuffer(state) {
   return true;
 }
 
-/** Take the pending forward impulse for this frame, in metres. */
-export function consumeLunge(state) {
-  const l = state.lunge;
-  state.lunge = 0;
-  return l;
+/**
+ * Take the pending forward carry for this frame, in metres.
+ *
+ * Two behaviours, keyed by the step's `lungeCurve` (RPG_SPEC weaponPhysics
+ * momentumCarry — "one field, one lerp"):
+ *
+ *   'impulse' / absent — the shipped behaviour, byte-identical: the whole
+ *     lunge returns on the first call (game.js makes it at step start) and
+ *     every later call returns 0. Light weapons STEP; the pop is the point.
+ *
+ *   'carry' — the lunge is metered out across (windup + active) with an
+ *     ease-in (k^2), read off state.t so the distribution follows the
+ *     machine's own clock (attack-rate affixes, hit-stop and the greatsword's
+ *     charge park all shape the lean for free). The caller keeps calling once
+ *     per frame while the step runs; each call returns only the metres newly
+ *     due, and `lungeSpent` guarantees the increments sum to exactly the
+ *     authored lunge no matter how the frames land. The ease-in is why it
+ *     reads as WEIGHT: nearly nothing moves during the early windup, then the
+ *     body pours forward into the contact frame and arrives with the blade
+ *     instead of teleporting at the press.
+ *
+ * `w` is optional so the shipped one-argument call sites keep working; without
+ * it (or outside a live step) the legacy drain runs.
+ */
+export function consumeLunge(state, w = null) {
+  const step = state.active && w ? w.combo[state.index] : null;
+  if (!step || step.lungeCurve !== 'carry') {
+    const l = state.lunge;
+    state.lunge = 0;
+    return l;
+  }
+  const span = step.windup + step.active;
+  const k = span > 0 ? Math.min(1, state.t / span) : 1;
+  const eased = k * k;
+  const due = state.lunge * (eased - state.lungeSpent);
+  state.lungeSpent = eased;
+  return due > 0 ? due : 0;
 }
 
 /** Hard reset — death, gate transition, or a swap mid-swing. */
@@ -2184,7 +2247,10 @@ export function cancelAttack(state) {
   state.t = 0;
   state.chain = 0;
   state.next = 0;
+  // The undelivered remainder of a carry lunge dies with the step — a
+  // cancelled heavy must not shove its owner after the blade stopped.
   state.lunge = 0;
+  state.lungeSpent = 0;
   state.buffered = false;
   state.chargeT = 0;
 }
