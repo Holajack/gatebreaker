@@ -29,7 +29,7 @@ import {
 } from '../src/game/weapons.js';
 import { shopStock } from '../src/game/shop.js';
 import {
-  ensureMaterials, grantEmberdust, grantSigil, canAscend, ascend,
+  ensureMaterials, grantEmberdust, grantSigil, canForge, ascend,
   ascensionRecipe, FAMILY_SIGIL, SIGIL_LABEL, EMBERDUST_COST, ASH_COST,
 } from '../src/game/ascension.js';
 
@@ -138,14 +138,14 @@ console.log('\nA. THE LAWS\n');
   ensureMaterials(s);
   const epic = rollWeapon('gatecleaver', 41414, { rarity: 'epic', level: 22 });
 
-  ok(canAscend(s, epic).reason === 'NEEDS 1 INFERNUS SIGIL', 'refusal names the missing sigil first',
-    canAscend(s, epic).reason);
+  ok(canForge(s, epic).reason === 'NEEDS 1 INFERNUS SIGIL', 'refusal names the missing sigil first',
+    canForge(s, epic).reason);
   grantSigil(s, 'infernus');
-  ok(/MORE EMBERDUST/.test(canAscend(s, epic).reason), 'then the dust', canAscend(s, epic).reason);
+  ok(/MORE EMBERDUST/.test(canForge(s, epic).reason), 'then the dust', canForge(s, epic).reason);
   grantEmberdust(s, EMBERDUST_COST);
-  ok(/MORE ASH/.test(canAscend(s, epic).reason), 'then the ash', canAscend(s, epic).reason);
+  ok(/MORE ASH/.test(canForge(s, epic).reason), 'then the ash', canForge(s, epic).reason);
   s.ash = ASH_COST + 500;
-  ok(canAscend(s, epic).ok, 'a funded recipe passes');
+  ok(canForge(s, epic).ok, 'a funded recipe passes');
 
   const rows = ascensionRecipe(s, epic);
   ok(rows.length === 3 && rows.every((r) => r[3]), 'ascensionRecipe reports all three rows met', JSON.stringify(rows));
@@ -164,15 +164,15 @@ console.log('\nA. THE LAWS\n');
   ok(a3 === b3, 'the epic\'s affixes lead the legendary\'s (shared stream)', `${a3} -> ${b3}`);
 
   // Refusals that guard the craft's edges.
-  ok(canAscend(s, r.weapon).reason === 'ALREADY ASCENDED', 'a legendary cannot re-ascend');
-  ok(canAscend(s, rollWeapon('riftedge', 1, { rarity: 'rare', level: 5 })).reason === 'ONLY AN EPIC CAN ASCEND',
+  ok(canForge(s, r.weapon).reason === 'ALREADY ASCENDED', 'a legendary cannot re-ascend');
+  ok(canForge(s, rollWeapon('riftedge', 1, { rarity: 'rare', level: 5 })).reason === 'ONLY AN EPIC CAN ASCEND',
     'a rare cannot ascend');
   // FAMILY_SIGIL deliberately maps polearm onto the WARDEN's sigil (its own
   // comment: six bosses cover seven families by sharing — reach weapons drill
   // in the sword's martial line, and NO SIGIL walled Vigil/Voidglaive out of
   // ascension entirely). The refusal for an unfunded polearm epic is therefore
   // the ordinary missing-sigil one, not the family wall.
-  ok(canAscend(s, rollWeapon('vigil', 9, { rarity: 'epic', level: 20 })).reason === 'NEEDS 1 WARDEN SIGIL',
+  ok(canForge(s, rollWeapon('vigil', 9, { rarity: 'epic', level: 20 })).reason === 'NEEDS 1 WARDEN SIGIL',
     'the polearm family ascends on the WARDEN sigil (shared — no seventh boss, no walled-out family)');
 }
 

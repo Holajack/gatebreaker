@@ -420,7 +420,12 @@ export class Dungeon {
     this.biome = biome;
     // Optional per-gate crawl overrides live in the balance file (gate.crawl);
     // absent means LAYOUT_PARAMS defaults, per spec config.js note.
-    const baseParams = LAYOUT_PARAMS[gate.rank] || LAYOUT_PARAMS.E;
+    // A missing rank row THROWS instead of silently falling back to E: the
+    // fallback once meant "flipping B into INTERIOR_RANKS without adding
+    // LAYOUT_PARAMS.B ships a mislabeled E-shaped warren with no error", and
+    // the B/A/S expansion multiplies that trap. Fail at build, loudly.
+    const baseParams = LAYOUT_PARAMS[gate.rank];
+    if (!baseParams) throw new Error(`Dungeon.build: no LAYOUT_PARAMS row for rank "${gate.rank}" — add one before routing this rank to an interior`);
     const params = gate.crawl ? { ...baseParams, ...gate.crawl } : baseParams;
     // How many enemies this RUN holds is a roll, not a constant (config.js
     // GATES[].enemyBand). It is written back onto the gate object on purpose:

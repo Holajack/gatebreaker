@@ -88,7 +88,7 @@ import { shopBand } from '../game/shop.js';
 // The ascension entry (RPG_SPEC step 14): the panel prints the recipe and the
 // refusal reasons straight from ascension.js — game.ascendEquipped() is the
 // commit, so this panel never touches the ledger itself.
-import { ascensionRecipe, canAscend, SIGIL_LABEL } from '../game/ascension.js';
+import { ascensionRecipe, canForge, SIGIL_LABEL } from '../game/ascension.js';
 import { effectiveStat, shadowRosterCapacity } from '../game/progression.js';
 // The identity layers (CLASSES_SPEC step 3). applyLayers is the SAME fold
 // game.refreshDerived runs, so this sheet can never disagree with combat; the
@@ -1275,7 +1275,7 @@ export class InventoryUI {
       r.appendChild(el('b', null, `${have} / ${need}`));
       box.appendChild(r);
     }
-    const gate = canAscend(g.save, held);
+    const gate = canForge(g.save, held);
     const btn = el('button', 'btn primary', 'ASCEND');
     btn.id = 'invAscendBtn';
     btn.type = 'button';

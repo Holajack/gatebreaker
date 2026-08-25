@@ -548,27 +548,12 @@ function distToSegment(x, z, s) {
 /** Triangles in one portal's four meshes. Measured, not derived — see stats. */
 const PORTAL_TRIANGLES = 240;
 
-/**
- * THE DOORSTEP MEMORY, and it is module-level for a reason worth writing down.
- *
- * citymode._spawnVector picks the portal to step out of with
- * `portals.find(p => p.rank === atPortal)`, and a wild gate shares its rank with
- * a plaza gate — so returning from the wild E gate 200 m out would drop the
- * player back on the plaza. game.js and citymode.js are not this step's files
- * and the spec's requirement is precisely that they work UNMODIFIED, so the fix
- * lives where the array does: remember the last portal the player stood at, and
- * if it was a wild one, order it ahead of its plaza twin on the next build.
- *
- * It cannot be a City field: game._setMode destroys the CityMode AND its City on
- * every gate entry and constructs fresh ones on the way back, so anything stored
- * on the instance is gone by the time it would be read. It cannot live on `game`
- * either without editing game.js. A module-level slot is what is left, and it is
- * honest about what it is: one page runs one player.
- *
- * Written by City._notePortalProximity, consumed (and cleared) by
- * City._promoteReturnPortal.
- */
-let _lastWildPortal = null;   // { rank, x, z } | null
+// THE DOORSTEP MEMORY used to live here: a module-level "last wild portal"
+// slot plus an array-reorder (_promoteReturnPortal) so find-by-RANK would hit
+// the wild gate instead of its plaza twin on return. Portals now carry stable
+// ids (see _buildPortals) that ride the run payload as game.lastGatePortalId,
+// and citymode._spawnVector finds by id first — the ambiguity the hack papered
+// over no longer exists, so the hack is gone.
 
 /**
  * The buffers four-mesh portals share. One set per City; frontier.js borrows
@@ -861,8 +846,6 @@ export class City {
     if (wantFrontier) {
       this.frontier = new Frontier(this, rnd).build();
       this._triangles += this.frontier.triangles;
-      // After the wild gates exist, and before anything reads portals by rank.
-      this._promoteReturnPortal();
     }
 
     this._buildInteractables();
@@ -2348,6 +2331,11 @@ export class City {
       this._triangles += PORTAL_TRIANGLES;
 
       const portal = {
+        // STABLE ID — the portal's identity across save/return payloads and
+        // (later) settlements. Ranks are ambiguous the moment a wild gate
+        // shares one with a plaza gate; ids never are. Return-to-portal flows
+        // key on this, falling back to rank only for legacy payloads.
+        id: (outside ? 'breach-' : 'plaza-') + rank.toLowerCase(),
         rank,
         gate: gate || null,
         pos: new THREE.Vector3(px, py, pz),
@@ -2734,7 +2722,6 @@ export class City {
     this.frontier?.update(dt, playerPos);
 
     if (playerPos) {
-      this._notePortalProximity(playerPos);
       this.updateShadowCamera(playerPos, 22);
     }
   }
@@ -3099,39 +3086,9 @@ export class City {
     }
   }
 
-  /**
-   * Remember the last portal the player stood at, so a wild gate can be stepped
-   * back out of. Called once per frame from update(); no allocation, and the
-   * loop is the eight portals a city has.
-   *
-   * Standing at a PLAZA portal clears the memory, which is what stops "walked
-   * past the wild gate once" from redirecting a later plaza-gate return.
-   */
-  _notePortalProximity(pos) {
-    for (let i = 0; i < this.portals.length; i++) {
-      const p = this.portals[i];
-      const dx = pos.x - p.pos.x;
-      const dz = pos.z - p.pos.z;
-      // Slightly wider than citymode's PROMPT_SLACK (2.2): the memory must be
-      // set on every frame the ENTER prompt is showing, including the frame the
-      // player presses it on.
-      const r = p.radius + 3.0;
-      if (dx * dx + dz * dz > r * r) continue;
-      _lastWildPortal = p.wild ? { rank: p.rank, x: p.pos.x, z: p.pos.z } : null;
-      return;
-    }
-  }
-
-  /** Order the remembered wild gate ahead of its plaza twin, then forget it. */
-  _promoteReturnPortal() {
-    const want = _lastWildPortal;
-    if (!want) return;
-    _lastWildPortal = null;
-    const i = this.portals.findIndex((p) => p.wild && p.rank === want.rank
-      && Math.abs(p.pos.x - want.x) < 2 && Math.abs(p.pos.z - want.z) < 2);
-    if (i <= 0) return;
-    this.portals.unshift(this.portals.splice(i, 1)[0]);
-  }
+  // _notePortalProximity / _promoteReturnPortal (the doorstep-memory hack)
+  // were removed when portals gained stable ids — see the note above
+  // portalGeometries().
 
   /**
    * The player arrives on the plaza, facing the portals.

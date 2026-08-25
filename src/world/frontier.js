@@ -1132,6 +1132,10 @@ export class Frontier {
     this._triangles += 240;
 
     const portal = {
+      // STABLE ID off the POI's own id ('wildgate_e' -> 'wild-wildgate_e') —
+      // see city.js _buildPortals: ids are how return flows tell a wild gate
+      // from its same-rank plaza twin, replacing the old array-reorder hack.
+      id: 'wild-' + poi.id,
       rank,
       // A COPY of the gate row, renamed. citymode's prompt shows gate.name as
       // the sub-line, and "THE WARREN" on a gate nobody has surveyed undersells

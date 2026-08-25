@@ -387,6 +387,9 @@ export class Game {
     // The rank of the last gate entered, so returning to the city puts the
     // player back beside the portal they walked into rather than at the spawn.
     this.lastGateRank = null;
+    // The stable id of that portal (see beginRun) — exact where rank is
+    // ambiguous. Both runtime-only.
+    this.lastGatePortalId = null;
     // Non-null while the inventory panel's paper-doll view owns the camera —
     // see enterInventoryView(). update()'s camera dispatch checks this before
     // the mode's own updateCamera, so the follow rig simply stops running for
@@ -1042,7 +1045,11 @@ export class Game {
    * screen stack and the mounted mode disagree.
    */
   enterCity({ spawnAt = null, atPortal = null } = {}) {
-    return this._setMode('city', { spawnAt, atPortal: atPortal ?? this.lastGateRank });
+    // Prefer the exact portal the player entered through (stable id, set by
+    // beginRun) over the rank, which is ambiguous once wild gates share ranks
+    // with plaza gates. Legacy rank payloads still work — _spawnVector falls
+    // back to find-by-rank.
+    return this._setMode('city', { spawnAt, atPortal: atPortal ?? this.lastGatePortalId ?? this.lastGateRank });
   }
 
   /**
@@ -1051,7 +1058,7 @@ export class Game {
    * crawl rank (DUNGEON_SPEC worldJsArenasFate — old tests and screenshot
    * baselines still exercise the arena through it).
    */
-  enterGate(rank, { forceBiome = null, forceOpen = false, wild = false } = {}) {
+  enterGate(rank, { forceBiome = null, forceOpen = false, wild = false, portalId = null } = {}) {
     const index = Math.max(0, GATES.findIndex((g) => g.rank === rank));
     const resolved = GATES[index].rank;
     this.lastGateRank = resolved;
@@ -1062,8 +1069,8 @@ export class Game {
     // (citymode._updatePrompt stamps it from portal.wild; wired in the 3-B1
     // integration pass).
     this._wildRun = Boolean(wild);
-    if (this.appState) return this.appState.go('run', { rank: resolved, gateIndex: index, forceBiome, forceOpen });
-    return this.beginRun({ rank: resolved, gateIndex: index, forceBiome, forceOpen });
+    if (this.appState) return this.appState.go('run', { rank: resolved, gateIndex: index, forceBiome, forceOpen, portalId });
+    return this.beginRun({ rank: resolved, gateIndex: index, forceBiome, forceOpen, portalId });
   }
 
   /** Mount the dungeon. AppState's onEnter('run') hook calls this. */
@@ -1072,6 +1079,11 @@ export class Game {
       ? gateIndex
       : Math.max(0, GATES.findIndex((g) => g.rank === rank));
     this.lastGateRank = GATES[index].rank;
+    // The stable id of the portal this run was entered through (or null for
+    // fast travel / dev paths, which have no doorstep to return to). beginRun
+    // is the SINGLE writer so a dev-launched run can never inherit a stale id
+    // from a previous portal walk. Runtime-only, like lastGateRank.
+    this.lastGatePortalId = extra.portalId ?? null;
     // Forward whatever else rode in (forceBiome, forceOpen) — the mode owns
     // what those mean, and stripping the payload down to {gateIndex, rank}
     // here silently killed every dev override routed through AppState.

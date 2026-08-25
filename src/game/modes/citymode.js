@@ -185,7 +185,12 @@ export class CityMode extends GameMode {
     const city = this.city;
     if (spawnAt) return _v.copy(spawnAt).clone();
     if (atPortal) {
-      const portal = city.portals.find((q) => q.rank === atPortal);
+      // atPortal is a stable portal id ('plaza-e', 'wild-wildgate_e', ...) or,
+      // from legacy callers, a bare rank. Id match first — it is exact — then
+      // rank, whose first match is always the plaza gate (built before the
+      // frontier's wild ones).
+      const portal = city.portals.find((q) => q.id === atPortal)
+        || city.portals.find((q) => q.rank === atPortal);
       if (portal) {
         // Step out of the portal toward the plaza, not on top of the dais.
         const away = _v2.set(-portal.pos.x, 0, -portal.pos.z);
@@ -349,6 +354,11 @@ export class CityMode extends GameMode {
       const gate = portal.gate || GATES.find((g) => g.rank === portal.rank);
       this._setPrompt({
         kind: 'portal',
+        // The portal's stable id rides the prompt so confirmPrompt can hand
+        // game.enterGate the exact portal — not just a rank a wild twin might
+        // share. Named portalId (not id) because interact prompts already use
+        // id for the interactable's key.
+        portalId: portal.id,
         rank: portal.rank,
         // Verge wild gates yield emberdust at ANY rank (RPG_SPEC gate3
         // recipe); game.enterGate only knows if the prompt tells it.
@@ -582,7 +592,7 @@ export class CityMode extends GameMode {
         g.ui.toast(`THIS GATE IS SEALED · REQUIRES LEVEL ${gate?.reqLevel ?? '?'}`, 'danger');
         return null;
       }
-      g.enterGate(prompt.rank, { wild: Boolean(prompt.wild) });
+      g.enterGate(prompt.rank, { wild: Boolean(prompt.wild), portalId: prompt.portalId });
       return { action: 'enterGate', rank: prompt.rank };
     }
 

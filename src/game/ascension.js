@@ -110,7 +110,7 @@ export function grantSigil(save, boss) {
  * them verbatim. Checks are ordered cheapest-story-first: what the item is,
  * then what the wallet holds.
  */
-export function canAscend(save, inst) {
+export function canForge(save, inst) {
   const m = ensureMaterials(save);
   if (!inst || !inst.baseId || !WEAPONS[inst.baseId]) return { ok: false, reason: 'NOT A WEAPON' };
   if (inst.rarity === 'legendary') return { ok: false, reason: 'ALREADY ASCENDED' };
@@ -139,7 +139,7 @@ export function canAscend(save, inst) {
  * legendary draws one more), so the item genuinely IS the one that ascended.
  */
 export function ascend(save, inst) {
-  const gate = canAscend(save, inst);
+  const gate = canForge(save, inst);
   if (!gate.ok) return { ok: false, reason: gate.reason, weapon: null };
   const m = save.materials;
   m.emberdust -= EMBERDUST_COST;

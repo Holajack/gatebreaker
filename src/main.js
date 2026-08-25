@@ -141,7 +141,7 @@ window.addEventListener('keydown', (e) => {
 // CONTINUE — used to open that list, and both should now put you in the city.
 // Overriding the one method reroutes both without editing ui.js.
 const openGateList = ui.showGates.bind(ui);
-ui.showGates = () => app.go('city', { atPortal: game.lastGateRank });
+ui.showGates = () => app.go('city', { atPortal: game.lastGatePortalId ?? game.lastGateRank });
 
 // Two buttons in ui.js hardcode "and then show the title", which is wrong once
 // the city exists: BACK out of the fast-travel list belongs to whatever opened
@@ -157,7 +157,7 @@ document.addEventListener('click', (e) => {
     if (!app.back()) app.go('title');
   } else {
     ui.hide('pause');
-    app.go('city', { atPortal: game.lastGateRank });
+    app.go('city', { atPortal: game.lastGatePortalId ?? game.lastGateRank });
   }
 }, true);
 

@@ -721,11 +721,10 @@ try {
   // same gate flow as a plaza portal, and does coming back out put you where you
   // left rather than on the plaza 200 m away?
   //
-  // Nothing in game.js or citymode.js was changed for this. The prompt, the
-  // compass and enterGate work because the wild gate is an entry in city.portals
-  // with the same shape as every other; the doorstep works because City orders
-  // the wild gate ahead of its plaza twin when the player last stood at it (see
-  // City._notePortalProximity / _promoteReturnPortal).
+  // The prompt, the compass and enterGate work because the wild gate is an
+  // entry in city.portals with the same shape as every other; the doorstep
+  // works because portals carry stable ids that ride the run payload
+  // (game.lastGatePortalId) back into citymode._spawnVector.
   const { page: gpage, errors: gerrors } = await newPhonePage(browser, { width: 900, height: 460, dpr: 1 });
   let roundTrip = null;
   try {
