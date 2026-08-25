@@ -585,6 +585,223 @@ export function rechooseClass(save, key) {
 }
 
 // ---------------------------------------------------------------------------
+// LAYER B½ — BAND UNLOCKS (Wave F.3: THE DEAD ZONE FILLS)
+// ---------------------------------------------------------------------------
+//
+// The audit's retention finding: "no new abilities are earned between level 12
+// (Bind) and 55 (archon)" — a 43-level stretch where every level-up is only
+// numbers. Three CLASS-FLAVORED riders now land inside it, each on an EXISTING
+// button through the tap/hold multiplexer the Bind slot already taught
+// (interlock.noNewButtons — no new HUD chrome, ever):
+//
+//   L18 TECHNIQUE  — hold-DASH becomes the class's signature step.
+//   L30 ATTUNEMENT — NOVA takes the class's colour and one mechanical twist.
+//   L42 OATHWORK   — hold-BIND beyond corpse range becomes a 20 s stance.
+//
+// INTERLOCK: band riders are BEHAVIOUR hooks resolved in game.js at the dash
+// / nova / Bind sites — they never enter classModifiers, applyLayers, or the
+// derived block. That is what keeps the NULL IDENTITY guarantee and the
+// PARITY MODEL untouched: an unclassed save reads null from bandsOf() and
+// runs the shipped input paths byte-identical, and the parity harness (which
+// prices derived blocks + class flags) sees no new terms. Class is chosen at
+// 20, so the L18 technique is in practice collected AT the Assay Hall for a
+// fresh save — the 18 threshold exists so the ceremony fires on the level
+// crossing for any already-classed save (reseal, migration) and so the
+// levelup panel can show the band approaching before the class is sworn.
+//
+// BALANCE LAW (the RULE_VERBS philosophy, restated per row below): riders buy
+// TEMPO, POSITIONING, or UTILITY — never a passive damage multiplier. The two
+// rows that deal damage at all (REAVER's line, BERSERKER's echo) are
+// positional payloads priced under existing sanctioned analogues (Tempest's
+// 90% bolt, Nova's own falloff) and are gated by the cooldown of the button
+// they ride.
+
+// The thresholds. Data, not scattered literals: game.js's ceremony, ui.js's
+// levelup rows and the test all read this one table.
+export const BAND_LEVELS = { technique: 18, attunement: 30, oathwork: 42 };
+
+// The hold threshold, shared with the archon slot's 0.35 s (SOVEREIGN's
+// bindHoldSeconds): the same thumb learns ONE timing for every multiplexed
+// button in the game.
+export const BAND_HOLD_SECONDS = 0.35;
+
+// The oathwork stance clock: 20 s live, 60 s cooldown (real cast-to-cast gap
+// 60 s — the cooldown starts at activation, so 40 s of downtime). Small,
+// readable buffs sized for one-third uptime.
+export const OATH_SECONDS = 20;
+export const OATH_COOLDOWN = 60;
+
+// One accent colour per class, used by the attunement recolour and the oath
+// ring. Kept adjacent to the FX vocabulary already shipped: hexweaver reuses
+// Ruin's purple, binder reuses Bind's teal, vanguard reuses the level-up
+// gold — a player who knows the game's palette reads these for free.
+export const BAND_COLORS = {
+  vanguard: 0xffc24b, berserker: 0xff5a3c, bladedancer: 0xb7f3ff,
+  hexweaver: 0xb98bff, binder: 0x35e6ff, oracle: 0xf5f0ff,
+  templar: 0xffe9a8, reaver: 0xff3b6b,
+};
+
+// L18 TECHNIQUES — the signature step, resolved inside game.js _tryDash when
+// the dash arrived via HOLD. Shares the dash's own cooldown (a technique is a
+// flavoured dash, not a second resource) and costs the 0.35 s hold — the tap
+// stays the instant panic dash, which is why the twitch verb loses nothing.
+export const BAND_TECHNIQUES = {
+  // BUDGET: pure defence/positioning. Zero damage — the plow SHOVES (direct
+  // velocity, no _damageEnemy call, so no leech/status/affinity side-channel)
+  // and the extended invuln (0.34 -> 0.64 s) covers the travel of a dash the
+  // class's -20% distance already shortened.
+  vanguard: {
+    key: 'plow', name: 'BULWARK PLOW',
+    params: { invulnAdd: 0.30, plowHalfWidth: 1.4, plowShove: 9, plowStagger: 0.25 },
+  },
+  // BUDGET: gap-close tempo. The dash grows and STEERS at the nearest enemy —
+  // no damage, no i-frame change; the payoff is arriving in swing range of a
+  // fight the class must reach to feed its rage.
+  berserker: {
+    key: 'close', name: 'RECKLESS CLOSE',
+    params: { distanceMul: 1.45, seekRange: 12 },
+  },
+  // BUDGET: tempo. One follow-up dash inside 1.5 s skips its cooldown — a
+  // double-step, not a damage term, on the class whose whole card is dashes.
+  bladedancer: {
+    key: 'afterstep', name: 'AFTERSTEP',
+    params: { chainSeconds: 1.5 },
+  },
+  // BUDGET: control. The step leaves a 2 s snare wisp AT THE ORIGIN — enemies
+  // inside 3 m act and move at half speed (the Rime edt lever, one stack's
+  // worth of shape at zero stacks of damage). The wisp marks where you WERE:
+  // a disengage tool, not a bomb.
+  hexweaver: {
+    key: 'wisp', name: 'WISPSNARE',
+    params: { radius: 3, seconds: 2, snareMul: 0.5, snareTouch: 0.25 },
+  },
+  // BUDGET: army positioning. Fielded soldiers re-form at the dash's arrival
+  // point — no HP price, no damage, just the Legion Step's placement verb
+  // without its detonation. The general repositions the wall in one gesture.
+  binder: {
+    key: 'cohort', name: 'COHORT STEP',
+    params: { ring: 2.0 },
+  },
+  // BUDGET: timing forgiveness. The signature dash's perfect-dodge window is
+  // extended (+240 ms on top of derived.dodgeWindow) — the class that has
+  // already seen the fight gets longer to prove it. Utility on the dodge
+  // ruling only; i-frames are unchanged.
+  oracle: {
+    key: 'readstep', name: 'READ STEP',
+    params: { dodgeWindowAdd: 0.24 },
+  },
+  // BUDGET: resource tempo. The step restores 8% of max MP — sized against
+  // the class's +25% skill-mana drawback so oathful dashing funds roughly one
+  // extra Ruin per two dashes, never a rotation by itself.
+  templar: {
+    key: 'litanystep', name: 'LITANY STEP',
+    params: { mpFrac: 0.08 },
+  },
+  // BUDGET: positional damage — the one sanctioned payload shape (Tempest's
+  // bolt at 90% atk with NO cooldown is the ceiling; this is 60% gated by the
+  // full dash cd and a 0.35 s hold). noStatus + origin 'skill' like every
+  // path-generated blast: the line must not chain statuses or eat ANSWER.
+  reaver: {
+    key: 'reavingline', name: 'REAVING LINE',
+    params: { lineAtkPct: 0.60, halfWidth: 1.1, knockback: 2 },
+  },
+};
+
+// L30 ATTUNEMENTS — Nova takes the class's colour plus ONE mechanical twist,
+// resolved inside game.js _tryNova. The twist vocabulary is radius / element
+// / echo (the spec's list); each row names which it drew.
+export const BAND_ATTUNEMENTS = {
+  // ELEMENT twist. BUDGET: positioning — the blast wave reverses: enemies are
+  // DRAGGED IN (negative knockback), trading Nova's shipped breathing room
+  // for a gathered kill-box the slow class can actually reach. Damage terms
+  // untouched.
+  vanguard: { key: 'muster', name: 'MUSTER NOVA', params: { knockback: -8 } },
+  // ECHO twist. BUDGET: the sanctioned second pulse — 45% of the original
+  // per-target roll, 0.7 s later, same radius, no falloff stacking (the echo
+  // re-prices distance itself). Sized under Nova's own 0.45 falloff span so
+  // echo + fringe never exceeds one point-blank hit.
+  berserker: { key: 'echo', name: 'ECHOING NOVA', params: { echoFrac: 0.45, echoDelay: 0.7 } },
+  // ELEMENT twist. BUDGET: pure tempo — casting Nova refunds the dash
+  // cooldown (a 1.05 s clock for this class). An escape rhythm, not a number.
+  bladedancer: { key: 'quickening', name: 'QUICKENING NOVA', params: { dashReset: true } },
+  // ELEMENT twist. BUDGET: control — enemies the blast touches are snared
+  // (half action/move speed, the WISPSNARE lever) for 2 s. No damage change.
+  hexweaver: { key: 'snarenova', name: 'BINDING LATTICE', params: { snareSeconds: 2, snareMul: 0.5 } },
+  // ELEMENT twist. BUDGET: utility — the blast MENDS fielded soldiers for 25%
+  // of their max HP. Sustain for an army the class's own -20% atk cannot
+  // simply re-summon mid-room.
+  binder: { key: 'mending', name: 'MENDING NOVA', params: { healShadowFrac: 0.25 } },
+  // RADIUS twist. BUDGET: reach + a longer stagger (+0.3 s) — the class that
+  // reads wind-ups gets a wider interrupt, never a bigger number.
+  oracle: { key: 'farsight', name: 'FAR-SIGHT NOVA', params: { radiusMul: 1.25, staggerAdd: 0.3 } },
+  // ELEMENT twist. BUDGET: sustain utility — the cast consecrates, healing
+  // the player 8% of max HP through _healPlayer (the one taxed heal seam).
+  // Sized against Nova's 8.5 s cd: ~0.9% max HP per second at perfect use.
+  templar: { key: 'reliquary', name: 'RELIQUARY NOVA', params: { healFrac: 0.08 } },
+  // RADIUS twist. BUDGET: tempo-coupled reach — +5% radius per live kill
+  // stack (max +25% at 5). The blast grows only while the momentum the class
+  // lives on is actually live; standing still buys the shipped radius.
+  reaver: { key: 'surge', name: 'RIDING SURGE', params: { radiusPerStack: 0.05 } },
+};
+
+// L42 OATHWORK — hold-BIND with no bindable corpse in reach becomes the
+// class's 20 s stance (OATH_SECONDS / OATH_COOLDOWN above). The gesture rides
+// the summon slot's UNASCENDED branch only: at 55+ the archon tag claims the
+// slot ABOVE it (tap = ultimate, hold = Bind — game.js's archon multiplexer
+// wins by branch order), so the stance is a 42-to-ascension bridge by
+// construction, exactly the stretch the audit named.
+export const BAND_OATHS = {
+  // BUDGET: positioning defence — knockback immunity for the stance. The
+  // wall stops being movable; damage intake is untouched (DR/caps unchanged).
+  vanguard: { key: 'ironside', name: 'IRONSIDE OATH', params: { knockImmune: true } },
+  // BUDGET: cadence — +12% attack speed on the swing CLOCK (the SLIPSTREAM /
+  // Quick-affix lever: windup, active, recovery compress together). Tempo,
+  // not a damage term; sized at one-third of SLIPSTREAM's burst because it
+  // runs twenty seconds, not 0.6.
+  berserker: { key: 'wartempo', name: 'WAR TEMPO', params: { atkSpeedPct: 0.12 } },
+  // BUDGET: tempo — dash cooldown halved for the stance. On this class that
+  // is 1.05 s -> 0.53 s: a dance window, still above the 0.5 s hard floor.
+  bladedancer: { key: 'veil', name: 'VEIL OATH', params: { dashCdMul: 0.5 } },
+  // BUDGET: rotation tempo — Ruin/Nova cooldowns TICK 30% faster (the clock
+  // runs quick; the prices and damage stay printed). Roughly one extra Ruin
+  // per stance at Ruin's 4.2 s cd.
+  hexweaver: { key: 'weave', name: 'WEAVE OATH', params: { skillCdTickMul: 1.3 } },
+  // BUDGET: utility headcount — +2 field capacity for the stance, joining the
+  // same EARNED term as the class's own +2 (quality.js maxFieldShadows and
+  // the hard 12 still rule, so a low tier grants nothing and that is fine).
+  binder: { key: 'legionoath', name: 'LEGION OATH', params: { fieldAdd: 2 } },
+  // BUDGET: timing forgiveness — +60 ms on the perfect-dodge window at the
+  // dash site for the stance. Stacks with READ STEP only on the held dash,
+  // and the ruling window still ends with the i-frames it rides.
+  oracle: { key: 'auguroath', name: 'AUGUR OATH', params: { dodgeWindowAdd: 0.06 } },
+  // BUDGET: resource tempo — MP regen x1.6 for the stance (multiplies the
+  // derived field at its consumption site; the block itself is untouched).
+  templar: { key: 'litanyoath', name: 'LITANY OATH', params: { mpRegenMul: 1.6 } },
+  // BUDGET: tempo preservation — the kill-stack window does not lapse during
+  // the stance (stacks still cap at 5 and still die with the run). Buys the
+  // class its momentum across a dry corridor, never a bigger number.
+  reaver: { key: 'hungeroath', name: 'HUNGER OATH', params: { killStackFreeze: true } },
+};
+
+/**
+ * The three band riders this save has LIVE, or null per slot. Class-flavoured
+ * by design: an unclassed save reads all-null whatever its level (the riders
+ * are the class's, not the level's), which is what keeps every pre-class
+ * input path byte-identical. Pure and THREE-free like everything here — the
+ * node suite drives it directly.
+ */
+export function bandsOf(save) {
+  const cls = CLASSES[save?.className];
+  if (!cls) return { technique: null, attunement: null, oathwork: null };
+  const lv = save.level || 0;
+  return {
+    technique: lv >= BAND_LEVELS.technique ? BAND_TECHNIQUES[cls.key] : null,
+    attunement: lv >= BAND_LEVELS.attunement ? BAND_ATTUNEMENTS[cls.key] : null,
+    oathwork: lv >= BAND_LEVELS.oathwork ? BAND_OATHS[cls.key] : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // LAYER C — ARCHONS
 // ---------------------------------------------------------------------------
 

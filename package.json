@@ -42,7 +42,8 @@
     "test:dungeon-gen": "node tools/dungeon-gen-test.mjs",
     "test:dungeon": "node tools/dungeon-test.mjs",
     "test:visual": "node tools/visual-test.mjs",
-    "test:creatures-live": "node tools/creature-test.mjs"
+    "test:creatures-live": "node tools/creature-test.mjs",
+    "test:talk": "node tools/talk-smoke.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^6.2.0",

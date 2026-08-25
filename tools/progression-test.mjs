@@ -9,12 +9,17 @@
 import {
   GATES, STATS, LEVEL_CAP, POINTS_PER_LEVEL, AUTO_STAT_PER_LEVEL,
   SHADOW_GRADES, xpForLevel, derive, rankOf, gateIndexOfRank, ENEMY_TYPES,
+  scaleEnemy, POST53_XP_LEVEL, POST53_XP_GROWTH, DAILY_CONTRACT_POINTS,
+  STREAK_BONUS_CAP, WEEKLY_HUNT_XP_MULT,
 } from '../src/game/config.js';
 import { freshSave, migrate, SCHEMA_VERSION } from '../src/core/save.js';
 import {
   grantXp, allocate, canAllocate, respecCost, respec, effectiveStat,
   shadowRosterCapacity, shadowFieldCapacity, extractionChance,
   dailyKey, dailyState, tickDaily, claimDaily,
+  localDayNumber, dailyStreak, streakBonus,
+  weeklyKey, weeklyContract, weeklyState, tickWeekly, claimWeekly,
+  WEEKLY_KINDS, WEEKLY_TARGETS,
   classTrialAvailable, awardClassTier, MAX_EXTRACT_ATTEMPTS, DAILY_TARGET,
 } from '../src/game/progression.js';
 import {
@@ -196,6 +201,155 @@ section('DAILY CONTRACT');
   const tomorrow = now + 24 * 3600 * 1000;
   ok(dailyState(s, tomorrow).expired && dailyState(s, tomorrow).progress === 0, 'the contract resets the next day');
   ok(dailyState(s, now).target === DAILY_TARGET, 'the target is the exported constant');
+}
+
+// ------------------------------------------------------------------ streaks
+// Wave F.4. RETARGET NOTE: the shipped daily paid a flat +3 with no memory of
+// yesterday; the 'claiming pays 3 points' assert above still holds VERBATIM
+// because day one of a chain pays base + bonus(streak 1) = 3 + 0 — the streak
+// layer is byte-invisible until day two, by construction.
+section('DAILY STREAKS');
+{
+  const s = freshSave();
+  const base = Date.parse('2026-08-06T10:00:00'); // mid-morning: ±1h DST noise can't cross midnight
+  const at = (days) => base + days * 24 * 3600 * 1000;
+  const fulfill = (days) => { tickDaily(s, DAILY_TARGET, at(days)); return claimDaily(s, at(days)); };
+  const claimPays = (days) => {
+    const before = s.points;
+    ok(fulfill(days), `day ${days} claim succeeds`);
+    return s.points - before;
+  };
+  ok(claimPays(0) === DAILY_CONTRACT_POINTS, 'day one pays the shipped 3 (streak bonus 0)');
+  ok(s.daily.streak === 1 && s.daily.lastClaimDay === localDayNumber(at(0)), 'day one arms the chain');
+  ok(claimPays(1) === 4, 'day two pays 3 + 1');
+  ok(claimPays(2) === 5, 'day three pays 3 + 2');
+  ok(claimPays(3) === 6, 'day four pays 3 + 3 (the cap)');
+  ok(claimPays(4) === 6, `day five stays capped at +${STREAK_BONUS_CAP}`);
+  ok(s.daily.streak === 5, 'the counter itself keeps counting past the cap', String(s.daily.streak));
+  ok(dailyStreak(s, at(4)) === 5, 'dailyStreak reports a live chain');
+  ok(dailyStreak(s, at(5)) === 5, 'still live the morning after (extendable today)');
+  ok(dailyStreak(s, at(6)) === 0, 'a skipped day reads as 0 — the strip never shows a dead chain');
+  ok(claimPays(6) === 3, 'the claim after a gap resets to the base payout');
+  ok(s.daily.streak === 1, 'and the chain restarts at one');
+  // A clock rolled backwards forges nothing: prev day ordinal > claim day.
+  const back = freshSave();
+  tickDaily(back, DAILY_TARGET, at(3)); claimDaily(back, at(3));
+  tickDaily(back, DAILY_TARGET, at(1)); claimDaily(back, at(1));
+  ok(back.daily.streak === 1, 'a backwards clock resets rather than extends');
+}
+
+// ------------------------------------------------------------- weekly hunt
+section('THE WEEKLY HUNT  (Wave F.4)');
+{
+  const base = Date.parse('2026-08-06T10:00:00'); // Thursday; 2026-08-03 was a Monday
+  const at = (days) => base + days * 24 * 3600 * 1000;
+  // Monday-aligned week fold: Thu 08-06 and Sun 08-09 share a week; Mon 08-10
+  // opens the next one, exactly +1.
+  const w0 = weeklyKey(base);
+  ok(weeklyKey(Date.parse('2026-08-09T23:00:00')) === w0, 'Sunday night is still the same week');
+  ok(weeklyKey(Date.parse('2026-08-10T01:00:00')) === w0 + 1, 'Monday is the next week ordinal');
+  // Determinism without an RNG stream: the contract is pure modulo over the
+  // week ordinal — the same week asks the same hunt on every device.
+  ok(WEEKLY_KINDS.length === 3, 'three modifier kinds rotate');
+  // RETARGET (review fix landed after this suite): the rotation is plain
+  // modulo for a save that can PROGRESS every kind — an anomaly week
+  // degrades to 'wild' below B's reqLevel 19, because handing a sub-19 save
+  // a contract it cannot legally advance was a dead ledger strip for seven
+  // days. Both sides asserted: the eligible save sees the raw rotation, the
+  // fresh save sees anomaly resolved to wild and everything else untouched.
+  const eligible = () => Object.assign(freshSave(), { level: 19 });
+  for (let k = 0; k < 3; k++) {
+    const raw = WEEKLY_KINDS[(w0 + k) % 3];
+    ok(weeklyContract(eligible(), w0 + k).kind === raw,
+      `week ${w0 + k} posts ${raw} by plain modulo for a B-unlocked save`);
+    ok(weeklyContract(freshSave(), w0 + k).kind === (raw === 'anomaly' ? 'wild' : raw),
+      `week ${w0 + k} resolves to ${raw === 'anomaly' ? 'wild (degraded)' : raw} for a fresh save`);
+  }
+  // A fresh save's boss week can only name the one gate it has unlocked.
+  const bossWeekOff = [0, 1, 2].find((k) => WEEKLY_KINDS[(w0 + k) % 3] === 'boss');
+  const bossNow = at(bossWeekOff * 7);
+  ok(weeklyContract(freshSave(), w0 + bossWeekOff).boss === 'warden',
+    'a level-1 save is only ever sent after the Warren\'s boss');
+  // The stamp freezes the contract: level up mid-week, the target holds.
+  {
+    const s = freshSave();
+    ok(weeklyState(s, bossNow).expired, 'an untouched week reads as expired');
+    ok(tickWeekly(s, { boss: 'warden' }, bossNow) === false, 'one fell of two does not complete');
+    ok(s.weekly.boss === 'warden' && s.weekly.target === WEEKLY_TARGETS.boss, 'the contract is stamped at first tick');
+    s.level = 100; // mid-week growth
+    ok(tickWeekly(s, { boss: 'archon' }, bossNow) === false, 'the wrong head never counts — the stamp is frozen');
+    ok(tickWeekly(s, { boss: 'warden' }, bossNow) === true, 'the stamped head completes at target');
+    const st = weeklyState(s, bossNow);
+    ok(st.progress === 2 && !st.claimed && !st.expired, 'state reflects the banked progress');
+  }
+  // wild / anomaly weeks count ONLY their modifier.
+  {
+    const wildOff = [0, 1, 2].find((k) => WEEKLY_KINDS[(w0 + k) % 3] === 'wild');
+    const now = at(wildOff * 7);
+    const s = freshSave();
+    tickWeekly(s, { wild: false, anomaly: true, boss: 'warden' }, now);
+    ok(s.weekly.progress === 0, 'a plain (even anomalous) clear does not advance a wild week');
+    for (let i = 0; i < WEEKLY_TARGETS.wild - 1; i++) tickWeekly(s, { wild: true }, now);
+    ok(tickWeekly(s, { wild: true }, now) === true, `${WEEKLY_TARGETS.wild} wild clears complete a wild week`);
+  }
+  // Claim: XP sized off xpForLevel at the CLAIMANT's level (questXp
+  // philosophy, weekly-large), +1 respec token, auto-claim-once semantics.
+  {
+    const s = freshSave();
+    s.level = 60;
+    const anomOff = [0, 1, 2].find((k) => WEEKLY_KINDS[(w0 + k) % 3] === 'anomaly');
+    const now = at(anomOff * 7);
+    for (let i = 0; i < WEEKLY_TARGETS.anomaly; i++) tickWeekly(s, { anomaly: true }, now);
+    ok(claimWeekly(freshSave(), now) === 0, 'an untouched save has nothing to claim');
+    const xp = claimWeekly(s, now);
+    ok(xp === Math.round(xpForLevel(60) * WEEKLY_HUNT_XP_MULT),
+      `the grant is xpForLevel(level) x ${WEEKLY_HUNT_XP_MULT}`, String(xp));
+    ok(s.respecTokens === 1, 'the claim banks one respec token');
+    ok(claimWeekly(s, now) === 0, 'it cannot be claimed twice');
+    // Next week: clean slate, new contract.
+    const nextWeek = now + 7 * 24 * 3600 * 1000;
+    const st = weeklyState(s, nextWeek);
+    ok(st.expired && st.progress === 0 && !st.claimed, 'the hunt resets the next week');
+    ok(st.kind === WEEKLY_KINDS[(weeklyKey(nextWeek)) % 3], 'and rotates its modifier');
+  }
+}
+
+// ------------------------------------------------------- the ladder past 53
+// Wave F.4 RETARGET NOTE: this suite previously pinned only the PLAYER curve
+// (the SPEC_TABLE and cumulative-band asserts above, all untouched) and
+// carried no enemy-XP asserts at all — the linear 1 + (L-1)*0.12 income was
+// old truth by omission. These sections pin the new post-53 exponential term
+// AND name the old numbers it replaced, so the next retune sees both.
+section('POST-53 XP CURVE');
+{
+  const grunt = ENEMY_TYPES.grunt;
+  const oldXp = (L) => Math.floor(grunt.xp * (1 + (L - 1) * 0.12)); // the shipped linear income
+  ok(POST53_XP_LEVEL === 53 && POST53_XP_GROWTH === 1.055, 'the seam and growth constants hold');
+  // At and below the seam the pow term is G^0 = 1: byte-identical income.
+  for (const L of [1, 10, 30, 53]) {
+    ok(scaleEnemy(grunt, L).xp === oldXp(L), `grunt XP at L${L} is byte-identical to the linear curve`);
+  }
+  // Above it, the named old numbers move: 88 -> 93 at 54, 111 -> 276 at 70.
+  ok(oldXp(54) === 88 && scaleEnemy(grunt, 54).xp === 93,
+    'S-gate trash (54): old linear 88, new 93 (+5.5% at the seam)');
+  ok(oldXp(70) === 111 && scaleEnemy(grunt, 70).xp === 276,
+    'level-70 trash: old linear 111, new 276 (x2.48 where the linear term starved)');
+  ok(scaleEnemy(grunt, 54).xp > scaleEnemy(grunt, 53).xp, 'the curve stays strictly increasing across the seam');
+  // hp/atk are deliberately untouched — the cliff was income, not difficulty.
+  ok(scaleEnemy(grunt, 70).hp === Math.floor(grunt.hp * (1 + 69 * 0.19)), 'post-53 hp scaling is still linear');
+  ok(near(scaleEnemy(grunt, 70).atk, grunt.atk * (1 + 69 * 0.15), 1e-9), 'post-53 atk scaling is still linear');
+  // THE PACING PARITY — the derivation the config comment shows, re-run live.
+  // Proxy-kills for a band: sum of xpForLevel(L) / per-kill XP at matched
+  // enemy level. Old truth: 30->45 cost 2,071 proxy-kills, 53->70 cost 3,093
+  // — the 1.49x cliff the audit named. The shipped G = 1.055 lands 53->70 at
+  // 2,060 — within 3% of the 30->45 band, i.e. the same session count.
+  const proxy = (a, b, f) => { let s = 0; for (let L = a; L < b; L++) s += xpForLevel(L) / f(L); return s; };
+  const target = proxy(30, 45, (L) => scaleEnemy(grunt, L).xp); // sub-53: identical to the old curve
+  const oldCliff = proxy(53, 70, oldXp);
+  const newBand = proxy(53, 70, (L) => scaleEnemy(grunt, L).xp);
+  console.log(`  proxy-kills: 30->45 ${target.toFixed(0)}   53->70 old ${oldCliff.toFixed(0)} (x${(oldCliff / target).toFixed(2)})   new ${newBand.toFixed(0)} (x${(newBand / target).toFixed(2)})`);
+  ok(oldCliff / target > 1.45, 'the old linear curve WAS the cliff (x1.49 named)', (oldCliff / target).toFixed(3));
+  ok(Math.abs(newBand / target - 1) <= 0.03, '53->70 now paces like 30->45 to within 3%', (newBand / target).toFixed(3));
 }
 
 // -------------------------------------------------------------- class trial

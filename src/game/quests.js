@@ -134,6 +134,20 @@ export function onEvent(save, evt) {
   return out;
 }
 
+/**
+ * The first ACTIVE quest a persona gave, or null (C-TALK giver surfacing).
+ * "Active" is exactly activeQuests' definition — unlocked and not done, so a
+ * merely-offered contract surfaces too: the giver naming a contract you have
+ * not started IS the offer, and inventing a separate accepted-state here
+ * would be a new mechanic (the task's line is "no new mechanics — the
+ * journal row's giver is already data; just the line acknowledging it").
+ * First match only: QUESTS is authored in campaign order, and a persona
+ * reciting their whole backlog breaks the three-sentence tone law.
+ */
+export function giverQuest(save, giver) {
+  return activeQuests(save).find((q) => q.giver === giver) || null;
+}
+
 /** The journal view: active with progress, then done ids (for the panel). */
 export function journal(save) {
   const l = ledger(save);

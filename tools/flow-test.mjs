@@ -445,7 +445,13 @@ async function walkTo(page, tx, tz, { timeoutMs = 40000, stopWhenPrompted = fals
         confirmVisible: Boolean(document.getElementById('cityConfirm')?.classList.contains('on')),
       };
     }, [tx, tz]);
-    if (stopWhenPrompted && last.prompt) break;
+    // RETARGET (C-TALK): stop on portal/door prompts only. The crowd's
+    // hunters now offer a kind:'talk' prompt within a couple of metres, and
+    // the walk path crossing one is legitimate, timing-dependent city life —
+    // this walk's assertion is "the E PORTAL prompts", and talk is defined
+    // to never mask a portal (priority portal > door > talk), so walking on
+    // through a chat offer is exactly what a player would do.
+    if (stopWhenPrompted && last.prompt && last.prompt.kind !== 'talk') break;
     if (last.d < 1.5) break;
     await page.waitForTimeout(110);
   }

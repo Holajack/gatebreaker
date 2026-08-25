@@ -11,7 +11,16 @@
 // the city UI's button row / pause menu; '#journal' joins the back chain.
 
 import { journal, QUESTS } from '../game/quests.js';
-import { dailyState } from '../game/progression.js';
+// THE LADDER PAST 53 (Wave F.4): the ledger strip grows the streak flame
+// count, and the weekly hunt gets its own strip below it — the same surface
+// the daily earned in Wave C, because a contract with no surface is a
+// contract nobody hunts. weeklyState is the pure read side (never writes;
+// an unstamped week shows the contract tickWeekly WILL stamp). BOSSES is the
+// display-name table for boss-week targets — config is THREE-free, so the
+// import costs the panel nothing.
+import { dailyState, dailyStreak, weeklyState } from '../game/progression.js';
+import { BOSSES } from '../game/config.js';
+import { t } from '../game/strings.js';
 
 const CSS = `
 #journal { z-index: var(--z-modal); }
@@ -42,6 +51,7 @@ export class JournalUI {
     this._root = null;
     this._list = null;
     this._daily = null;
+    this._weekly = null;
     this._doneRow = null;
   }
 
@@ -66,6 +76,13 @@ export class JournalUI {
     this._daily = document.createElement('div');
     this._daily.className = 'jr-daily';
     panel.appendChild(this._daily);
+
+    // The weekly hunt strip (Wave F.4) — same class, same sheet, stacked
+    // directly under the daily so the two contract cadences read as one
+    // ledger family rather than two mechanics.
+    this._weekly = document.createElement('div');
+    this._weekly.className = 'jr-daily';
+    panel.appendChild(this._weekly);
 
     this._list = document.createElement('div');
     panel.appendChild(this._list);
@@ -136,15 +153,42 @@ export class JournalUI {
   _render() {
     const save = this.game.save;
 
-    // Guild Ledger strip.
+    // Guild Ledger strip. The streak flame count (Wave F.4) rides the label
+    // side as its own element — dailyStreak owns the honesty of the number
+    // (0 the moment the chain breaks), so the strip renders it only when a
+    // live chain exists and never shows a stale integer.
     const d = dailyState(save);
     this._daily.textContent = '';
     const lab = document.createElement('span');
     lab.textContent = 'GUILD LEDGER';
+    const flames = dailyStreak(save);
+    if (flames > 0) {
+      const fl = document.createElement('b');
+      fl.textContent = `  ${t('ladder.streak.flame', { flames })}`;
+      lab.appendChild(fl);
+    }
     const val = document.createElement('b');
     val.textContent = d.claimed ? 'FULFILLED TODAY' : `${d.progress} / ${d.target} GATES`;
     this._daily.appendChild(lab);
     this._daily.appendChild(val);
+
+    // Weekly hunt strip (Wave F.4). Contract line + progress, or the
+    // fulfilled stamp; the ' · ' join of two mechanical fragments is the F.3
+    // band-row precedent. Boss-week targets render the BOSSES display name —
+    // the save stores the stable key, the player reads the head's name.
+    const w = weeklyState(save);
+    this._weekly.textContent = '';
+    const wlab = document.createElement('span');
+    wlab.textContent = t('ladder.weekly.title');
+    const wval = document.createElement('b');
+    const desc = t(`ladder.weekly.desc.${w.kind}`, {
+      target: w.target, boss: BOSSES[w.boss]?.name ?? w.boss,
+    });
+    wval.textContent = w.claimed
+      ? t('ladder.weekly.fulfilled')
+      : `${desc}  ·  ${t('ladder.weekly.progress', w)}`;
+    this._weekly.appendChild(wlab);
+    this._weekly.appendChild(wval);
 
     // Active quests as .gate rows (the shipped list-row class).
     this._list.textContent = '';

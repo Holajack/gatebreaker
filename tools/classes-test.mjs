@@ -38,6 +38,14 @@ import {
   archonResourceRules, archonFieldBonus,
   ASSAY_SEAL_COST, canRechooseClass, rechooseClass, rechooseCost,
 } from '../src/game/classes.js';
+// BAND UNLOCKS (Wave F.3: THE DEAD ZONE FILLS) — the 18/30/42 riders. Data +
+// bandsOf are node-testable exactly like the roster; the runtime seams are
+// asserted by the source-grep tripwire pattern the CLASS FLAGS section
+// established (same rationale: round 1 shipped inert terms).
+import {
+  BAND_LEVELS, BAND_HOLD_SECONDS, BAND_COLORS, OATH_SECONDS, OATH_COOLDOWN,
+  BAND_TECHNIQUES, BAND_ATTUNEMENTS, BAND_OATHS, bandsOf,
+} from '../src/game/classes.js';
 import { readFileSync } from 'node:fs';
 
 let pass = 0;
@@ -1253,6 +1261,162 @@ section('CLASS FLAGS ARE CONSUMED  (every card term has a runtime seam — the r
     "progression.js prices BINDER's roster +25% inside the one capacity read");
   ok(gameSrc.includes('_healPlayer'),
     'incidental heals route through the one healing seam the tax prices');
+}
+
+// =========================================================================
+// WAVE F.3 — BAND UNLOCKS (THE DEAD ZONE FILLS). The audit line this wave
+// answers: "no new abilities are earned between level 12 (Bind) and 55
+// (archon)". Three class-flavoured riders at 18/30/42, data in classes.js,
+// resolved at the existing dash/nova/Bind sites. Node-testable exactly like
+// the roster; the runtime seams get the CLASS-FLAGS-style source tripwire
+// (round 1's lesson: a term without a greppable consumer ships inert).
+// =========================================================================
+section('BAND DATA  (three tables x eight classes; thresholds inside the dead zone)');
+{
+  ok(BAND_LEVELS.technique === 18 && BAND_LEVELS.attunement === 30 && BAND_LEVELS.oathwork === 42,
+    'the bands land at 18 / 30 / 42', JSON.stringify(BAND_LEVELS));
+  const lvls = Object.values(BAND_LEVELS);
+  ok(lvls.every((l) => l > 12 && l < 55),
+    'every band sits strictly inside the 12-55 dead zone the audit named');
+  // One thumb, one timing: the dash and oath holds use the SAME threshold the
+  // archon slot taught. Asserted against the shipped constant, not a copy.
+  ok(BAND_HOLD_SECONDS === ARCHONS.shadow.sovereignsWill.bindHoldSeconds,
+    'the band hold threshold IS the archon slot\'s 0.35 s', String(BAND_HOLD_SECONDS));
+  ok(OATH_SECONDS === 20 && OATH_COOLDOWN === 60, 'the oath stance is 20 s on a 60 s clock');
+  const classKeys = Object.keys(CLASSES);
+  for (const [label, table] of [
+    ['BAND_TECHNIQUES', BAND_TECHNIQUES], ['BAND_ATTUNEMENTS', BAND_ATTUNEMENTS], ['BAND_OATHS', BAND_OATHS],
+  ]) {
+    ok(classKeys.every((k) => table[k] && typeof table[k].name === 'string' && table[k].params),
+      `${label} carries a named rider with params for all eight classes`);
+  }
+  ok(classKeys.every((k) => typeof BAND_COLORS[k] === 'number'),
+    'every class has a band accent colour');
+  // All 24 rider names are distinct, and none collides with a mastery or a
+  // class name — the panel and the toasts must never show the same word for
+  // two different things.
+  const riderNames = [BAND_TECHNIQUES, BAND_ATTUNEMENTS, BAND_OATHS]
+    .flatMap((tb) => Object.values(tb).map((r) => r.name));
+  const reserved = new Set([
+    ...Object.values(DIRECTIONS).flatMap((d) => d.masteries.map((m) => m.name)),
+    ...CLASS_LIST.map((c) => c.name),
+  ]);
+  ok(new Set(riderNames).size === 24, 'all 24 rider names are distinct', String(new Set(riderNames).size));
+  ok(riderNames.every((n) => !reserved.has(n)), 'no rider name collides with a mastery or class name');
+  // THE BALANCE LAW: riders are tempo/positioning/utility. Exactly two rows
+  // carry a damage payload, both positional, both priced under sanctioned
+  // ancestors: REAVER's line under Tempest's 0.9 bolt, BERSERKER's echo
+  // under Nova's own 0.45 falloff span (echo + fringe <= one point-blank).
+  const dmgRows = [];
+  for (const tb of [BAND_TECHNIQUES, BAND_ATTUNEMENTS, BAND_OATHS]) {
+    for (const [k, row] of Object.entries(tb)) {
+      if (row.params.lineAtkPct || row.params.echoFrac) dmgRows.push(`${k}.${row.key}`);
+    }
+  }
+  ok(dmgRows.length === 2 && dmgRows.includes('reaver.reavingline') && dmgRows.includes('berserker.echo'),
+    'exactly two damage payloads exist in the band tables (the two sanctioned positional ones)',
+    JSON.stringify(dmgRows));
+  ok(BAND_TECHNIQUES.reaver.params.lineAtkPct <= 0.9,
+    'REAVER\'s line sits under the Tempest bolt ceiling (0.9)');
+  ok(BAND_ATTUNEMENTS.berserker.params.echoFrac <= 0.45,
+    'BERSERKER\'s echo sits inside Nova\'s own falloff span (0.45)');
+}
+
+section('BANDS OF  (class-flavoured: unclassed reads all-null at any level; classed fills per threshold)');
+{
+  const s = freshSave();
+  s.level = 70;
+  const none = bandsOf(s);
+  ok(none.technique === null && none.attunement === null && none.oathwork === null,
+    'an UNCLASSED level-70 save reads all-null — the riders are the class\'s, not the level\'s');
+  s.className = 'hexweaver';
+  s.level = 17;
+  const b17 = bandsOf(s);
+  ok(b17.technique === null && b17.attunement === null && b17.oathwork === null,
+    'a classed save under 18 reads all-null');
+  s.level = 18;
+  ok(bandsOf(s).technique === BAND_TECHNIQUES.hexweaver && bandsOf(s).attunement === null,
+    'level 18 lights the technique only');
+  s.level = 30;
+  ok(bandsOf(s).attunement === BAND_ATTUNEMENTS.hexweaver && bandsOf(s).oathwork === null,
+    'level 30 adds the attunement');
+  s.level = 42;
+  const b42 = bandsOf(s);
+  ok(b42.technique === BAND_TECHNIQUES.hexweaver && b42.attunement === BAND_ATTUNEMENTS.hexweaver
+    && b42.oathwork === BAND_OATHS.hexweaver,
+    'level 42 completes all three riders');
+  // INTERLOCK: the band layer is behaviour-only. The derived block of a
+  // banded save is IDENTICAL to the same save's block before the wave —
+  // bandsOf feeds game.js hooks and never enters classModifiers/applyLayers,
+  // which is what keeps the parity model's pricing untouched.
+  const mods = classModifiers(s);
+  const flagKeys = Object.keys(mods.flags);
+  ok(!flagKeys.some((k) => /band|oath|technique|attunement/i.test(k)),
+    'classModifiers carries NO band terms — the parity model never sees the riders');
+}
+
+section('BAND SEAMS ARE CONSUMED  (the CLASS-FLAGS tripwire, extended: every rider has a runtime home)');
+{
+  const gameSrc = readFileSync(new URL('../src/game/game.js', import.meta.url), 'utf8');
+  const uiSrc = readFileSync(new URL('../src/ui/ui.js', import.meta.url), 'utf8');
+  const stringsSrc = readFileSync(new URL('../src/game/strings.js', import.meta.url), 'utf8');
+  const seams = [
+    ['_bands = bandsOf', 'the cache at the single computation site'],
+    ['_tryDash(true)', 'the hold-dash fires the signature step'],
+    ['_dashHoldT', 'the dash-slot hold timer'],
+    ['_tryOath', 'the oath stance verb'],
+    ['_oathHoldT', 'the Bind-slot oath hold (unascended branch)'],
+    ['BAND_HOLD_SECONDS', 'both holds read the shared threshold'],
+    ['seekRange', 'BERSERKER close steers'],
+    ['distanceMul', 'BERSERKER close reaches'],
+    ['chainSeconds', 'BLADEDANCER afterstep window'],
+    ['plowShove', 'VANGUARD plow shove'],
+    ['lineAtkPct', 'REAVER line payload'],
+    ['snareTouch', 'HEXWEAVER wisp snare'],
+    ['dodgeWindowAdd', 'ORACLE window terms (step + oath)'],
+    ['mpFrac', 'TEMPLAR litany step'],
+    ['echoFrac', 'BERSERKER echo arm'],
+    ['dashReset', 'BLADEDANCER quickening'],
+    ['healShadowFrac', 'BINDER mending'],
+    ['radiusPerStack', 'REAVER riding surge'],
+    ['knockImmune', 'VANGUARD ironside oath'],
+    ['atkSpeedPct', 'BERSERKER war tempo on the swing clock'],
+    ['dashCdMul', 'BLADEDANCER veil oath'],
+    ['skillCdTickMul', 'HEXWEAVER weave oath'],
+    ['mpRegenMul', 'TEMPLAR litany oath'],
+    ['killStackFreeze', 'REAVER hunger oath'],
+    ['oathwork?.fieldAdd', 'BINDER legion oath (the earned-term seam)'],
+    ['band.unlock.', 'the crossing ceremony toasts'],
+    ['e.snareT', 'the snare rides the enemy action clock'],
+    // Review extension: the first needle list left 13 consumed params
+    // untripped — future inertness of any of these would not have failed.
+    ['invulnAdd', 'ORACLE ruling i-frame term'],
+    ['plowStagger', 'VANGUARD plow stumble'],
+    ['plowHalfWidth', 'VANGUARD plow lane width'],
+    ['halfWidth', 'REAVER line lane width'],
+    ['snareMul', 'HEXWEAVER snare slow factor'],
+    ['snareSeconds', 'HEXWEAVER wisp duration'],
+    ['echoDelay', 'BERSERKER echo timing'],
+    ['radiusMul', 'ORACLE widened nova'],
+    ['staggerAdd', 'ORACLE nova stagger term'],
+    ['healFrac', 'TEMPLAR consecrate heal'],
+    ['rodeAfterstep', 'the afterstep consume-vs-rearm gate (review blocker fix)'],
+  ];
+  for (const [needle, label] of seams) {
+    ok(gameSrc.includes(needle), `game.js consumes ${label} (${needle})`);
+  }
+  ok(uiSrc.includes('band.row.') && uiSrc.includes('bandsOf'),
+    'ui.js lists the band rows on the levelup panel');
+  for (const key of ['band.unlock.technique', 'band.unlock.attunement', 'band.unlock.oathwork',
+    'band.oath.begin', 'band.oath.notReady', 'band.row.technique']) {
+    ok(stringsSrc.includes(`'${key}'`), `strings.js carries ${key}`);
+  }
+  // Precedence: the oath gesture lives on the UNASCENDED branch only — the
+  // archon multiplexer's branch must not mention it, so at 55+ the archon
+  // tag wins the slot exactly as the band contract states. Cheap structural
+  // read: _tryOath is called exactly once in game.js.
+  ok(gameSrc.split('this._tryOath()').length === 2,
+    'the oath fires from exactly one site (the unascended Bind branch)');
 }
 
 // =========================================================================

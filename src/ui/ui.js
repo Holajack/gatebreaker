@@ -12,6 +12,11 @@ import {
 // for names/identities/resource rules; canAscend lights THE REACH line on the
 // S-gate row.
 import { ARCHONS, canAscend } from '../game/classes.js';
+// The band unlocks (Wave F.3): the levelup panel's unlock list grows three
+// rows for the 18/30/42 riders, named for the save's class once one is
+// sworn. Row labels come from strings.js like every other new surface line.
+import { bandsOf, BAND_LEVELS } from '../game/classes.js';
+import { t } from '../game/strings.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -434,6 +439,29 @@ export class UI {
     box.className = 'readout';
     box.style.marginTop = '6px';
     box.innerHTML = unlocked;
+    // The BAND rows (Wave F.3), same visual shape as the skill rows above:
+    // gesture label + the sworn class's rider name once both the level and a
+    // class exist, else the LV NN the player is climbing toward. This is the
+    // audit's "no new abilities between 12 and 55" fix made VISIBLE on the
+    // one screen every level-up already opens — the dead zone shows three
+    // more rungs. Built with textContent (markup-sink rule): rider names are
+    // classes.js constants today, and the rule does not care what we believe
+    // about inputs today.
+    const bands = bandsOf(this.save);
+    for (const [key, lvl] of Object.entries(BAND_LEVELS)) {
+      const has = this.save.level >= lvl;
+      const rider = bands[key];
+      const row = document.createElement('div');
+      row.className = 'row';
+      const label = document.createElement('span');
+      label.textContent = rider ? `${t(`band.row.${key}`)} · ${rider.name}` : t(`band.row.${key}`);
+      const status = document.createElement('b');
+      status.style.color = has ? '#4ade80' : '#8a93b8';
+      status.textContent = has ? 'UNLOCKED' : `LV ${lvl}`;
+      row.appendChild(label);
+      row.appendChild(status);
+      box.appendChild(row);
+    }
     grid.appendChild(box);
   }
 
@@ -672,8 +700,8 @@ export class UI {
       // M:SS off runTime, the same unscaled clock awardClassTier will read,
       // so what the hunter watches is exactly what the stair judges.
       // [strings] migrate the title when strings.js is free.
-      const t = Math.floor(game.runTime);
-      this.setObjective('THE STAIR', `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`);
+      const secs = Math.floor(game.runTime);
+      this.setObjective('THE STAIR', `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`);
     } else if (game.bossActive && game.boss) {
       this.setObjective(game.boss.base.name, `${Math.ceil((game.boss.hp / game.boss.maxHp) * 100)}%`);
     } else {

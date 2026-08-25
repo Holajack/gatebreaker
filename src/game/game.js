@@ -39,6 +39,11 @@ import {
   grantXp, shadowFieldCapacity, extractionChance,
   MAX_EXTRACT_ATTEMPTS, CORPSE_WINDOW,
   tickDaily, claimDaily, dailyState, DAILY_TARGET,
+  // THE LADDER PAST 53 (Wave F.4): the weekly hunt's state/tick/claim triple
+  // rides the same _clearGate funnel as the daily's; streakBonus prices what
+  // this claim actually paid (base + streak) so the printed number can never
+  // lie about the grant.
+  tickWeekly, claimWeekly, weeklyState, streakBonus,
   // THE SEALED STAIR (Wave F.2): both halves of the trial contract shipped in
   // progression.js with ZERO callers — classTrialAvailable gates the door and
   // enterClassTrial below; awardClassTier is fired exactly once, by
@@ -105,6 +110,16 @@ import { rollArmorDrop, serializeArmor, armorDerive, combinedDR } from './armor.
 // IS that consumer, via the _classFlags cache refreshDerived rebuilds.
 import {
   applyLayers, DIRECTIONS, masteryTier, classModifiers, clampSumPct,
+} from './classes.js';
+// BAND UNLOCKS (Wave F.3: THE DEAD ZONE FILLS — the 12-to-55 retention gap).
+// Three class-flavoured riders at 18/30/42, all data in classes.js and all
+// resolved HERE at the existing dash / nova / Bind sites through the tap/hold
+// multiplexer the archon slot taught (interlock.noNewButtons). Behaviour
+// hooks only — bandsOf never touches the derived block, so the NULL IDENTITY
+// and parity contracts stand untouched.
+import {
+  bandsOf, BAND_LEVELS, BAND_HOLD_SECONDS, BAND_COLORS,
+  OATH_SECONDS, OATH_COOLDOWN,
 } from './classes.js';
 // The ascension layer (CLASSES_SPEC step 7): the S gate carries THE REACH
 // trial flag, real play bumps the five affinity counters, and killing the
@@ -1037,9 +1052,14 @@ export class Game {
     // knob quality may inflate) joins the same earned term as the vigil 4pc
     // and the archon bonus — quality.js maxFieldShadows and the hard 12
     // still get the final word.
+    // LEGION OATH (band L42): +2 for the stance's 20 s, in the SAME earned
+    // term as every other field bonus — quality.js maxFieldShadows and the
+    // hard 12 still get the final word, so a low tier grants nothing here
+    // and the stance is still fine (its class's damage rides elsewhere).
     return shadowFieldCapacity(this.save, this.quality.current,
       (this._armorBonus?.shadowFieldAdd || 0) + archonFieldBonus(this.save)
-      + (this._classFlags?.fieldAdd || 0));
+      + (this._classFlags?.fieldAdd || 0)
+      + (this._oathT > 0 ? (this._bands?.oathwork?.fieldAdd || 0) : 0));
   }
 
   refreshDerived(fill = false) {
@@ -1072,6 +1092,12 @@ export class Game {
     // and the shipped path stays byte-identical.
     const cmods = classModifiers(this.save);
     this._classFlags = cmods ? cmods.flags : null;
+    // The band riders (Wave F.3), cached at the same single site for the same
+    // reason as _classFlags: they change only on level / class changes, and
+    // every such event already funnels through refreshDerived. All-null for an
+    // unclassed save, so each consumer below guards on one falsy read and the
+    // shipped input paths stay byte-identical.
+    this._bands = bandsOf(this.save);
     // BINDER's +20% shadow damage, isolated as its OWN factor for the strike
     // seam: the INT term is already inside s.atk (shadowCombat) and the
     // armour term already multiplies at the strike, so reading
@@ -1398,6 +1424,21 @@ export class Game {
     this._shadowStance = 'hunt';
     this._legionT = 0;           // LEGION STEP cooldown running down (45 s)
     this._summonHoldT = null;    // Bind-slot hold timer; null = no press live
+    // BAND-UNLOCK run state (Wave F.3). Same lifetime rule as the mastery
+    // clocks above: none of it persists — a stance or a hold that survived a
+    // gate exit would be a saved field nobody sanitises.
+    this._dashHoldT = null;      // dash-slot hold timer; null = no press live
+    this._oathHoldT = null;      // Bind-slot OATH hold (unascended branch)
+    this._oathT = 0;             // oathwork stance seconds remaining
+    this._oathCd = 0;            // oathwork cooldown running down (60 s)
+    this._afterstepT = 0;        // BLADEDANCER: free-follow-up dash window
+    // ECHOING NOVA's one pending pulse, reused across runs (residue-slot
+    // precedent: t <= 0 means empty, nothing is ever allocated per cast).
+    if (!this._novaEcho) this._novaEcho = { t: 0, x: 0, z: 0, r: 0, dmg: 0 };
+    this._novaEcho.t = 0;
+    // WISPSNARE's one field slot, same reuse rule.
+    if (!this._wisp) this._wisp = { t: 0, x: 0, z: 0 };
+    this._wisp.t = 0;
     this._lastHitTarget = null;  // FOCUS's mark: the player's last-hit enemy
     // Path run state (CLASSES_SPEC steps 9-10). _archonPath is the gate for
     // every hook below: null for SHADOW (its machinery predates the
@@ -1965,9 +2006,13 @@ export class Game {
         let kb = opts.knockback / (e.isBoss ? 6 : 1);
         kb = -Math.min(-kb, Math.max(0, (kbDist - 1.3) * 7));
         // HOOKFANG ASCENDANT (tempo verb): the pull also staggers what it
-        // drags. Player-origin only — a bound shadow swinging an axe carries
-        // no rule.
-        const ps = opts.origin !== 'shadow' ? this.weapon?.rule?.fx.pullStagger : 0;
+        // drags. WEAPON-STRIKE origin only (review nit): F.3's MUSTER NOVA
+        // made skill-origin negative knockback reachable, and a vanguard
+        // holding a hookfang axe would have gotten a stagger-everything Nova
+        // — a cross-layer stack the rule's pricing never anticipated. A
+        // bound shadow carries no rule either.
+        const ps = (opts.origin !== 'shadow' && opts.origin !== 'skill')
+          ? this.weapon?.rule?.fx.pullStagger : 0;
         if (ps) e.stagger = Math.max(e.stagger, ps);
         e.vel.addScaledVector(tmpV2, kb);
       } else {
@@ -2533,7 +2578,12 @@ export class Game {
       }
       // 1.6 m is the shipped shove; knockTakenMul (feet secondary clamped at
       // -50%, then ossuary 4pc x0.75) scales the DISTANCE the body solves for.
-      applyKnockback(p.body, tmpV2, p.body.impulseForDistance(1.6 * d.knockTakenMul));
+      // IRONSIDE OATH (band L42): the wall stops being movable for the
+      // stance — the shove is skipped whole, damage intake untouched (the
+      // flinch/lean above still plays, so a blocked shove still READS).
+      if (!(this._oathT > 0 && this._bands?.oathwork?.knockImmune)) {
+        applyKnockback(p.body, tmpV2, p.body.impulseForDistance(1.6 * d.knockTakenMul));
+      }
     }
     if (p.hp <= 0) {
       // UNYIELDING (BULWARK T3): one lethal hit per 90 s leaves 1 HP and 2 s
@@ -2642,6 +2692,22 @@ export class Game {
       // distinct toast, and a big ring in the NEW grade's portal colour. The
       // full ceremony screen is Wave G's; this makes the beat exist at all.
       this._questEvent({ type: 'levelReached', level: this.save.level });
+      // BAND-UNLOCK CEREMONY (Wave F.3): crossing 18 / 30 / 42 gets its own
+      // gold toast naming the class's rider and the gesture that fires it —
+      // refreshDerived above already rebuilt _bands, so the rider read here
+      // is the one that just went live. An unclassed crossing gets the
+      // Assay-Hall pointer line instead of silence: the level still SAYS
+      // something, which is the whole point of filling the dead zone. The
+      // levelup panel (ui.js) lists the same rows permanently.
+      for (const [bandKey, bandLv] of Object.entries(BAND_LEVELS)) {
+        if (fromLevel < bandLv && this.save.level >= bandLv) {
+          const rider = this._bands?.[bandKey];
+          this.ui.toast(t(`band.unlock.${bandKey}`, { name: rider?.name }), 'gold');
+          this.levelUpDilation = Math.max(this.levelUpDilation, 0.7);
+          this.fx.ring(this.player.pos,
+            BAND_COLORS[this.save.className] ?? 0xffc24b, 12, 1.0);
+        }
+      }
       const fromRank = rankOf(fromLevel);
       const toRank = rankOf(this.save.level);
       if (fromRank !== toRank) {
@@ -3458,9 +3524,28 @@ export class Game {
     this.fx.beamHide();
   }
 
-  _tryDash() {
+  /**
+   * The dash — and, since Wave F.3, the L18 TECHNIQUE it multiplexes into.
+   * `signature` is true only when the input site resolved a HOLD on a classed
+   * save past band 18: the same dash core runs (same cd, same i-frame law),
+   * then the class's BAND_TECHNIQUES row rides on top. Every rider is tempo /
+   * positioning / utility per the band balance law; REAVER's line is the one
+   * positional damage payload, priced under Tempest's sanctioned 90% bolt.
+   */
+  _tryDash(signature = false) {
     const p = this.player;
-    if (p.cds.dash > 0) return;
+    const tech = signature ? this._bands?.technique : null;
+    // AFTERSTEP (BLADEDANCER L18): a signature step arms a 1.5 s window in
+    // which ONE follow-up dash may ignore the cooldown gate — the window is
+    // consumed at the arming site below, so it is one free step, never a
+    // chain. Every other save reads 0 and the guard is the shipped line.
+    if (p.cds.dash > 0 && !(this._afterstepT > 0)) return;
+    // Captured HERE, spent at the bookkeeping site: whether THIS dash rode
+    // the afterstep window through a live cooldown. Review blocker — the old
+    // bookkeeping re-armed the window unconditionally on any signature dash,
+    // so a bladedancer could hold-dash forever, each free step arming the
+    // next. A window-spender never re-arms.
+    const rodeAfterstep = p.cds.dash > 0 && this._afterstepT > 0;
     // Committed means committed: while the current step's lock window runs,
     // the swing owns you and no escape is sold. This one refusal is most of
     // what "weight" means — a greataxe's lock is its whole step, a dagger's
@@ -3476,23 +3561,67 @@ export class Game {
     const dir = (mv.x || mv.z)
       ? tmpV.set(mv.x, 0, mv.z).normalize()
       : this._forward(p.yaw, tmpV);
+    // RECKLESS CLOSE (BERSERKER L18): the signature step STEERS — the nearest
+    // living enemy inside seekRange overrides the stick, because the class's
+    // whole economy needs it standing in a fight. Positioning only; a room
+    // with no target in reach dashes where the stick said.
+    if (tech?.seekRange) {
+      let best = null;
+      let bestD2 = tech.seekRange * tech.seekRange;
+      for (const e of this.enemies) {
+        if (e.hp <= 0 || e.spawning > 0) continue;
+        const dx = e.pos.x - p.pos.x;
+        const dz = e.pos.z - p.pos.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 < bestD2 && d2 > 1e-6) { bestD2 = d2; best = e; }
+      }
+      if (best) dir.set(best.pos.x - p.pos.x, 0, best.pos.z - p.pos.z).normalize();
+    }
     // Authored in world units; the body solves the impulse that travels it.
     // dashDistance/dashIframes are class-touched derived fields (VANGUARD's
     // -20% distance, BLADEDANCER's 0.34 -> 0.42 s i-frames): applyModifiers
     // seeds them from SKILLS.dash only when a class term touches them, so
     // the ?? fallback IS the shipped constant for every other save.
-    const dashDist = this.derived.dashDistance ?? SKILLS.dash.distance;
+    // RECKLESS CLOSE's x1.45 multiplies the class-priced value — a gap-close
+    // budget, applied after every derived-block term has had its say.
+    const dashDist = (this.derived.dashDistance ?? SKILLS.dash.distance)
+      * (tech?.distanceMul || 1);
+    // The line in SCALARS before any nested call: dir IS tmpV, and both the
+    // Tempest bolt below and the REAVER line consume _damageEnemy, which runs
+    // through the shared temps (the file-header aliasing lesson).
+    const dashDirX = dir.x;
+    const dashDirZ = dir.z;
     const v0 = p.body.impulseForDistance(dashDist);
     p.body.addImpulse(dir.x * v0, 0, dir.z * v0);
     p.yaw = Math.atan2(dir.x, dir.z);
-    p.invuln = Math.max(p.invuln, this.derived.dashIframes ?? SKILLS.dash.iframes);
+    // BULWARK PLOW (VANGUARD L18): the signature step's i-frames stretch
+    // +0.30 s to cover the travel of a dash the class's own -20% distance
+    // shortened. Additive on the class-priced value, signature only.
+    p.invuln = Math.max(p.invuln,
+      (this.derived.dashIframes ?? SKILLS.dash.iframes) + (tech?.invulnAdd || 0));
     p.dashTimer = 0.26;
     // A hit i-framed within this window of the dash START is a PERFECT dodge
     // (_damagePlayer's invuln branch) — derived.dodgeWindow finally consumed.
-    p._dodgeT = this.derived.dodgeWindow;
+    // READ STEP (ORACLE L18, signature only) and AUGUR OATH (ORACLE L42,
+    // every dash while the stance runs) both widen the RULING window here —
+    // timing forgiveness, never extra i-frames; both are 0 for everyone else.
+    p._dodgeT = this.derived.dodgeWindow + (tech?.dodgeWindowAdd || 0)
+      + (this._oathT > 0 ? (this._bands?.oathwork?.dodgeWindowAdd || 0) : 0);
     // derived.dashCd is SKILLS.dash.cd exactly until the issue 4pc (-0.25 s)
     // or BLADEDANCER's -0.55 s; TEMPLAR's cooldown tax multiplies on top.
-    p.cds.dash = this.derived.dashCd * this._skillCdMul();
+    // VEIL OATH (BLADEDANCER L42) halves the armed clock while the stance
+    // runs — tempo only, and the 0.5 s hard floor below every cut still
+    // holds at this class's 1.05 x 0.5 = 0.53 s.
+    p.cds.dash = this.derived.dashCd * this._skillCdMul()
+      * (this._oathT > 0 ? (this._bands?.oathwork?.dashCdMul || 1) : 1);
+    // AFTERSTEP bookkeeping: a dash fired THROUGH the live window consumes
+    // it, and ONLY a dash that did NOT spend the window may arm a fresh one
+    // (rodeAfterstep, captured at the gate). Without that condition the
+    // follow-up re-armed its own successor and the "one free step" was an
+    // infinite cooldown-free chain (review blocker). The chain is now
+    // structurally two steps: arm, spend, done.
+    if (this._afterstepT > 0) this._afterstepT = 0;
+    if (tech?.chainSeconds && !rodeAfterstep) this._afterstepT = tech.chainSeconds;
     // TEMPEST STEP (step 10): dash cooldown zero, and every dash leaves a
     // bolt that deals 90% of atk along its line. The bolt resolves NOW, down
     // the authored dash line (dir x the skill's distance) — the body solves
@@ -3530,6 +3659,98 @@ export class Game {
         this._archonFx.spawnSegment(_archV, _archV2, { life: 0.25, scale: 1.4 });
       }
       this.fx.burst(_archV2.clone().setY(0.8), 10, STORM_COLOR, { speed: 6, up: 3, life: 0.3 });
+    }
+    // ---- L18 TECHNIQUE payloads (Wave F.3) ------------------------------
+    // Resolved AFTER the core so every rider rides the same dash the player
+    // just bought (same cd, same i-frame law). The line lives in the scalars
+    // captured above — dir IS tmpV and _damageEnemy consumes the temps.
+    if (tech) {
+      const ox = p.pos.x;
+      const oz = p.pos.z;
+      const bandColor = BAND_COLORS[this.save.className] ?? 0x9dd8ff;
+      // REAVING LINE (REAVER): 60% atk to everything along the travel —
+      // the one damage payload in the band, segment math shared shape-for-
+      // shape with the Tempest bolt above (its sanctioned ancestor).
+      // BULWARK PLOW (VANGUARD): the same segment test, but the payload is a
+      // SHOVE — direct velocity away from the line plus a 0.25 s stumble, no
+      // _damageEnemy call, so no leech/status/affinity side-channel exists.
+      if (tech.lineAtkPct || tech.plowShove) {
+        const half = tech.lineAtkPct ? tech.halfWidth : tech.plowHalfWidth;
+        const dmg = tech.lineAtkPct ? this.derived.atk * tech.lineAtkPct : 0;
+        for (let i = this.enemies.length - 1; i >= 0; i--) {
+          const e = this.enemies[i];
+          if (e.hp <= 0 || e.spawning > 0) continue;
+          const ex = e.pos.x - ox;
+          const ez = e.pos.z - oz;
+          const along = Math.max(0, Math.min(dashDist, ex * dashDirX + ez * dashDirZ));
+          const dx = ex - dashDirX * along;
+          const dz = ez - dashDirZ * along;
+          const off2 = dx * dx + dz * dz;
+          if (off2 > (half + e.radius) * (half + e.radius)) continue;
+          if (tech.lineAtkPct) {
+            this._damageEnemy(e, dmg, { from: p.pos, knockback: tech.knockback, origin: 'skill', noStatus: true });
+          } else {
+            // Perpendicular shove; a dead-center enemy defaults to the
+            // dash's own right hand so the plow never divides by zero.
+            const off = Math.sqrt(off2);
+            const nx = off > 1e-4 ? dx / off : dashDirZ;
+            const nz = off > 1e-4 ? dz / off : -dashDirX;
+            // THE MASS LAW APPLIES (review fix): the raw += bypassed the
+            // poise-mass division every sanctioned knockback resolves
+            // through, so the plow moved a brute (mass 2.30) and a boss
+            // (mass 7) exactly like a grunt — precisely the "one law, no
+            // special case" the Wave D rework closed. Same division, same
+            // lazy reaction as _damageEnemy's shove branch; direction stays
+            // the plow's own perpendicular (its identity — hitAwayFrom's
+            // away-from-attacker vector would shove ALONG the dash).
+            const react = e.react
+              || (e.react = makeReaction(e.base?.poise || e.key, Boolean(e.isBoss)));
+            const shove = tech.plowShove / (react.prof?.mass || 1);
+            e.vel.x += nx * shove;
+            e.vel.z += nz * shove;
+            e.stagger = Math.max(e.stagger, tech.plowStagger);
+          }
+        }
+        _archV.set(ox + dashDirX * dashDist, 0.9, oz + dashDirZ * dashDist);
+        this.fx.burst(_archV.clone(), 12, bandColor, { speed: 5, up: 2, life: 0.35 });
+      }
+      // WISPSNARE (HEXWEAVER): the wisp marks the ORIGIN — a disengage tool.
+      // The enemy loop applies the snare while the field lives (the Rime edt
+      // lever at zero stacks of damage).
+      if (tech.seconds && tech.radius) {
+        this._wisp.t = tech.seconds;
+        this._wisp.x = ox;
+        this._wisp.z = oz;
+        _archV.set(ox, 0, oz);
+        this.fx.ring(_archV, bandColor, tech.radius, 0.5);
+      }
+      // COHORT STEP (BINDER): fielded soldiers re-form at the ARRIVAL point —
+      // the Legion Step's placement verb without its detonation or HP price.
+      // Instant and loyal: same mesh, same HP, new ground (resolved so the
+      // wall cannot be planted inside one).
+      if (tech.ring !== undefined) {
+        const ax = ox + dashDirX * dashDist;
+        const az = oz + dashDirZ * dashDist;
+        for (let i = 0; i < this.shadows.length; i++) {
+          const s = this.shadows[i];
+          if (s.reform > 0) continue; // a recalled soldier is off the field
+          const a = (i / Math.max(1, this.shadows.length)) * Math.PI * 2;
+          s.pos.x = ax + Math.sin(a) * tech.ring;
+          s.pos.z = az + Math.cos(a) * tech.ring;
+          s.pos.y = this.world.heightAt?.(s.pos.x, s.pos.z) ?? 0;
+          this.world.resolve(s.pos, s.radius, s.vel);
+          s.vel.set(0, 0, 0);
+          s.mesh.position.copy(s.pos);
+          this.fx.burst(s.pos.clone().setY(0.8), 8, bandColor, { speed: 4, up: 3, life: 0.4 });
+        }
+      }
+      // LITANY STEP (TEMPLAR): 8% of max MP back — resource tempo, sized
+      // against the class's own +25% skill-mana drawback.
+      if (tech.mpFrac) {
+        p.mp = Math.min(this.derived.maxMp, p.mp + this.derived.maxMp * tech.mpFrac);
+      }
+      // The signature's own accent, so a held step READS as one.
+      this.fx.burst(p.pos.clone().setY(0.7), 10, bandColor, { speed: 5, up: 2, life: 0.35 });
     }
     this.audio.dash();
     this.fx.burst(p.pos.clone().setY(0.7), 16, 0x9dd8ff, { speed: 4, up: 2, life: 0.4 });
@@ -3674,7 +3895,19 @@ export class Game {
     this._noteSkillCast(plan);
     p.cds.nova = sk.cd * this._skillCdMul();
 
-    const r = sk.radius;
+    // L30 ATTUNEMENT (Wave F.3): Nova takes the class's colour and ONE
+    // mechanical twist — a BAND_ATTUNEMENTS data row, resolved entirely at
+    // this site. Null for an unclassed or under-30 save, so every term below
+    // reads its shipped constant exactly.
+    const att = this._bands?.attunement;
+    // RIDING SURGE (REAVER): +5% radius per live kill stack — reach coupled
+    // to the momentum the class lives on. FAR-SIGHT (ORACLE): flat x1.25.
+    const r = sk.radius * (att?.radiusMul || 1)
+      * (att?.radiusPerStack ? 1 + (this._killStacks || 0) * att.radiusPerStack : 1);
+    // MUSTER (VANGUARD): the blast wave REVERSES — negative knockback drags
+    // enemies in. Damage terms untouched; positioning is the whole twist.
+    const novaKnock = att?.knockback ?? 14;
+    const novaStagger = 0.7 + (att?.staggerAdd || 0);
     // Snapshot: _damageEnemy can splice the dead out of this.enemies, and
     // mutating the array being iterated made Nova silently skip targets.
     let novaHits = 0;
@@ -3684,11 +3917,45 @@ export class Game {
         novaHits++;
         // Falloff keeps point-blank Nova meaningfully stronger than the fringe.
         const falloff = 1 - (d / r) * 0.45;
+        // BINDING LATTICE (HEXWEAVER): everything the blast touches is
+        // snared — the Rime edt lever (half action AND move speed), zero
+        // extra damage. Written before the damage call on purpose: a snare
+        // on a corpse would be wasted bookkeeping either way, but this
+        // ordering keeps the twist alive even if the hit kills.
+        if (att?.snareSeconds) {
+          e.snareT = Math.max(e.snareT || 0, att.snareSeconds);
+          e.snareMul = att.snareMul;
+        }
         this._damageEnemy(e, this.derived.atk * sk.dmg * this.derived.skillMul * falloff * plan.mul, {
-          knockback: 14, stagger: 0.7, from: p.pos, origin: 'skill',
+          knockback: novaKnock, stagger: novaStagger, from: p.pos, origin: 'skill',
         });
       }
     });
+    if (att) {
+      // ECHOING NOVA (BERSERKER): one pending pulse at 45%, 0.7 s later,
+      // same centre and radius — armed here, resolved by _updatePlayer's
+      // clock so it lands even mid-swing.
+      if (att.echoFrac) {
+        const E = this._novaEcho;
+        E.t = att.echoDelay;
+        E.x = p.pos.x;
+        E.z = p.pos.z;
+        E.r = r;
+        E.dmg = this.derived.atk * sk.dmg * this.derived.skillMul * att.echoFrac * plan.mul;
+      }
+      // QUICKENING (BLADEDANCER): the cast refunds the dash clock — an
+      // escape rhythm, not a number.
+      if (att.dashReset) p.cds.dash = 0;
+      // MENDING (BINDER): the blast mends fielded soldiers 25% of max HP.
+      if (att.healShadowFrac) {
+        for (const s of this.shadows) {
+          if (s.hp > 0) s.hp = Math.min(s.maxHp, s.hp + Math.round(s.maxHp * att.healShadowFrac));
+        }
+      }
+      // RELIQUARY (TEMPLAR): the cast consecrates — 8% max HP through the
+      // ONE taxed heal seam, like every other incidental heal.
+      if (att.healFrac) this._healPlayer(this.derived.maxHp * att.healFrac);
+    }
     // FLAME affinity (resonanceReading: +2 per Nova that hits 4 or more) —
     // counted on connection, not on cast: a panic Nova into empty air says
     // nothing about a cascade instinct.
@@ -3701,9 +3968,13 @@ export class Game {
       if (pr.kind === 'bolt' && pr.pos.distanceTo(p.pos) < r) this._removeProjectile(i);
     }
 
-    this.fx.ring(p.pos, 0x9dd8ff, r * 1.1, 0.55);
+    // "NOVA TAKES THE CLASS'S COLOUR" — the attunement's visible half. The
+    // inner white flash stays: it is the read for "a nova happened" across
+    // every class; only the identity ring and the spray recolour.
+    const novaColor = att ? (BAND_COLORS[this.save.className] ?? 0x9dd8ff) : 0x9dd8ff;
+    this.fx.ring(p.pos, novaColor, r * 1.1, 0.55);
     this.fx.ring(p.pos, 0xffffff, r * 0.7, 0.4);
-    this.fx.burst(p.pos.clone().setY(1), 70, 0x9dd8ff, { speed: 15, up: 6, life: 1, spread: 2 });
+    this.fx.burst(p.pos.clone().setY(1), 70, novaColor, { speed: 15, up: 6, life: 1, spread: 2 });
     this.fx.addShake(0.85);
     this.fx.addHitStop(0.08);
     this.audio.nova();
@@ -3794,6 +4065,36 @@ export class Game {
     else if (raised > 0) this.ui.toast(`BIND  ·  ${raised} CINDERBOUND RAISED`, 'gold');
     else this.ui.toast(`BIND FAILED  ·  ${failed} RESISTED`);
     this.onSave();
+  }
+
+  /**
+   * L42 OATHWORK (Wave F.3): the 20 s class stance, fired by holding the Bind
+   * slot with NO bindable corpse in reach (the input site's gesture; the
+   * range is re-checked HERE at the hold threshold so a hold that was
+   * stretching toward a far corpse can never misfire a 60 s cooldown — the
+   * hold resolves as the plain no-op Bind it always was). Only reachable on
+   * the unascended branch: at 55+ the archon multiplexer owns the slot and
+   * this method has no caller, which is the "archon wins" precedence the
+   * band contract states. The stance itself is two timers; every buff lands
+   * at an existing consumption seam, keyed off the BAND_OATHS data row.
+   */
+  _tryOath() {
+    const p = this.player;
+    const oath = this._bands?.oathwork;
+    if (!oath || this._oathT > 0) return;
+    // Bind's own 14 m reach and attempt rule FIRST (review nit): if the hold
+    // could have been a Bind, it was one, and the oath machinery stays
+    // silent — the cooldown toast below must only speak when the gesture was
+    // genuinely an oath attempt.
+    for (const c of this.corpses) {
+      if (c.attempts < MAX_EXTRACT_ATTEMPTS && c.pos.distanceTo(p.pos) < 14) return;
+    }
+    if (this._oathCd > 0) return this.ui.toast(t('band.oath.notReady'));
+    this._oathT = OATH_SECONDS;
+    this._oathCd = OATH_COOLDOWN;
+    this.ui.toast(t('band.oath.begin', { name: oath.name, seconds: OATH_SECONDS }), 'gold');
+    this.fx.ring(p.pos, BAND_COLORS[this.save.className] ?? 0xffc24b, 8, 0.7);
+    this.audio.skill();
   }
 
   // ------------------------------------------------------------ helpers
@@ -3982,7 +4283,22 @@ export class Game {
     const d = this.derived;
 
     // cooldowns
-    for (const k of Object.keys(p.cds)) if (p.cds[k] > 0) p.cds[k] = Math.max(0, p.cds[k] - dt);
+    // The live oathwork rider (band L42), read ONCE per frame for every seam
+    // below (cd tick, regen, swing clock, knockback, dash, Bind slot): null
+    // for every frame without a running stance, so each consumer pays one
+    // falsy check and the shipped numbers pass through exactly.
+    const oath = this._oathT > 0 ? this._bands?.oathwork : null;
+    // WEAVE OATH: Ruin/Nova clocks TICK 30% faster while the stance runs —
+    // the price and the printed cd stay; only the wait compresses (the HUD
+    // wipe reads the same p.cds value, so the felt wait and the shown wait
+    // agree). Dash/Bind/attack keep the plain dt: the row buys a casting
+    // rotation, not a global haste.
+    const cdMul = oath?.skillCdTickMul || 1;
+    for (const k of Object.keys(p.cds)) {
+      if (p.cds[k] <= 0) continue;
+      const step = (cdMul !== 1 && (k === 'slash' || k === 'nova')) ? dt * cdMul : dt;
+      p.cds[k] = Math.max(0, p.cds[k] - step);
+    }
     if (p.invuln > 0) p.invuln -= dt;
     if (p.hurt > 0) p.hurt -= dt;
     if (p.dashTimer > 0) p.dashTimer -= dt;
@@ -4046,14 +4362,54 @@ export class Game {
 
     // REAVER's kill-stack window (STEP 5): refresh-style — the clock re-arms
     // per kill in _killEnemy, and the WHOLE stack sheds when it lapses.
-    if (this._killStackT > 0) {
+    // HUNGER OATH (band L42): the window is FROZEN while the stance runs —
+    // stacks persist across a dry corridor. Preservation only: the cap and
+    // the per-kill re-arm are untouched, and the clock resumes where it
+    // stood the moment the stance ends.
+    if (this._killStackT > 0 && !(this._oathT > 0 && this._bands?.oathwork?.killStackFreeze)) {
       this._killStackT -= dt;
       if (this._killStackT <= 0) this._killStacks = 0;
     }
 
+    // BAND-UNLOCK clocks (Wave F.3), all on the sim step like the mastery
+    // clocks above — a stance or a chain window that hit-stop stretched would
+    // punish the rider for landing hits.
+    if (this._oathT > 0) this._oathT -= dt;
+    if (this._oathCd > 0) this._oathCd -= dt;
+    if (this._afterstepT > 0) this._afterstepT -= dt;
+    if (this._wisp?.t > 0) this._wisp.t -= dt;
+    // ECHOING NOVA's pending pulse: one timer, resolved here so the echo
+    // lands even if the player is mid-swing. No falloff (the row's budget:
+    // the 45% fraction re-prices distance itself), noStatus + origin 'skill'
+    // like every generated blast — an echo must not seed statuses twice or
+    // eat ANSWER's queued basic-attack crit.
+    if (this._novaEcho?.t > 0) {
+      this._novaEcho.t -= dt;
+      if (this._novaEcho.t <= 0) {
+        const E = this._novaEcho;
+        _archV.set(E.x, 0, E.z);
+        for (let i = this.enemies.length - 1; i >= 0; i--) {
+          const e = this.enemies[i];
+          if (e.hp <= 0 || e.spawning > 0) continue;
+          const dx = e.pos.x - E.x;
+          const dz = e.pos.z - E.z;
+          if (dx * dx + dz * dz > E.r * E.r) continue;
+          this._damageEnemy(e, E.dmg, { from: _archV, knockback: 4, origin: 'skill', noStatus: true });
+        }
+        // Re-set before the ring: _damageEnemy's knockback math may have run
+        // through the shared temps (the file-header aliasing lesson).
+        _archV.set(E.x, 0, E.z);
+        this.fx.ring(_archV, BAND_COLORS[this.save.className] ?? 0x9dd8ff, E.r, 0.4);
+      }
+    }
+
     // regen
+    // LITANY OATH (band L42): MP regen x1.6 while the stance runs — the
+    // multiplier lands at the consumption site (this.derived is never
+    // rewritten mid-run, the TEMPO precedent), so x1 to the bit for every
+    // frame without the stance. `oath` was read once at the cooldown block.
     p.hp = Math.min(d.maxHp, p.hp + d.hpRegen * dt);
-    p.mp = Math.min(d.maxMp, p.mp + d.mpRegen * dt);
+    p.mp = Math.min(d.maxMp, p.mp + d.mpRegen * (oath?.mpRegenMul || 1) * dt);
 
     // VANGUARD's deferred remainder lands here at the bleed's own pace
     // (banked in _damagePlayer, forgiven in _killEnemy). A direct hp write
@@ -4101,7 +4457,32 @@ export class Game {
         this._tryAttack();
       }
     }
-    if (this.input.consume('dash')) this._tryDash();
+    // THE DASH SLOT (band L18 TECHNIQUE — Wave F.3). For a classed save past
+    // the band, the button multiplexes exactly like the archon slot below:
+    // press starts a timer, holding past BAND_HOLD_SECONDS fires the class's
+    // signature step, releasing before it fires the plain dash. The decision
+    // lands on RELEASE for the tap — a real thumb-tap costs ~0.1 s, and a
+    // SYNTHETIC press with no held state (every node/browser probe that does
+    // input.pressed.add('dash') without held.add) resolves as a tap the SAME
+    // frame, which is why the storm bolt probe still lands in one update.
+    // Every other save — unclassed, or under 18 — keeps press-is-dash
+    // verbatim: the twitch verb pays the hold tax only once the hold has
+    // something to buy.
+    if (this._bands?.technique) {
+      if (this.input.consume('dash')) this._dashHoldT = 0;
+      if (this._dashHoldT !== null) {
+        if (this.input.isHeld('dash')) {
+          this._dashHoldT += dt;
+          if (this._dashHoldT >= BAND_HOLD_SECONDS) {
+            this._dashHoldT = null;
+            this._tryDash(true);
+          }
+        } else {
+          this._dashHoldT = null;
+          this._tryDash();
+        }
+      }
+    } else if (this.input.consume('dash')) this._tryDash();
     if (this.input.consume('slash')) this._trySlash();
     if (this.input.consume('nova')) this._tryNova();
     // The one contextual slot (interlock.theOneSlot). For an ascended path
@@ -4132,7 +4513,54 @@ export class Game {
           else if (this._archonPath === BEAST_P) this._tryWildForm();
         }
       }
-    } else if (this.input.consume('summon')) this._trySummon();
+    } else {
+      // THE UNASCENDED BIND SLOT (band L42 OATHWORK — Wave F.3). Precedence
+      // is by branch order, which is the interlock the task names: at 55+ the
+      // archon multiplexer above OWNS the slot (tap = ultimate, hold = Bind)
+      // and this branch never runs — the archon wins, the oath gesture is the
+      // 42-to-ascension bridge. Here the press stays Bind VERBATIM (fires on
+      // the press edge, zero added latency — Bind is the shipped tap and
+      // stays it), and CONTINUING to hold past the same 0.35 s threshold,
+      // with no bindable corpse within Bind's own 14 m reach, swears the
+      // stance instead: _tryOath re-checks the corpse range at the threshold
+      // so a hold that was reaching for a far corpse can never misfire a 60 s
+      // cooldown. Saves without the band read a null hold rider and run the
+      // shipped one-liner's behaviour exactly.
+      if (this.input.consume('summon')) {
+        // ONE ACTION PER GESTURE (review fix — the archon slot's shape): the
+        // press decides. A bindable corpse in Bind's own 14 m reach means the
+        // gesture IS a Bind — fire it now, arm nothing. Otherwise the press
+        // fires NOTHING yet: the hold may become an oath, and the old
+        // unconditional _trySummon meant every deliberate oath activation
+        // toasted 'NO FALLEN NEARBY' first, then the oath 0.35 s later.
+        // A no-corpse tap gets its honest summon-failure toast at RELEASE.
+        const bindable = this._bands?.oathwork
+          ? this.corpses.some((c) => c.attempts < MAX_EXTRACT_ATTEMPTS
+            && c.pos.distanceTo(this.player.pos) < 14)
+          : true;
+        if (bindable || !this._bands?.oathwork) {
+          this._trySummon();
+          this._oathHoldT = null;
+        } else {
+          this._oathHoldT = 0;
+        }
+      }
+      if (this._oathHoldT !== null) {
+        if (this.input.isHeld('summon')) {
+          this._oathHoldT += dt;
+          if (this._oathHoldT >= BAND_HOLD_SECONDS) {
+            this._oathHoldT = null;
+            this._tryOath();
+          }
+        } else {
+          // Released before the threshold with no corpse in reach at press:
+          // the gesture was a tap after all — deliver the summon's own
+          // refusal now (deferred, not skipped).
+          this._oathHoldT = null;
+          this._trySummon();
+        }
+      }
+    }
 
     // swing timing — the machine advances phases and fires _applySwingHit once
     // per damage application (the dagger finisher makes two).
@@ -4148,6 +4576,9 @@ export class Game {
     if (this._killStacks > 0 && this._classFlags?.killStackAtkSpeedPct) {
       atkDt *= 1 + this._killStacks * this._classFlags.killStackAtkSpeedPct;
     }
+    // WAR TEMPO (band L42): +12% on the same swing clock while the stance
+    // runs — cadence, never a damage term, exactly like the two terms above.
+    if (oath?.atkSpeedPct) atkDt *= 1 + oath.atkSpeedPct;
     if (w) tickAttack(p.attack, w, atkDt, this._onSwingHit);
     // THE PLAYER SWEEP (Wave D stage 3). _applySwingHit armed a travelling
     // hitbox at its fire frame; this advances it on the SAME clock the
@@ -4573,10 +5004,33 @@ export class Game {
       // position-advance below, the crater's sanctioned pattern. Every
       // non-frost save reads zero stacks and edt === dt to the bit.
       const rimeN = this._archonPath === FROST_P ? this._archonStatus.get(e, 'rime') : 0;
-      const rimeMul = rimeN > 0
+      let rimeMul = rimeN > 0
         ? Math.max(1 - FROST_P.rime.maxSlow, 1 - rimeN * FROST_P.rime.slowPerStack)
         : 1;
-      const edt = rimeN > 0 ? dt * rimeMul : dt;
+      // THE BAND SNARE (Wave F.3: WISPSNARE / BINDING LATTICE): e.snareT +
+      // e.snareMul ride the SAME action-clock lever as Rime — one timing
+      // system, per the crater's sanctioned pattern. The wisp field re-arms
+      // the touch-length snare every frame an enemy stands inside it, so
+      // walking through the mark costs half speed for its 0.25 s tail. Both
+      // writers are band riders; every other save reads snareT undefined,
+      // multiplies nothing, and edt === dt to the bit.
+      const wisp = this._wisp;
+      if (wisp && wisp.t > 0) {
+        const wtech = this._bands?.technique;
+        if (wtech?.radius) {
+          const wdx = e.pos.x - wisp.x;
+          const wdz = e.pos.z - wisp.z;
+          if (wdx * wdx + wdz * wdz < wtech.radius * wtech.radius) {
+            e.snareT = Math.max(e.snareT || 0, wtech.snareTouch);
+            e.snareMul = wtech.snareMul;
+          }
+        }
+      }
+      if (e.snareT > 0) {
+        e.snareT -= dt; // real time, like the freeze: a snare must not slow its own thaw
+        rimeMul *= e.snareMul || 1;
+      }
+      const edt = rimeMul !== 1 ? dt * rimeMul : dt;
       // FREEZE runs on REAL time (2.2 s is 2.2 s — the freeze must not slow
       // its own thaw); stacks clear on thaw, spec wording verbatim.
       if (e.frozenT > 0) {
@@ -6851,10 +7305,14 @@ export class Game {
     this.audio.music(false);
     this.audio.gateClear();
     const rank = this.gate.rank;
-    const t = Math.round(this.runTime);
+    // `secs`, not `t` (Wave F.4 rename): the shipped local shadowed the
+    // strings module's t() for the whole method, and this exit now renders
+    // ladder copy through it. A shadow that silently turns every t('key')
+    // into a number call is exactly the bug class the rename buys out.
+    const secs = Math.round(this.runTime);
     const prev = this.save.cleared[rank];
-    const isBest = prev == null || t < prev;
-    if (isBest) this.save.cleared[rank] = t;
+    const isBest = prev == null || secs < prev;
+    if (isBest) this.save.cleared[rank] = secs;
     // The roster persists on its own now. Only per-shadow bookkeeping is
     // written back — the old `save.shadows = <count>` overwrote the whole
     // roster object with a number and wiped the army on every clear.
@@ -6872,13 +7330,65 @@ export class Game {
     const ledgerDone = tickDaily(this.save);
     let ledgerRow;
     if (ledgerDone && claimDaily(this.save)) {
-      ledgerRow = ['Guild ledger', `CONTRACT FULFILLED  ·  +${DAILY_CONTRACT_POINTS} POINTS`];
-      this.ui.toast(`GUILD LEDGER FULFILLED  ·  +${DAILY_CONTRACT_POINTS} STAT POINTS`, 'gold');
+      // STREAKS (Wave F.4): claimDaily just banked base + streak bonus in ONE
+      // grant, so the printed number is re-derived from the same save state
+      // (streakBonus reads the streak the claim wrote) rather than hardcoding
+      // DAILY_CONTRACT_POINTS — the shipped literal LIED the moment a streak
+      // bonus existed. Day one renders the shipped line shape exactly.
+      const paid = DAILY_CONTRACT_POINTS + streakBonus(this.save);
+      const flames = this.save.daily.streak || 1;
+      ledgerRow = ['Guild ledger', t('ladder.daily.fulfilled', { points: paid, flames })];
+      this.ui.toast(t('ladder.daily.toast', { points: paid, flames }), 'gold');
     } else {
       const d = dailyState(this.save);
       ledgerRow = ['Guild ledger', d.claimed
         ? 'CONTRACT FULFILLED TODAY'
         : `${d.progress} / ${DAILY_TARGET} GATES TODAY`];
+    }
+    // THE WEEKLY HUNT (Wave F.4), ticked from the SAME funnel as the daily —
+    // one clear, one place that counts it, so the two ledgers can never
+    // disagree about what happened. The FACTS of this clear are assembled
+    // here; what counted is progression.tickWeekly's call alone.
+    //   wild     — the Verge flag exactly as the quest event above reads it.
+    //   anomaly  — the run's gate copy diverged from the canonical row:
+    //              anomalyKind is the honest stamp (dungeonmode only writes
+    //              it on a real roll); the biome comparison additionally
+    //              catches pre-E.S-stamp copies. A dev forceBiome run
+    //              masquerades as an anomaly through the second test — a
+    //              dev-only distortion, accepted like clock-rolling on the
+    //              daily (both flagged, neither reachable from shipped UI).
+    //   boss     — the gate's boss key; anomalies keep their gate's boss, so
+    //              a boss-week target survives the biome roll.
+    const huntDone = tickWeekly(this.save, {
+      wild: Boolean(this._wildRun),
+      anomaly: Boolean(this.gate?.anomalyKind)
+        || (GATES[this.gateIndex] != null && this.gate.biome !== GATES[this.gateIndex].biome),
+      boss: this.gate?.boss,
+    });
+    let huntRow;
+    // Auto-claim at the completing clear, the daily's exact stance. The XP
+    // rides gainXp — the ONE grant path — so the weekly pays ash parity and
+    // fires the level ceremony like every other income; it runs BEFORE the
+    // rows below so 'Essence gained' already contains the grant, and the
+    // respec token was banked inside claimWeekly itself. The ceremony keys
+    // off the CLAIM's own verdict, not huntDone: across a midnight week
+    // rollover between tick and claim the grant can honestly be 0, and a
+    // zero-XP fanfare would be the row lying.
+    const huntXp = huntDone ? claimWeekly(this.save) : 0;
+    if (huntXp > 0) {
+      this.gainXp(huntXp);
+      this.ui.toast(t('ladder.weekly.toast', { xp: huntXp }), 'gold');
+      huntRow = ['Weekly hunt', t('ladder.weekly.row', { xp: huntXp })];
+    } else {
+      const w = weeklyState(this.save);
+      // Caller-side ' · ' join of two mechanical fragments — the F.3 band-row
+      // precedent (ui.js joins t('band.row.*') with the rider name the same
+      // way); the desc key varies by kind because the three contract shapes
+      // genuinely differ.
+      const desc = t(`ladder.weekly.desc.${w.kind}`, { target: w.target, boss: BOSSES[w.boss]?.name ?? w.boss });
+      huntRow = ['Weekly hunt', w.claimed
+        ? t('ladder.weekly.fulfilled')
+        : `${desc}  ·  ${t('ladder.weekly.progress', w)}`];
     }
     this.onSave();
     this.ui.showHud(false);
@@ -6891,7 +7401,7 @@ export class Game {
       levelsGained: this.levelsGained,
       rows: [
         ['Gate', `${rank}-Rank · ${this.gate.name}`],
-        ['Time', `${Math.floor(t / 60)}m ${t % 60}s${isBest ? '  (BEST)' : ''}`],
+        ['Time', `${Math.floor(secs / 60)}m ${secs % 60}s${isBest ? '  (BEST)' : ''}`],
         ['Kills', String(this.player.kills)],
         ['Essence gained', `${this.xpEarned} XP`],
         ['Ash recovered', `${this.ashEarned || 0}`],
@@ -6900,6 +7410,7 @@ export class Game {
         ['Breaker level', `${this.save.level}  (${rankOf(this.save.level)}-grade)`],
         ['Company', `${roster.count} / ${roster.capacity} bound`],
         ledgerRow,
+        huntRow,
       ],
     });
   }

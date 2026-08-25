@@ -1421,6 +1421,41 @@ export class Citizens {
     }
   }
 
+  // ----------------------------------------------------------- talk (C-TALK)
+
+  /**
+   * The nearest hunter the player could strike up a word with, or null.
+   * Returns { npc, camp } — `camp` (a stationed Verge body) is what citymode
+   * maps to the Maren persona; a street hunter gets the ambient pool.
+   *
+   * This lives HERE and not in citymode because the eligibility rules are all
+   * npc-record internals this class owns:
+   *   - hunters only: civilians are set dressing; the hunters are the half of
+   *     the crowd that sells what the town is, and the bible gives them the
+   *     argot ("assay it", "the walk home").
+   *   - never the companion: a bound shadow does not stop for a chat — the
+   *     same line the social beat draws.
+   *   - never mid-portal-beat: a hunter walking to a dais has somewhere to be,
+   *     and BEAT_FADE/BEAT_GONE bodies are half-vanished or absent entirely.
+   *   - root.visible only: the night de-pop and the frustum thinning both hide
+   *     via visibility, and a talk prompt at an empty patch of street is the
+   *     prompt system lying.
+   * Pure read, no allocation beyond the one result object, no stream draws —
+   * offering a chat must never perturb the seeded crowd sim.
+   */
+  nearestTalker(pos, radius) {
+    let best = null, bestD2 = radius * radius;
+    for (const n of this.npcs) {
+      if (!n.hunter || n.companion) continue;
+      if (n.beat !== BEAT_NONE) continue;
+      if (!n.root.visible) continue;
+      const dx = pos.x - n.pos.x, dz = pos.z - n.pos.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < bestD2) { bestD2 = d2; best = n; }
+    }
+    return best ? { npc: best, camp: Boolean(best.station) } : null;
+  }
+
   // --------------------------------------------------------------- teardown
 
   dispose() {

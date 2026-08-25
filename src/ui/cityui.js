@@ -202,13 +202,17 @@ export class CityUI {
   }
 
   /**
-   * @param {{kind:'portal'|'interact', label:string, rank?:string,
+   * @param {{kind:'portal'|'interact'|'talk', label:string, rank?:string,
    *          locked?:boolean, sub?:string}|null} prompt
+   * 'talk' (C-TALK) is a person, not a door: no rank, never locked, and the
+   * confirm button captions TALK so a thumb knows it is starting a
+   * conversation, not walking through something.
    */
   setPrompt(prompt) {
     const same = (
       (!prompt && !this._prompt)
       || Boolean(prompt && this._prompt
+        && prompt.kind === this._prompt.kind
         && prompt.label === this._prompt.label
         && prompt.locked === this._prompt.locked
         && prompt.sub === this._prompt.sub)
@@ -232,7 +236,10 @@ export class CityUI {
     this.promptEl.classList.toggle('locked', Boolean(prompt.locked));
     this.promptEl.classList.add('on');
 
-    this.confirmCaption.textContent = prompt.locked ? 'LOCKED' : (prompt.kind === 'portal' ? 'ENTER' : 'OPEN');
+    this.confirmCaption.textContent = prompt.locked ? 'LOCKED'
+      : prompt.kind === 'portal' ? 'ENTER'
+        : prompt.kind === 'talk' ? 'TALK'
+          : 'OPEN';
     this.confirmEl.classList.toggle('locked', Boolean(prompt.locked));
     this.confirmEl.style.borderColor = color && !prompt.locked ? hex(color) : 'var(--ui-city-edge)';
     this.confirmEl.classList.add('on');

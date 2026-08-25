@@ -23,6 +23,23 @@ export const AUTO_STAT_PER_LEVEL = 1;
 // a server so there is nothing else it could key on.
 export const DAILY_CONTRACT_POINTS = 3;
 
+// STREAKS (Wave F.4): each consecutive day the daily contract is fulfilled
+// adds +1 stat point to its payout, capped here. The cap is +3 (day four and
+// beyond pay 6 points total) because the daily is the ladder's METRONOME, not
+// its engine — an uncapped streak would compound into the primary stat income
+// and make one missed day a build-defining loss, which is how a retention
+// mechanic turns into a resentment mechanic.
+export const STREAK_BONUS_CAP = 3;
+
+// THE WEEKLY HUNT (Wave F.4): the reward multiplier on xpForLevel(save.level).
+// Same philosophy as quests.questXp (60% of the gap at the quest's band) but
+// sized WEEKLY-large: 1.5x the current level's whole gap. At L60 that is
+// ~25.7k XP — about a level and a half, which post-53 (where a level costs
+// 15-30 S-runs of trash income) is a real rung on the ladder without being a
+// week of progress in one grant. Scales off save.level so it can never go
+// stale: the reward is always priced in the claimant's own gap.
+export const WEEKLY_HUNT_XP_MULT = 1.5;
+
 // --- Stats. Fixed key order: the UI, the save schema and the tests all rely
 // on it, so never reorder this array. ---
 export const STATS = [
@@ -442,13 +459,48 @@ export function derive(save, armor = null) {
   };
 }
 
+// THE POST-53 XP TERM (Wave F.4) — the ladder past the S gate.
+//
+// THE CLIFF, measured: the player curve is xpForLevel = 52·L^1.42 while enemy
+// XP scaled LINEARLY (1 + (L-1)·0.12), so kills-to-level grows like
+// L^1.42 / L^1 ≈ L^0.42 — forever. With the matched-level proxy
+// Σ xpForLevel(L) / (1 + (L-1)·0.12) (per-kill base normalised out, enemy
+// level ≈ player level, which is what the one S gate at enemyLevel 54 /
+// bossLevel 70 approximates across the band):
+//   30 -> 45 costs 24,653 proxy-kills across 15 levels
+//   53 -> 70 costs 36,924 proxy-kills across 17 levels  — 1.50x the grind,
+// with LESS content variety to spend it in (one S gate vs the B/A/S ladder).
+//
+// THE DERIVATION: give enemy XP a gentle exponential factor G^(level - 53)
+// above 53 and solve for G so the two bands cost the SAME proxy-kill total:
+//   Σ_{L=53}^{69} 52·L^1.42 / ((1 + (L-1)·0.12) · G^(L-53))  =  24,653
+// Bisection gives G = 1.0548; shipped as the round designer constant 1.055,
+// which lands the 53->70 band at 24,621 proxy-kills — 0.13% under the
+// 30->45 target, i.e. the same session count to within noise.
+// tools/progression-test.mjs recomputes both sums from the live formulas and
+// asserts the parity, naming the old 36,924 figure.
+//
+// SHAPE OF THE SHIPPED CURVE: x1.055 at 54 (+5.5%, imperceptible at the
+// seam), x2.48 at 70, x12.4 at 100 — compounding exactly where the linear
+// term starved, gentle where the old numbers were still honest. hp/atk stay
+// LINEAR on purpose: the audit's cliff is an INCOME failure, not a
+// difficulty failure, and inflating enemy stats would re-dig the hole this
+// term fills. At and below 53 the pow term is G^0 = 1, so every shipped XP
+// integer through E..A content is byte-identical; the first touched number is
+// S-gate trash (enemyLevel 54 rolls: grunt 88 -> 93). Boss XP is NOT routed
+// through scaleEnemy (game._spawnBoss prices b.xp off save.level itself), so
+// this term deliberately moves only the trash stream — the dominant income.
+export const POST53_XP_LEVEL = 53;
+export const POST53_XP_GROWTH = 1.055;
+
 // Enemy stat scaling by level.
 export function scaleEnemy(base, level) {
   const k = 1 + (level - 1) * 0.19;
   return {
     hp: Math.floor(base.hp * k),
     atk: base.atk * (1 + (level - 1) * 0.15),
-    xp: Math.floor(base.xp * (1 + (level - 1) * 0.12)),
+    xp: Math.floor(base.xp * (1 + (level - 1) * 0.12)
+      * Math.pow(POST53_XP_GROWTH, Math.max(0, level - POST53_XP_LEVEL))),
   };
 }
 

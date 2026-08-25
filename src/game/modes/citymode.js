@@ -19,7 +19,11 @@ import { classTrialAvailable } from '../progression.js';
 import { makeDayState } from '../../render/daynight.js';
 // B3 "honest venues": the sealed doors' lines come from the strings module —
 // its first live consumer, per its own "migrate opportunistically" rule.
-import { t } from '../strings.js';
+// C-TALK adds tLines (dialogue bodies are arrays) and the quest ledger's
+// giver lookup: a persona with an active contract of theirs names it as their
+// last line — surfacing only; the ledger itself is untouched from here.
+import { t, tLines } from '../strings.js';
+import { giverQuest } from '../quests.js';
 
 // How far past a portal's own radius the prompt still shows. Generous, because
 // a phone player steers with a thumb and "stand exactly here" is not a thing
@@ -41,6 +45,37 @@ const INTERACT_SUB = {
   barracks: t('door.barracks.sealed'),
   trial: t('door.trial.sealed'),
 };
+
+// --- talk (C-TALK: the towns learn to speak) --------------------------------
+// The service doors are PEOPLE per the bible's cast (§5): the Assay desk is
+// Veyra, the Exchange counter Callun, the barracks door Brann. Two approach
+// shapes, because the shipped open flows are load-bearing:
+//   'band' — doors WITH a panel behind them (assay/exchange). Inside the door
+//     radius the door prompt wins exactly as shipped (confirm still opens the
+//     panel — flow-test asserts that path by name); the talk offer lives in an
+//     ANNULUS just outside it. "Talk on a separate approach angle" made
+//     literal as a separate approach DISTANCE: a couple of strides short of
+//     the counter is where you hail the person behind it, and no authored
+//     side-position can end up inside a wall on a settlement this table has
+//     never seen.
+//   'door' — doors with NO panel (the barracks: open:false in the descriptor,
+//     so interactAt never claims it and the slab was mute). The talk prompt IS
+//     that door's prompt, full radius — the dialogue is what is behind it.
+// The Verge camps and the wandering street hunters ride Citizens.nearestTalker
+// instead of this table: their positions are simulated, not authored.
+const TALK_DOORS = {
+  assay: { persona: 'veyra', approach: 'band' },
+  exchange: { persona: 'callun', approach: 'band' },
+  barracks: { persona: 'brann', approach: 'door' },
+};
+// The annulus width outside a 'band' door's radius. Matches PROMPT_SLACK's
+// generosity (thumb steering, see above) while staying narrow enough that the
+// talk offer reads as "at this door", not "in this street".
+const TALK_BAND = 2.2;
+// How close to a hunter NPC before the talk offer shows. Tighter than the
+// door zones on purpose: bodies wander, and a wide bubble would strobe talk
+// prompts across half the plaza as the crowd drifts through it.
+const TALK_NPC = 2.6;
 
 // city.js drops the ground to y = -34 west of x = -88 so the world ends in a
 // view rather than a fence, and puts a parapet along the walled stretch of that
@@ -141,6 +176,12 @@ export class CityMode extends GameMode {
     // dt / CAM_BOOM_EASE, and snaps it on teleports along with the rest of
     // the rig.
     this._insideBlend = 0;
+    // Ambient-chat rotation cursor (C-TALK): which line of the street
+    // hunters' pool the NEXT chat serves. A plain counter, not a seeded draw
+    // — this is UI presentation, not sim (the seeded-streams law covers the
+    // sim), and a counter guarantees the no-repeat-back-to-back read that a
+    // random pick can't.
+    this._talkIdx = 0;
 
     // One DayState for the life of the mode. game.worldClock.sample() writes
     // into it and allocates nothing, so the whole day/night system costs zero
@@ -557,7 +598,89 @@ export class CityMode extends GameMode {
       });
       return;
     }
+
+    // C-TALK, and LAST on purpose: the priority order is portal > door > talk
+    // by construction of this scan — the two early returns above are the rule
+    // "a talk prompt must never mask a gate (or a shipped door flow)".
+    const talk = this._talkPromptAt(p.pos);
+    if (talk) { this._setPrompt(talk); return; }
+
     this._setPrompt(null);
+  }
+
+  /**
+   * The talk offer under the player's feet, or null (C-TALK).
+   * Sources, nearest-door first, then the crowd:
+   *   - authored door personas (TALK_DOORS): band/door zones per the table;
+   *   - Verge camp hunters -> Maren (the bible stations her at the camps);
+   *   - wandering street hunters -> the ambient pool.
+   * Suppressed entirely while any panel or the dialogue itself is up: a talk
+   * offer must never interrupt (or stack under) an open surface — the
+   * shipped panels hide #cityUi via body classes, but the prompt STATE going
+   * quiet too is what keeps a queued confirm tap from opening a conversation
+   * behind a shop.
+   */
+  _talkPromptAt(pos) {
+    const g = this.game;
+    // ALL panels suppress, not just the three the first cut checked (review
+    // nit): the other four hide #cityUi via body class today, but a prompt
+    // STATE that stays live under a hidden surface is the flag-vs-classList
+    // divergence this codebase keeps paying for.
+    if (g.dialog?.open || g.shopUI?.isOpen || g.assayUI?.isOpen
+      || g.invUI?.isOpen || g.mapUI?.isOpen || g.journalUI?.open
+      || g.settingsUI?.open) return null;
+    const city = this.city;
+    if (!city) return null;
+
+    // Door personas. Closed doors (barracks) never reached interactAt, and
+    // open ones returned above when inside their radius — so a plain distance
+    // test against radius + band is exact for both approach shapes.
+    let best = null, bestD = Infinity;
+    for (const it of city.interactables) {
+      const spec = TALK_DOORS[it.id];
+      if (!spec) continue;
+      const reach = spec.approach === 'door' ? it.radius : it.radius + TALK_BAND;
+      const d = Math.hypot(pos.x - it.pos.x, pos.z - it.pos.z);
+      if (d < reach && d < bestD) { bestD = d; best = spec.persona; }
+    }
+    if (best) return this._talkPrompt(best);
+
+    // The crowd: camp hunters are Maren per the bible; street hunters carry
+    // the ambient pool. Citizens owns the eligibility rules (visible, not the
+    // companion, not mid-beat) — see nearestTalker.
+    const near = city.citizens?.nearestTalker?.(pos, TALK_NPC);
+    if (near) return this._talkPrompt(near.camp ? 'maren' : 'hunter');
+    return null;
+  }
+
+  /** Shape one talk prompt. label = the person, sub = their post. */
+  _talkPrompt(persona) {
+    return {
+      kind: 'talk',
+      persona,
+      locked: false,
+      label: t(`talk.speaker.${persona}`),
+      sub: t(`talk.role.${persona}`),
+    };
+  }
+
+  /**
+   * Which act-state a persona speaks from (C-TALK), read off the quest
+   * ledger's done map — the same absent-means-default shape quests.js owns,
+   * so a fresh save (no save.quests at all) is act1 with no special case.
+   * The STAGE logic lives here, the WORDS in strings.js: a bible rewrite
+   * (it is still [BIBLE]-provisional) swaps lines without touching a mode.
+   *   - Brann pivots on a1_bind_three: the approval arc's first beat — three
+   *     shadows walked past his wall and it stood ('act1b').
+   *   - Everyone else pivots on a1_the_gravelord, the Act I finale — its
+   *     `beat` line IS the act break ('voice.act2.pressure'), so town talk
+   *     turning to the pressure theory the moment it completes is the towns
+   *     and the whispers agreeing on what act it is.
+   */
+  _talkStage(persona) {
+    const done = this.game.save?.quests?.done || {};
+    if (persona === 'brann') return done.a1_bind_three ? 'act1b' : 'act1';
+    return done.a1_the_gravelord ? 'act2' : 'act1';
   }
 
   _setPrompt(prompt) {
@@ -585,13 +708,14 @@ export class CityMode extends GameMode {
    *   40+, no classTier   — the trial is OPEN; confirm descends.
    *   classTier set       — the trial fired once and never again
    *                         (classTrialAvailable owns both gates).
-   * The ready/done lines are inline: strings.js is owned by another workflow
-   * right now. [strings] migrate the two literals when the file is free.
+   * All three lines live in strings.js now (C-TALK closed Wave F.2's
+   * "[strings] migrate when the file is free" note — the file was free this
+   * wave): 'door.trial.done' / 'door.trial.ready' / 'door.trial.sealed'.
    */
   _trialSub() {
     const s = this.game.save;
-    if (s?.classTier) return 'THE STAIR REMEMBERS YOUR STEPS.';
-    if (classTrialAvailable(s)) return 'THE SEALED STAIR WAITS. GO DOWN AS YOU ARE.';
+    if (s?.classTier) return t('door.trial.done');
+    if (classTrialAvailable(s)) return t('door.trial.ready');
     return INTERACT_SUB.trial;
   }
 
@@ -825,6 +949,15 @@ export class CityMode extends GameMode {
       return { action: 'enterGate', rank: prompt.rank };
     }
 
+    if (prompt.kind === 'talk') {
+      // C-TALK: the confirm opens the dialogue overlay. main.js constructed
+      // game.dialog for every mode (Wave C) and put it on the hardware-back
+      // chain, so nothing here manages lifecycle — show() and walk away. The
+      // city keeps ticking behind it, same as every shipped panel.
+      this._openTalk(prompt.persona);
+      return { action: 'talk', persona: prompt.persona };
+    }
+
     if (prompt.id === 'exchange') {
       // The weapon shop. game.shopUI is constructed once in main.js and
       // outlives this mode, so opening it neither builds DOM nor touches the
@@ -858,6 +991,34 @@ export class CityMode extends GameMode {
     }
     g.ui.toast(`${prompt.label} IS NOT OPEN YET`);
     return { action: 'open', id: prompt.id };
+  }
+
+  /**
+   * Open a persona's conversation (C-TALK).
+   *
+   * Named personas speak their act-state lines (strings.js 'talk.<who>.<act>',
+   * [BIBLE]-provisional; _talkStage picks the act off the quest ledger), and
+   * when the ledger holds an ACTIVE contract they gave, the last line names
+   * it — quest-giver surfacing with zero new mechanics: giverQuest is a pure
+   * read of the same activeQuests the journal renders.
+   *
+   * The ambient street hunter serves ONE pool line per chat, rotated by
+   * _talkIdx so consecutive chats never repeat — flavor stays flavor and no
+   * act gate applies (the pool is the town's weather, not the campaign's).
+   */
+  _openTalk(persona) {
+    const g = this.game;
+    if (!g.dialog) return;
+    let lines;
+    if (persona === 'hunter') {
+      const pool = tLines('talk.hunter.pool');
+      lines = [pool[this._talkIdx++ % pool.length]];
+    } else {
+      lines = tLines(`talk.${persona}.${this._talkStage(persona)}`);
+      const q = giverQuest(g.save, persona);
+      if (q) lines.push(t('talk.giver.active', { title: q.title }));
+    }
+    g.dialog.show({ speaker: t(`talk.speaker.${persona}`), lines });
   }
 
   /**
