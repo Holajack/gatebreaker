@@ -1,6 +1,9 @@
 import * as THREE from 'three';
 import { GameMode, registerMode } from './mode.js';
 import { City, DISTRICTS, PORTAL_COLORS } from '../../world/city.js';
+// The slug->descriptor registry (Wave B5): travel payloads and the save speak
+// slugs; this mode is where a slug becomes the descriptor City builds from.
+import { SETTLEMENTS } from '../../world/settlements.js';
 import { CityUI } from '../../ui/cityui.js';
 import { FLAT_GROUND } from '../physics.js';
 import { animateRig } from '../entities.js';
@@ -89,6 +92,18 @@ const INSIDE_HYST = 0.25;
 // in the wall it just hit.
 const CAM_MIN_INSIDE = 2.4;
 
+// --- the per-settlement build seed (Wave B5) --------------------------------
+// ONE seed for every settlement (review fix). The first cut FNV-forked the
+// seed per slug ON TOP of City.build's spec.seedSalt stream fork — two
+// mechanisms doing one job, and the redundancy immediately bit:
+// village-test built Emberfall at the raw literal while the game built it at
+// the fork, so the suite verified a village the game never mounts. seedSalt
+// alone already guarantees each settlement a deterministic, distinct build
+// (same slug, same town, forever); the seed stays the tools' byte contract
+// everywhere.
+const SEED_BASE = 20260806;
+function settlementSeed() { return SEED_BASE; }
+
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _want = new THREE.Vector3();
@@ -147,13 +162,71 @@ export class CityMode extends GameMode {
 
   // ------------------------------------------------------------------ mount
 
-  enter({ spawnAt = null, atPortal = null } = {}) {
+  enter({ spawnAt = null, atPortal = null, settlement = null } = {}) {
     const g = this.game;
 
     g.frameClock?.setTarget(30);
     g.quality?.setTargetFps(30);
 
-    if (!this.city) this.city = new City(g.scene, g.renderer, g.camera, g.quality);
+    // WHICH TOWN (B4a hook, B5 travel). Precedence: the enter payload
+    // (a slug OR a descriptor — travel speaks slugs, the B4a hook spoke
+    // descriptors and old callers keep working), then game.settlementSpec
+    // (set by travelTo below and by main.js's 'city' route when the payload
+    // carries a slug — game.enterCity's own signature strips unknown keys,
+    // so the hook is HOW payload.settlement reaches this mode without a
+    // game.js edit), then the save's persisted slug, then Threshold — so a
+    // fresh boot resumes the town the player last stood in, and every
+    // pre-B5 caller mounts exactly the town it always did.
+    const asSpec = (s) => (typeof s === 'string' ? SETTLEMENTS[s] : s) || null;
+    const spec = asSpec(settlement)
+      || asSpec(g.settlementSpec)
+      || asSpec(g.save?.settlement)
+      || SETTLEMENTS.threshold;
+    // Keep the hook in sync: a dungeon round trip re-enters 'city' with no
+    // settlement in its payload, and settlementSpec is what brings it back
+    // to THIS town rather than Threshold.
+    g.settlementSpec = spec;
+
+    // The save's world position (B5): which town the player is in, and which
+    // towns the map's switcher may chart/travel to. Both fields are
+    // absent-means-default (see save.js's migration lines); visited is
+    // append-only and marks ARRIVAL — you know a place once you have stood
+    // in it, which is exactly the discovery gate the map's TRAVEL button
+    // reads. Persist immediately: Android kills backgrounded apps without
+    // warning, and "which town am I in" is the one field a stale flush gets
+    // visibly wrong on resume.
+    const save = g.save;
+    if (save) {
+      const visited = Array.isArray(save.visited) ? save.visited : ['threshold'];
+      if (!visited.includes(spec.slug)) visited.push(spec.slug);
+      save.visited = visited;
+      if (save.settlement !== spec.slug) {
+        save.settlement = spec.slug;
+        // A settlement change invalidates the last-gate residue: a Threshold
+        // id like 'gate-d' would miss the exact-id match here but its RANK
+        // ALIAS would land the player beside Emberfall's same-rank gate —
+        // one they never used (review fix). Doorstep memory is per-town.
+        g.lastGatePortalId = null;
+        g.lastGateRank = null;
+        g.onSave?.();
+      }
+    }
+
+    // One seed for every settlement (see settlementSeed above).
+    this._seed = settlementSeed();
+
+    // A mode instance re-entered with a DIFFERENT descriptor tears its City
+    // down first: two settlements never coexist in a scene (the
+    // InstancedMesh law), and City.build's own dispose() only resets, never
+    // re-specs. (registerMode mints a fresh CityMode per mount, so this
+    // guard is belt-and-braces, not the normal path.)
+    if (this.city && this.city.spec !== spec) {
+      this.city.dispose();
+      this.city = null;
+    }
+    if (!this.city) {
+      this.city = new City(g.scene, g.renderer, g.camera, g.quality, spec);
+    }
     this.city.build(this._seed, g.save);
     this.refreshPortalLocks();
     // Region grade (Wave B6): the descriptor's palette row drives the glow
@@ -401,6 +474,26 @@ export class CityMode extends GameMode {
     const near = city.nearestPortal(p.pos);
     if (near && near.distance < near.portal.radius + PROMPT_SLACK) {
       const portal = near.portal;
+      // Waygates (Wave B5): a portal to another SETTLEMENT, not another
+      // dungeon. No rank rides the prompt (cityui falls back to its neutral
+      // edge colour, which is the design: waygates sit outside the rank
+      // ladder), never locked (walking through a waygate always works —
+      // discovery gates only the map's fast travel), and the sub names the
+      // destination so the player commits to a journey, not a mystery.
+      if (portal.kind === 'way' && portal.way) {
+        const dest = SETTLEMENTS[portal.way.toSettlement];
+        this._setPrompt({
+          kind: 'portal',
+          portalId: portal.id,
+          way: portal.way,
+          rank: null,
+          wild: false,
+          locked: false,
+          label: 'WAYGATE',
+          sub: `TO ${dest?.name || String(portal.way.toSettlement).toUpperCase()}`,
+        });
+        return;
+      }
       const gate = portal.gate || GATES.find((g) => g.rank === portal.rank);
       this._setPrompt({
         kind: 'portal',
@@ -494,6 +587,12 @@ export class CityMode extends GameMode {
     const near = [];
     for (const portal of city.portals) {
       if (portal.locked) continue;
+      // Hidden wild gates (B4b, frontier.js) stay off the compass until their
+      // clearing is discovered — a pip pointing at "A GATE THE FOREST KEPT"
+      // is the UI spoiling the one secret the region has. Discovery clears
+      // portal.hidden in frontier.update, so the pip appears the moment the
+      // player has earned it.
+      if (portal.hidden) continue;
       near.push({ portal, d: Math.hypot(p.pos.x - portal.pos.x, p.pos.z - portal.pos.z) });
     }
     near.sort((a, b) => a.d - b.d);
@@ -508,7 +607,11 @@ export class CityMode extends GameMode {
     this.ui?.setCompass(near.slice(0, 3).map(({ portal, d }) => ({
       angle: Math.atan2(portal.pos.x - p.pos.x, -(portal.pos.z - p.pos.z)) + yaw,
       distance: d,
-      color: PORTAL_COLORS[portal.rank] || 0xbfd0ff,
+      // The portal's OWN colour first (B5): waygates carry the silver-white
+      // WAY_COLOR and no rank, so a rank lookup alone would paint their pip
+      // the fallback blue. Rank portals carry color === PORTAL_COLORS[rank],
+      // so this changes nothing for them.
+      color: portal.color ?? PORTAL_COLORS[portal.rank] ?? 0xbfd0ff,
     })));
   }
 
@@ -667,6 +770,13 @@ export class CityMode extends GameMode {
     g.audio.ui?.();
 
     if (prompt.kind === 'portal') {
+      // A waygate confirm is TRAVEL, not a gate run (Wave B5). Checked before
+      // the rank path: prompt.rank is null here and the sealed-gate toast
+      // would otherwise fire off gate === undefined.
+      if (prompt.way) {
+        this.travelTo(prompt.way);
+        return { action: 'travel', settlement: prompt.way.toSettlement };
+      }
       const gate = GATES.find((x) => x.rank === prompt.rank);
       if (prompt.locked) {
         g.ui.toast(`THIS GATE IS SEALED · REQUIRES LEVEL ${gate?.reqLevel ?? '?'}`, 'danger');
@@ -695,6 +805,39 @@ export class CityMode extends GameMode {
     }
     g.ui.toast(`${prompt.label} IS NOT OPEN YET`);
     return { action: 'open', id: prompt.id };
+  }
+
+  /**
+   * Travel the way network (Wave B5): tear this settlement down, build the
+   * destination, arrive beside its return waygate. ONE flow for both entry
+   * points — the doorstep confirm above and the map's TRAVEL button — and it
+   * is the EXISTING rebuild-per-transition flow: appState.go('city') fires
+   * main.js's 'city' route, which reads payload.settlement into
+   * game.settlementSpec (game.enterCity's signature strips unknown payload
+   * keys, so the hook carries the slug — no game.js edit) and remounts a
+   * fresh CityMode. Two settlements therefore never coexist in a scene, by
+   * construction. The atPortal payload is the destination's own waygate id,
+   * which _spawnVector resolves exactly like a gate return — you step out of
+   * the portal you stepped into.
+   *
+   * @param {{toSettlement:string, toPortalId:string}} way
+   */
+  travelTo(way) {
+    const g = this.game;
+    if (!way || !SETTLEMENTS[way.toSettlement]) {
+      // A payload naming a settlement the registry does not know is authored
+      // data gone wrong — refuse loudly rather than mounting Threshold and
+      // calling it a journey.
+      console.warn('[citymode] travelTo: unknown settlement', way);
+      return;
+    }
+    // The hook is what survives enterCity's payload strip — set it before
+    // the route fires. citymode.enter re-asserts it (and the save fields) on
+    // arrival, so the two writers agree by construction.
+    g.settlementSpec = SETTLEMENTS[way.toSettlement];
+    const payload = { settlement: way.toSettlement, atPortal: way.toPortalId };
+    if (g.appState) g.appState.go('city', payload);
+    else g.enterCity(payload);
   }
 
   /** Keep the vitals readable in the hub; ui.updateHud is gate-only. */

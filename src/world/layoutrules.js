@@ -21,6 +21,15 @@
 // DEPENDENCY-LIGHT ON PURPOSE: no THREE, no city.js. node imports this module
 // directly in tools/, and city.js imports it, so a cycle here would be fatal.
 // Every geometric helper it needs is a dozen lines and lives at the bottom.
+// settlements.js is the ONE import allowed: it is a leaf (imports nothing,
+// ever — its rule 1), so this stays node-importable and cycle-free.
+
+// Wave B4a: marketZone and spireSite are sourced from the descriptor instead
+// of being the third and fourth authoring points for the same rectangle/spot
+// (the Wave A report flagged exactly this duplication; interiors.js's
+// AUTHORITY WARNING names the drift). The VALUES are byte-identical — this is
+// a re-plumbing, not a move of the town.
+import { THRESHOLD } from './settlements.js';
 
 /**
  * The parameter table. Distances are metres, floors are storeys of KIT_STOREY
@@ -110,13 +119,59 @@ export const LAYOUT_RULES = {
   /**
    * The Exchange's market strip. Stalls live here and nowhere else; the
    * validator uses it to give minSpacing.stalls_outside_market something to
-   * measure against.
+   * measure against. SOURCED from the descriptor (one authoring point with
+   * interiors._plotOk's keep-out); city._buildProps' stall loop reads the
+   * descriptor's props.market row, and this rectangle is asserted to contain
+   * what that row emits.
    */
-  marketZone: { x0: -18, x1: 10, z0: 24, z1: 68 },
+  marketZone: THRESHOLD.interiors.marketZone,
 
-  /** The spire wants to stand beside the north avenue, not in it. */
-  spireSite: { prefer: { x: 16, z: -38 }, minAbsX: 11, maxR: 30 },
+  /**
+   * The spire wants to stand beside the north avenue, not in it. The prefer
+   * point IS interiors.spireKeep's centre (the keep-out exists so the five
+   * enterables leave this exact site free) — one authored spot, two rules.
+   */
+  spireSite: {
+    prefer: { x: THRESHOLD.interiors.spireKeep.x, z: THRESHOLD.interiors.spireKeep.z },
+    minAbsX: 11,
+    maxR: 30,
+  },
+
+  /**
+   * Longest wing city._layout may try, in kit cells. 7 is Threshold's shipped
+   * search ceiling; a hamlet profile caps it lower (Emberfall uses 4) so its
+   * biggest building is a farmhouse, not a terrace.
+   */
+  maxWing: 7,
 };
+
+/**
+ * Per-settlement layout tables (Wave B4a — the engine stops assuming
+ * Threshold). A descriptor with no `layout` section gets the module tables
+ * BY REFERENCE, so Threshold's build path is bit-identical to pre-B4a; a
+ * descriptor that authors one gets:
+ *
+ *   rules     LAYOUT_RULES with the row's overrides spread on top. Shallow
+ *             on purpose: a settlement that overrides `landmarkHeights`
+ *             owns the whole object — partial deep-merges are how a table
+ *             silently keeps a corridor the author deleted.
+ *   profiles  its own DISTRICT_PROFILES-shaped table.
+ *   single    a profile id that bypasses districtOfPoint entirely — the
+ *             one-quarter hamlet case, where the civic ring radii of
+ *             districtOfPoint have no meaning.
+ *
+ * city._layout, city._buildProps and validateLayout all resolve through this
+ * one function, so the builder and the assert can never read two tables.
+ */
+export function layoutTablesFor(spec) {
+  const L = spec && spec.layout;
+  if (!L) return { rules: LAYOUT_RULES, profiles: DISTRICT_PROFILES, single: null };
+  return {
+    rules: { ...LAYOUT_RULES, ...(L.rules || {}) },
+    profiles: L.profiles || DISTRICT_PROFILES,
+    single: L.single || null,
+  };
+}
 
 /**
  * Per-district identity. `floors` is an inclusive [min, max] range; `styles` is
@@ -201,10 +256,13 @@ export function footprintRect(b) {
  * Used by the builder while placing and by the validator afterwards, so the
  * two can never disagree about which buildings are "in the corridor".
  */
-export function corridorCap(b) {
+export function corridorCap(b, rules = LAYOUT_RULES) {
+  // `rules` defaults to Threshold's table so every pre-B4a call site keeps
+  // its exact behaviour; city._layout and validateLayout pass the resolved
+  // per-settlement table (for Threshold that IS this default, by reference).
   const r = footprintRect(b);
   let cap = Infinity;
-  for (const c of LAYOUT_RULES.sightlineCorridors) {
+  for (const c of rules.sightlineCorridors) {
     if (segRectDistance(c.from.x, c.from.z, c.to.x, c.to.z, r) <= c.halfWidth) {
       cap = Math.min(cap, c.maxFloors);
     }
@@ -227,6 +285,15 @@ export function corridorCap(b) {
 export function validateLayout(city) {
   const violations = [];
   const bad = (rule, detail) => violations.push({ rule, detail });
+  // Per-settlement tables (B4a): for Threshold these ARE the module tables by
+  // reference, so the shipped assertions are bit-identical; a settlement with
+  // a layout row is validated against the same table its builder enforced.
+  const LT = layoutTablesFor(city?.spec);
+  const R = LT.rules;
+  const PROF = LT.profiles;
+  // The buildable bound: Threshold's wall, or a wall-less settlement's core
+  // extent. 88 was the old literal; spec.wall.half IS 88 for Threshold.
+  const H = city?.spec?.wall?.half ?? 88;
 
   const B = city?.layoutMeta;
   if (!Array.isArray(B) || B.length === 0) {
@@ -240,14 +307,14 @@ export function validateLayout(city) {
   for (const b of B) {
     let near = Infinity;
     for (const s of streets) near = Math.min(near, pointSegDistance(b.ax, b.az, s));
-    if (near > LAYOUT_RULES.frontageMax + 1e-6) {
-      bad('frontage', `${b.id} anchor is ${near.toFixed(1)} m from the nearest street (max ${LAYOUT_RULES.frontageMax})`);
+    if (near > R.frontageMax + 1e-6) {
+      bad('frontage', `${b.id} anchor is ${near.toFixed(1)} m from the nearest street (max ${R.frontageMax})`);
     }
   }
 
   // -- district profiles ---------------------------------------------------
   for (const b of B) {
-    const p = DISTRICT_PROFILES[b.district];
+    const p = PROF[b.district];
     if (!p) { bad('profile', `${b.id} has unknown district "${b.district}"`); continue; }
     if (b.isSpire) continue;                        // the landmark has its own rule
     if (!p.styles.includes(b.style)) {
@@ -263,7 +330,7 @@ export function validateLayout(city) {
 
   // -- sightline corridors -------------------------------------------------
   for (const b of B) {
-    const cap = corridorCap(b);
+    const cap = corridorCap(b, R);
     if (Number.isFinite(cap) && b.floors > cap) {
       bad('corridor', `${b.id} is ${b.floors} floors inside a sightline corridor capped at ${cap}`);
     }
@@ -271,15 +338,23 @@ export function validateLayout(city) {
 
   // -- landmarks -----------------------------------------------------------
   const spires = B.filter((b) => b.isSpire);
-  const fives = B.filter((b) => b.floors >= LAYOUT_RULES.landmarkHeights.spire);
-  if (spires.length !== 1) bad('landmark.spire', `${spires.length} buildings are flagged as the spire, spec says exactly 1`);
-  if (fives.length !== 1 || (fives[0] && !fives[0].isSpire)) {
-    bad('landmark.spire', `${fives.length} buildings reach ${LAYOUT_RULES.landmarkHeights.spire} floors, spec says exactly 1 and it must be the spire`);
+  const fives = B.filter((b) => b.floors >= R.landmarkHeights.spire);
+  if (R.spireSite) {
+    if (spires.length !== 1) bad('landmark.spire', `${spires.length} buildings are flagged as the spire, spec says exactly 1`);
+    if (fives.length !== 1 || (fives[0] && !fives[0].isSpire)) {
+      bad('landmark.spire', `${fives.length} buildings reach ${R.landmarkHeights.spire} floors, spec says exactly 1 and it must be the spire`);
+    }
+  } else {
+    // A spireless settlement (spireSite null): NOTHING may be flagged as or
+    // stand as tall as a spire — its landmarkHeights.spire is the storey
+    // ceiling plus one, and city._layout clamps ordinary stock to spire - 1.
+    if (spires.length !== 0) bad('landmark.spire', `${spires.length} buildings are flagged as the spire in a spireless settlement`);
+    if (fives.length !== 0) bad('landmark.spire', `${fives.length} buildings reach ${R.landmarkHeights.spire} floors in a settlement capped at ${R.landmarkHeights.spire - 1}`);
   }
-  if (spires.length === 1) {
+  if (R.spireSite && spires.length === 1) {
     const spire = spires[0];
-    if (spire.floors !== LAYOUT_RULES.landmarkHeights.spire) {
-      bad('landmark.spire', `the spire is ${spire.floors} floors, spec says ${LAYOUT_RULES.landmarkHeights.spire}`);
+    if (spire.floors !== R.landmarkHeights.spire) {
+      bad('landmark.spire', `the spire is ${spire.floors} floors, spec says ${R.landmarkHeights.spire}`);
     }
     for (const b of B) {
       if (b === spire) continue;
@@ -287,11 +362,11 @@ export function validateLayout(city) {
         bad('landmark.spire', `${b.id} tops out at ${b.topY.toFixed(1)} m, at or above the spire's ${spire.topY.toFixed(1)} m`);
       }
     }
-    if (Number.isFinite(corridorCap(spire))) {
+    if (Number.isFinite(corridorCap(spire, R))) {
       bad('landmark.spire', 'the spire stands INSIDE a sightline corridor — it must be the background, not the obstruction');
     }
   }
-  const civic = LAYOUT_RULES.landmarkHeights.civicRow;
+  const civic = R.landmarkHeights.civicRow;
   for (const b of B) {
     if (b.district !== 'plaza_ring' || b.isSpire) continue;
     if (Number.isFinite(b.cap) && b.cap < civic[0]) continue;   // corridor wins
@@ -300,13 +375,13 @@ export function validateLayout(city) {
     }
   }
   for (const b of B) {
-    if (Math.abs(b.cx) > 88 || Math.abs(b.cz) > 88) {
-      bad('landmark.outsideWall', `${b.id} stands outside the wall at (${b.cx.toFixed(0)}, ${b.cz.toFixed(0)})`);
+    if (Math.abs(b.cx) > H || Math.abs(b.cz) > H) {
+      bad('landmark.outsideWall', `${b.id} stands outside the settlement core at (${b.cx.toFixed(0)}, ${b.cz.toFixed(0)})`);
     }
   }
 
   // -- anti-repetition: pairwise ------------------------------------------
-  const pairR = LAYOUT_RULES.minSpacing.identicalSilhouettePair;
+  const pairR = R.minSpacing.identicalSilhouettePair;
   for (let i = 0; i < B.length; i++) {
     for (let j = i + 1; j < B.length; j++) {
       if (silhouetteTuple(B[i]) !== silhouetteTuple(B[j])) continue;
@@ -319,7 +394,7 @@ export function validateLayout(city) {
   }
 
   // -- anti-repetition: runs along a street --------------------------------
-  const maxRun = LAYOUT_RULES.antiRepetition.maxIdenticalRun;
+  const maxRun = R.antiRepetition.maxIdenticalRun;
   const byStreet = new Map();
   for (const b of B) {
     if (b.street == null) continue;
@@ -358,7 +433,7 @@ export function validateLayout(city) {
     if (!b.door) { bad('doorway', `${b.id} has no doorway`); continue; }
     let near = Infinity;
     for (const s of streets) near = Math.min(near, pointSegDistance(b.door.outX, b.door.outZ, s));
-    if (near > LAYOUT_RULES.frontageMax + 4) {
+    if (near > R.frontageMax + 4) {
       bad('doorway', `${b.id}'s doorway opens ${near.toFixed(1)} m from the nearest street`);
     }
     for (const o of B) {
@@ -376,8 +451,10 @@ export function validateLayout(city) {
   // a pad reached from a level-1 segment is one turn from the plaza. This is
   // the assertion that survives a future street edit, which is the only reason
   // the rule is worth encoding — it is trivially true of today's plan.
-  const level = streetLevels(streets, LAYOUT_RULES.zones.plazaRingR);
-  const maxTurns = LAYOUT_RULES.desireLines.everyDistrictPadToPlazaTurns;
+  // A settlement with no civic zones table (a hamlet) measures level-0 from
+  // its green's own radius instead of the ring road's.
+  const level = streetLevels(streets, R.zones ? R.zones.plazaRingR : (city?.spec?.wall?.plazaR ?? 26));
+  const maxTurns = R.desireLines.everyDistrictPadToPlazaTurns;
   for (const d of city.districts || []) {
     if (d.id === 'plaza') continue;
     let bestIdx = -1, bestD = Infinity;
@@ -402,12 +479,14 @@ export function validateLayout(city) {
       }
     }
   };
-  spacing(P.fountains, LAYOUT_RULES.minSpacing.fountains, 'fountains');
-  spacing(P.benches, LAYOUT_RULES.minSpacing.benches, 'benches');
-  const M = LAYOUT_RULES.marketZone;
+  spacing(P.fountains, R.minSpacing.fountains, 'fountains');
+  spacing(P.benches, R.minSpacing.benches, 'benches');
+  // No market strip (marketZone null) means no stalls may exist AT ALL —
+  // stalls outside a market are the rule's whole point.
+  const M = R.marketZone;
   for (const s of P.stalls || []) {
-    if (s.x < M.x0 || s.x > M.x1 || s.z < M.z0 || s.z > M.z1) {
-      bad('minSpacing.stalls_outside_market', `a stall stands at (${s.x.toFixed(1)}, ${s.z.toFixed(1)}), outside the Exchange market strip`);
+    if (!M || s.x < M.x0 || s.x > M.x1 || s.z < M.z0 || s.z > M.z1) {
+      bad('minSpacing.stalls_outside_market', `a stall stands at (${s.x.toFixed(1)}, ${s.z.toFixed(1)}), outside the market strip`);
     }
   }
 

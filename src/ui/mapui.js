@@ -28,7 +28,11 @@
 // of world state and must stay that way — a map that touched an RNG stream
 // would shift every draw after it.
 
-import { PORTAL_COLORS } from '../world/city.js';
+import { PORTAL_COLORS, WAY_COLOR, resolvePortalPlacement } from '../world/city.js';
+// The registry (Wave B5): the settlement switcher charts a REMOTE town from
+// its descriptor alone — static placements through resolvePortalPlacement,
+// no live City is ever built for a place you are merely looking at.
+import { SETTLEMENTS } from '../world/settlements.js';
 
 const CSS = `
 /* Same stacking story as #shop: #cityUi (z 40) carries the live OPEN button,
@@ -68,6 +72,32 @@ body.gb-map #cityUi { display: none !important; }
 #map .map-foot b { color: var(--ui-city-text-bright); }
 /* Pips are buttons in spirit: give the finger something to feel. */
 #map .map-chart .pip { cursor: pointer; }
+
+/* The settlement switcher (Wave B5): one chip per VISITED settlement. Same
+   token vocabulary as the legend; the active chip is bold and bright, the
+   rest are taps. */
+#map .map-towns {
+  display: flex; flex-wrap: wrap; gap: 6px; justify-content: center;
+  margin: 0 0 8px;
+}
+#map .map-towns button {
+  font: inherit; font-size: 11px; letter-spacing: .14em; cursor: pointer;
+  padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--ui-city-edge);
+  background: transparent; color: var(--ui-city-text-dim);
+}
+#map .map-towns button.active {
+  font-weight: 700; color: var(--ui-city-text-bright);
+  border-color: var(--ui-city-border);
+}
+/* The footer's TRAVEL action rides the shipped .btn look, shrunk to fit the
+   one-line footer. */
+#map .map-foot .map-travel {
+  font: inherit; font-size: 11px; letter-spacing: .14em; cursor: pointer;
+  margin-left: 10px; padding: 3px 12px; border-radius: 8px;
+  border: 1px solid var(--ui-city-border);
+  background: transparent; color: var(--ui-city-text-bright);
+}
 `;
 
 let _styleEl = null;
@@ -98,9 +128,15 @@ function svgEl(tag, attrs) {
 
 /** Reader-friendly name for a portal the descriptor gives no label to. */
 function portalName(p) {
+  if (p.kind === 'way' || p.way) return 'WAYGATE';
   if (p.wild) return `WILD ${p.rank} GATE`;
   if (p.id?.startsWith('breach-')) return 'THE BREACH';
   return `${p.rank} GATE`;
+}
+
+/** Display name for a settlement slug, off the descriptor's own name field. */
+function settlementName(slug) {
+  return SETTLEMENTS[slug]?.name || String(slug || 'threshold').toUpperCase();
 }
 
 export class MapUI {
@@ -133,6 +169,15 @@ export class MapUI {
     panel.appendChild(this.titleEl);
     panel.appendChild(el('p', 'panel-sub',
       'A hunter’s chart. Gates hold still; the Verge does not.'));
+
+    // The settlement switcher (Wave B5): which town the chart below shows.
+    // Rebuilt per render like the legend; hidden while only one town is known.
+    this.townsEl = el('div', 'map-towns');
+    panel.appendChild(this.townsEl);
+    // Which settlement the panel is LOOKING at. null = the active one (the
+    // live city); a visited slug = a remote chart drawn from its descriptor.
+    // Reset on open — the map always opens on where you are standing.
+    this._viewSlug = null;
 
     // The chart is rebuilt per open; this is its stable mount point.
     this.chartMount = el('div');
@@ -203,6 +248,9 @@ export class MapUI {
       g.pause(true);
       this._pausedByUs = true;
     }
+    // Always open on the town you are standing in; the switcher is a per-open
+    // excursion, not a sticky preference.
+    this._viewSlug = null;
     this.render();
     this.root.classList.remove('hidden');
     document.body.classList.add('gb-map');
@@ -226,15 +274,41 @@ export class MapUI {
 
   // ------------------------------------------------------------- rendering
 
-  /** Rebuild the chart from the live world. Cheap; called once per open. */
+  /**
+   * Rebuild the chart. Cheap; called once per open and per switcher tap.
+   *
+   * TWO VIEWS since Wave B5. The ACTIVE settlement (default) is drawn from
+   * the LIVE city exactly as before — portals, lock state, discovered POIs,
+   * the hunter's own dot. A REMOTE settlement (a tapped switcher chip, gated
+   * on save.visited) is drawn from its DESCRIPTOR: static portal placements
+   * through resolvePortalPlacement, nothing live, because no City exists for
+   * it — two settlements never coexist, and the map must not pretend
+   * otherwise. Remote charts carry no player dot, no distances, no lock
+   * state and no Verge sites: it is what a hunter would remember of a town,
+   * which is honestly less than what he can see standing in one.
+   */
   render() {
     this.chartMount.textContent = '';
     this.legendEl.textContent = '';
     this.footEl.textContent = '';
+    this.townsEl.textContent = '';
 
-    const city = this.game?.mode?.city || null;
-    const spec = city?.spec || null;
-    this.titleEl.textContent = (spec?.slug || 'threshold').toUpperCase();
+    const g = this.game;
+    const city = g?.mode?.city || null;
+    const activeSlug = city?.spec?.slug || g?.save?.settlement || 'threshold';
+    const visited = Array.isArray(g?.save?.visited) ? g.save.visited : ['threshold'];
+    // The viewed slug: a visited remote pick survives; anything else (stale
+    // pick, the active town itself) collapses back to the active view.
+    const view = (this._viewSlug && this._viewSlug !== activeSlug && visited.includes(this._viewSlug))
+      ? this._viewSlug : activeSlug;
+    this._viewSlug = view === activeSlug ? null : view;
+    this.titleEl.textContent = settlementName(view);
+    this._buildTowns(activeSlug, view, visited);
+
+    if (view !== activeSlug) {
+      this._renderRemote(view);
+      return;
+    }
 
     if (!city || !Array.isArray(city.portals) || !city.portals.length) {
       // Title screen / mid-gate: no live streets to chart. Diegetic, honest.
@@ -243,7 +317,13 @@ export class MapUI {
       return;
     }
 
-    const portals = city.portals;
+    const spec = city.spec || null;
+    // A HIDDEN gate stays off the chart until found (review fix: the
+    // Birchreach's secret wild gate — 'A GATE THE FOREST KEPT' — was drawn,
+    // named, and tappable the moment the map opened). One filtered list
+    // feeds the pips, the extent fit, and the legend, so they can never
+    // disagree about what is known.
+    const portals = city.portals.filter((p) => !p.hidden);
     const pois = (city.frontier?.pois || []).filter((p) => p.discovered);
 
     // ---- projection: world metres -> a fixed 200x200 viewBox --------------
@@ -330,16 +410,120 @@ export class MapUI {
     this._buildLegend(portals, pois.length > 0);
   }
 
+  /**
+   * The switcher row: one chip per settlement the save has VISITED (registry
+   * order, so chips never reshuffle), the active one bold. Discovery-gating
+   * lives exactly here — an unvisited settlement gets no chip at all, so the
+   * map cannot leak the name of a place the player has not found (Wave B5:
+   * gating is a MAP concern only; the waygates themselves always work).
+   */
+  _buildTowns(activeSlug, viewSlug, visited) {
+    const slugs = Object.keys(SETTLEMENTS).filter((s) => visited.includes(s));
+    if (slugs.length < 2) return;   // one town known — no dimension to switch
+    for (const slug of slugs) {
+      const b = el('button', slug === activeSlug ? 'active' : null, settlementName(slug));
+      b.type = 'button';
+      if (slug === viewSlug) b.setAttribute('aria-pressed', 'true');
+      b.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.audio?.ui?.();
+        this._viewSlug = slug === activeSlug ? null : slug;
+        this.render();
+      });
+      this.townsEl.appendChild(b);
+    }
+  }
+
+  /**
+   * A remote settlement's chart, from its descriptor alone — see render()'s
+   * header for what is deliberately absent. Pips are the portals.placements:
+   * rank gates in their rank dye, waygates in the network silver; taps
+   * describe (the TRAVEL button is the ACTIVE view's affordance — you travel
+   * from a waygate you can reach, not from a memory).
+   */
+  _renderRemote(slug) {
+    const spec = SETTLEMENTS[slug];
+    if (!spec) return;
+    const sites = (spec.portals?.placements || []).map((pl) => {
+      const site = resolvePortalPlacement(spec, pl);
+      return {
+        id: pl.id,
+        rank: pl.rank || null,
+        kind: pl.kind || 'gate',
+        way: pl.kind === 'way' && pl.to
+          ? { toSettlement: pl.to.settlement, toPortalId: pl.to.portalId }
+          : null,
+        color: pl.kind === 'way' ? WAY_COLOR : (PORTAL_COLORS[pl.rank] ?? 0xbfd0ff),
+        pos: { x: site.x, z: site.z },
+      };
+    });
+
+    let extent = spec.wall?.half || 88;
+    for (const p of sites) extent = Math.max(extent, Math.abs(p.pos.x), Math.abs(p.pos.z));
+    const s = 92 / (extent + 8);
+
+    const svg = svgEl('svg', { viewBox: '-100 -100 200 200', class: 'map-chart' });
+    // Only a settlement that BUILT a wall gets the square (Emberfall and the
+    // forest have none — drawing one would chart a fiction).
+    if (spec.wall?.built !== false) {
+      const half = (spec.wall?.half || 88) * s;
+      svg.appendChild(svgEl('rect', {
+        x: -half, y: -half, width: half * 2, height: half * 2, rx: 6,
+        fill: 'none', stroke: hex(0x3a4468), 'stroke-width': 1.5,
+      }));
+    }
+    const ringR = (spec.portals?.ring || 22) * s;
+    svg.appendChild(svgEl('circle', {
+      cx: 0, cy: 0, r: ringR,
+      fill: 'none', stroke: hex(0x2b3352), 'stroke-width': 1, 'stroke-dasharray': '3 3',
+    }));
+    const plazaR = Math.max(3, (spec.wall?.plazaR || 26) * s * 0.35);
+    svg.appendChild(svgEl('circle', { cx: 0, cy: 0, r: plazaR, fill: hex(0x2b3352) }));
+
+    for (const p of sites) {
+      const x = p.pos.x * s, y = p.pos.z * s;
+      const gp = svgEl('g', { class: 'pip' });
+      gp.appendChild(svgEl('circle', { cx: x, cy: y, r: 5, fill: hex(p.color) }));
+      const hit = svgEl('circle', { cx: x, cy: y, r: 12, fill: 'transparent' });
+      const label = svgEl('title', {});
+      label.textContent = portalName(p);
+      gp.appendChild(label);
+      gp.appendChild(hit);
+      gp.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.audio?.ui?.();
+        this._describe(p, { remote: true });
+      });
+      svg.appendChild(gp);
+    }
+
+    this.chartMount.appendChild(svg);
+    this._buildLegend(sites, false);
+    this.footEl.appendChild(el('span', null, 'Charted from memory. Travel from a waygate.'));
+  }
+
   /** One chip per rank actually present, plus the state modifiers. */
   _buildLegend(portals, anyPoi) {
     const ranks = [];
-    for (const p of portals) if (!ranks.includes(p.rank)) ranks.push(p.rank);
+    // Waygates carry no rank (null) — they get their own chip below, not a
+    // 'null' entry in the rank row.
+    for (const p of portals) if (p.rank && !ranks.includes(p.rank)) ranks.push(p.rank);
     for (const rank of ranks) {
       const chip = el('span', null, null);
       const dot = document.createElement('i');
       dot.style.background = hex(PORTAL_COLORS[rank] ?? 0xbfd0ff);
       chip.appendChild(dot);
       chip.appendChild(document.createTextNode(rank));
+      this.legendEl.appendChild(chip);
+    }
+    if (portals.some((p) => p.kind === 'way' || p.way)) {
+      const chip = el('span', null);
+      const dot = document.createElement('i');
+      dot.style.background = hex(WAY_COLOR);
+      chip.appendChild(dot);
+      chip.appendChild(document.createTextNode('WAYGATE'));
       this.legendEl.appendChild(chip);
     }
     if (portals.some((p) => p.wild)) {
@@ -378,16 +562,49 @@ export class MapUI {
    * compass aiming needs a citymode target-override hook; until either
    * exists the footer tells the player what they tapped.
    */
-  _describe(portal) {
+  _describe(portal, { remote = false } = {}) {
     this.footEl.textContent = '';
     const name = el('b', null, portalName(portal));
     this.footEl.appendChild(name);
-    const pp = this.game?.player?.pos;
+    const bits = [];
+    if (portal.way) bits.push(` · TO ${settlementName(portal.way.toSettlement)}`);
+    else bits.push(` · RANK ${portal.rank}`);
+    // Distance is a LIVE fact: only the active view has a player standing on
+    // the same chart.
+    const pp = remote ? null : this.game?.player?.pos;
     const dist = pp ? Math.round(Math.hypot(portal.pos.x - pp.x, portal.pos.z - pp.z)) : null;
-    const bits = [` · RANK ${portal.rank}`];
     if (dist != null) bits.push(` · ${dist} m`);
     if (portal.locked) bits.push(' · SEALED');
     this.footEl.appendChild(document.createTextNode(bits.join('')));
+
+    // TRAVEL (Wave B5): only on a way pip, only in the ACTIVE settlement's
+    // view (remote pips are memories, not doors), and only to a destination
+    // the save has VISITED — the one place travel is discovery-gated. It
+    // routes through the SAME flow the doorstep confirm uses
+    // (citymode.travelTo), after closing the map: the mode is about to tear
+    // the whole town down, and the overlay must not outlive the city it was
+    // charting.
+    if (!remote && portal.way) {
+      const g = this.game;
+      const visited = Array.isArray(g?.save?.visited) ? g.save.visited : ['threshold'];
+      const mode = g?.mode;
+      if (mode?.name === 'city' && typeof mode.travelTo === 'function'
+          && visited.includes(portal.way.toSettlement)) {
+        const btn = el('button', 'map-travel', 'TRAVEL');
+        btn.type = 'button';
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this.audio?.ui?.();
+          const way = portal.way;   // survive the close/teardown
+          this.close();
+          mode.travelTo(way);
+        });
+        this.footEl.appendChild(btn);
+      } else {
+        this.footEl.appendChild(document.createTextNode(' · UNCHARTED'));
+      }
+    }
   }
 }
 

@@ -63,7 +63,14 @@ const SWIFTSHADER = argv.includes('--swiftshader');
 // town_wall_door (376 tris) for town_wall_doorway_base (64) plus the shared
 // city_door_voids InstancedMesh (~-310 tris per sealed building net), and the
 // voids field adds draw groups. 450784 -> 432622 tris; groups 104 -> 108.
-const BASELINE = { triangles: 432622, drawGroups: 108 };
+//
+// Re-recorded at Wave B5 (waygates): Threshold's descriptor gained ONE
+// kind:'way' placement beside the north gate, now built as a live portal.
+// The delta is exactly one portal: +240 triangles (PORTAL_TRIANGLES, the
+// four-mesh visual on the shared geometry set) and +4 draw groups (dais /
+// oval / ring / marker — portals are deliberately not instanced, each
+// animates its own materials). 432622 -> 432862; 108 -> 112.
+const BASELINE = { triangles: 432862, drawGroups: 112 };
 // The Verge roughly doubles the world, and STEP 7's POI stamps add ~100k on top
 // of step 6's scatter. This ratio is an inventory guard against an accidental
 // blowup, NOT the per-frame cost: POI stamps are merged meshes with tight

@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import {
-  HeightField, FRONTIER_CELL, FRONTIER_HALF,
+  // FRONTIER_CELL / FRONTIER_HALF are no longer imported (B4a): build()
+  // derives the lattice from the owner's descriptor at instance scope —
+  // 2 x groundCell and CENTRE_IX rings — so a Verge always samples the
+  // settlement that owns it. The module exports remain on city.js as the
+  // tools' terrain contract.
+  HeightField,
   PORTAL_COLORS, buildPortalVisual, registerVergeDistrict, clearVergeDistricts,
 } from './city.js';
 import { NatureField } from './naturekit.js';
@@ -56,9 +61,12 @@ import { GATES } from '../game/config.js';
 //    own owned lists; geometry and materials it BORROWS from naturekit are
 //    never disposed here. GPU leaks have shipped from this repo three times.
 
-/** How far out resolve() lets anything walk once the Verge exists. Exported
- *  because city.resolve and tools/ read it; sourced from the descriptor so the
- *  number is authored once. */
+/** How far out resolve() lets anything walk once the Verge exists.
+ *  B4a STATUS: a THRESHOLD-sourced module binding kept for tools/ ONLY
+ *  (frontier-test/citylife-test read it as the spec number). The engine reads
+ *  spec.verge.limit at instance scope everywhere (city.resolve, this file's
+ *  scatter bounds, stats) — do not add an engine consumer here; Emberfall
+ *  happens to share the value, which is why the tools' contract still holds. */
 export const VERGE_LIMIT = THRESHOLD.verge.limit;
 
 // The annulus, in whole lattice rings so every vertex is shared with the city
@@ -67,7 +75,7 @@ export const VERGE_LIMIT = THRESHOLD.verge.limit;
 const RING_IN = 23;
 const RING_OUT = 41;
 const RING_CITY_RIM = 25;
-const CENTRE_IX = 42;              // FRONTIER_HALF / FRONTIER_CELL
+const CENTRE_IX = 42;              // rings per side-half: FRONTIER_HALF / FRONTIER_CELL
 
 // Seam skirt. The inner rings live UNDER the city ground mesh and are sunk so
 // they can never poke through it, deepest at the inside and a hair's breadth at
@@ -84,7 +92,8 @@ const SINK = [1.2, 0.6, 0.08];     // indexed by (ringV - RING_IN) clamped
 // POIs (step 7) carve pads into THIS field only. Anything closer in than this
 // would flatten ground the city field also owns, and the two would disagree —
 // the stitch guarantees agreement for the undisturbed surface, not for flats.
-// Exported (tools/ reads it); descriptor-sourced like VERGE_LIMIT.
+// Exported (tools/ reads it); THRESHOLD-sourced like VERGE_LIMIT and under
+// the same B4a status: tools-only. The validator reads spec.verge.poiMinR.
 export const POI_MIN_R = THRESHOLD.verge.poiMinR;
 
 // The breach centre, the cliff line and the wall used to be re-declared here
@@ -410,9 +419,17 @@ export class Frontier {
 
     // Same class, same analytic surface, same world edge — only the cell size
     // differs. No stitch: this lattice IS the stitch target.
+    //
+    // B4a: the lattice derives from the OWNER'S descriptor (2 x groundCell —
+    // the interlock contract itself; 42 rings — CENTRE_IX), not the module's
+    // Threshold-sourced FRONTIER_* exports, so a settlement's Verge always
+    // samples its own settlement's numbers. For every shipped descriptor the
+    // arithmetic lands on the same 6.8 / 285.6 (SHARED-LATTICE LAW,
+    // settlements.js) and the ring constants above stay valid.
+    const latCell = city.spec.wall.groundCell * 2;
     this.field = new HeightField({
-      size: FRONTIER_HALF * 2,
-      cell: FRONTIER_CELL,
+      size: latCell * CENTRE_IX * 2,
+      cell: latCell,
       seed,
       edge: city.spec.terrain.vergeEdge,
       // The owner's descriptor, so both fields evaluate ONE settlement's
@@ -499,7 +516,11 @@ export class Frontier {
     const stride = f.stride;
     const seed = f.seed;
     const BANDS = this.city.spec.verge.bands;
-    const BREACH_Z = this.city.spec.portals.breach.z;
+    // Absent-key guards (B4a): no breach means no ash widening; no cliff
+    // means the annulus runs the full square (the west cut exists only to
+    // keep the void under Threshold's Overlook empty).
+    const BREACH = this.city.spec.portals.breach || null;
+    const HAS_CLIFF = this.city.spec.wall.cliff !== false;
     const WEST_MESH_EDGE = -this.city.spec.wall.worldHalf;  // the city ground mesh's own west rim
 
     const meadow = new THREE.Color(0x6d8c4a);
@@ -524,6 +545,39 @@ export class Frontier {
     const trodden = new THREE.Color(0x9c8f74);   // ground people have stood on
     const c = new THREE.Color();
     const band = new THREE.Color();
+
+    // B4a: the band mix walks the DESCRIPTOR'S band table instead of naming
+    // Threshold's three keys (the Wave A deferral that bit first) — a meadow-
+    // only village iterates one entry, Threshold iterates its three in
+    // authoring order with arithmetic identical to the old wE/wS/wN sum. The
+    // band KEY selects its palette here AND its species in SPECIES, which is
+    // why Emberfall's all-around band keeps the key 'east_meadow'. An unknown
+    // key paints meadow rather than black: a wrong-but-visible band beats a
+    // vertex-colour hole.
+    const TONES = {
+      east_meadow: (out, d1, d2) => out.copy(meadow).lerp(meadowWarm, d1).lerp(meadowCool, d2 * 0.85),
+      south_amberwood: (out, d1) => out.copy(amber).lerp(amberDeep, d1),
+      north_ashreach: (out, d1, d2) => out.copy(ash).lerp(ashPale, d2).lerp(ashWarm, d1 * 0.7),
+    };
+    // B4b: a settlement may re-tone a band without renaming it
+    // (spec.verge.tones, keyed by band key, three hexes driving the same
+    // base/drift1/drift2 mix the meadow tone uses). The KEY stays the species
+    // selector — THE BIRCHREACH keeps 'south_amberwood' so the birches grow,
+    // but paints its floor forest-green instead of the amber that reads as
+    // autumn savanna against a green-fog canopy. Absent key = the shipped
+    // TONES row, term for term.
+    const SPEC_TONES = this.city.spec.verge.tones || null;
+    const bandList = Object.entries(BANDS).map(([key, def]) => {
+      const o = SPEC_TONES && SPEC_TONES[key];
+      if (o) {
+        const base = new THREE.Color(o.base);
+        const t1 = new THREE.Color(o.drift1);
+        const t2 = new THREE.Color(o.drift2);
+        return { def, tone: (out, d1, d2) => out.copy(base).lerp(t1, d1).lerp(t2, d2 * 0.85) };
+      }
+      return { def, tone: TONES[key] || TONES.east_meadow };
+    });
+    const bandW = new Float64Array(bandList.length);
 
     const hash2 = (ix, jz) => {
       let h = (ix * 374761393 + jz * 668265263 + seed) | 0;
@@ -555,13 +609,19 @@ export class Frontier {
         gpos[k * 3 + 1] = f.h[k] - vSink(ix, jz);
         gpos[k * 3 + 2] = z;
 
-        // --- directional bands, cross-faded rather than sliced.
+        // --- directional bands, cross-faded rather than sliced. Generic
+        // over the descriptor's table (see TONES above); for Threshold the
+        // loop reproduces the old wE/wS/wN arithmetic term for term, in the
+        // same order, because Object.entries preserves the descriptor's
+        // authoring order.
         const az = azimuth(x, z);
-        const bE = BANDS.east_meadow, bS = BANDS.south_amberwood, bN = BANDS.north_ashreach;
-        const wE = 1 - smoothstep(bE.soft[0], bE.soft[1], angDist(az, bE.centre));
-        const wS = 1 - smoothstep(bS.soft[0], bS.soft[1], angDist(az, bS.centre));
-        const wN = 1 - smoothstep(bN.soft[0], bN.soft[1], angDist(az, bN.centre));
-        const tot = wE + wS + wN || 1;
+        let tot = 0;
+        for (let bi = 0; bi < bandList.length; bi++) {
+          const bDef = bandList[bi].def;
+          bandW[bi] = 1 - smoothstep(bDef.soft[0], bDef.soft[1], angDist(az, bDef.centre));
+          tot += bandW[bi];
+        }
+        tot = tot || 1;
 
         // Each band gets the city ground's trick of a low-frequency hue drift,
         // because one flat tone across 100 m of open country is the exact
@@ -569,14 +629,14 @@ export class Frontier {
         const drift = smoothstep(0.38, 0.64, fbm(x * 0.014 + 61, z * 0.014 - 23, seed + 303, 2));
         const drift2 = smoothstep(0.42, 0.7, fbm(x * 0.037 - 5, z * 0.037 + 17, seed + 404, 2));
         // Weighted sum by hand: THREE.Color has no addScaled, and building the
-        // mix with chained lerps would make the third band's weight depend on
-        // the first two instead of on its own arc.
-        c.copy(meadow).lerp(meadowWarm, drift).lerp(meadowCool, drift2 * 0.85);
-        band.setRGB((c.r * wE) / tot, (c.g * wE) / tot, (c.b * wE) / tot);
-        c.copy(amber).lerp(amberDeep, drift);
-        band.setRGB(band.r + (c.r * wS) / tot, band.g + (c.g * wS) / tot, band.b + (c.b * wS) / tot);
-        c.copy(ash).lerp(ashPale, drift2).lerp(ashWarm, drift * 0.7);
-        band.setRGB(band.r + (c.r * wN) / tot, band.g + (c.g * wN) / tot, band.b + (c.b * wN) / tot);
+        // mix with chained lerps would make a later band's weight depend on
+        // the earlier ones instead of on its own arc.
+        band.setRGB(0, 0, 0);
+        for (let bi = 0; bi < bandList.length; bi++) {
+          const w = bandW[bi];
+          bandList[bi].tone(c, drift, drift2);
+          band.setRGB(band.r + (c.r * w) / tot, band.g + (c.g * w) / tot, band.b + (c.b * w) / tot);
+        }
 
         c.copy(band);
         c.lerp(rock, Math.min(1, f.slope(x, z) / 0.42) * 0.9);
@@ -587,7 +647,18 @@ export class Frontier {
         // were 40% flat tan with the band colour only arriving on the horizon,
         // and the whole point of the bands is that you can see which way you
         // are walking from the ground you are standing on.
-        c.lerp(dry, (1 - smoothstep(148, 184, Math.hypot(x, z))) * 0.8);
+        // B4b: the fade is descriptor-overridable (spec.verge.dryFade —
+        // { r: [r0, r1], strength }) because it is a TOWN shape: a walled
+        // city sits in worn ground, but a forest region's floor runs green
+        // to its own edge, and the shipped belt painted a tan ring exactly
+        // where THE BIRCHREACH's core mesh hands over to this annulus.
+        // Absent key = the shipped numbers, bit for bit.
+        {
+          const DF = this.city.spec.verge.dryFade || null;
+          const dfR0 = DF ? DF.r[0] : 148, dfR1 = DF ? DF.r[1] : 184;
+          const dfS = DF ? DF.strength : 0.8;
+          if (dfS > 0) c.lerp(dry, (1 - smoothstep(dfR0, dfR1, Math.hypot(x, z))) * dfS);
+        }
         // Verge tracks (Wave B1): the descriptor's 'track'-class road edges,
         // painted with the SAME kerbless packed-earth treatment the city
         // ground pass uses (spec.streets.trim.track — one vocabulary, two
@@ -614,8 +685,9 @@ export class Frontier {
         }
 
 
-        // Ash widens around the Breach on every side, band or not.
-        c.lerp(ash, 1 - smoothstep(30, 86, Math.hypot(x, z - BREACH_Z)));
+        // Ash widens around the Breach on every side, band or not — when the
+        // settlement has one.
+        if (BREACH) c.lerp(ash, 1 - smoothstep(30, 86, Math.hypot(x, z - BREACH.z)));
 
         // POI pads read as pale trodden discs. This is DISCOVERABILITY, not
         // decoration: a stamp 200 m out is a few pixels of silhouette against a
@@ -643,7 +715,9 @@ export class Frontier {
         // West of the city mesh's rim there is nothing to add — see
         // WEST_MESH_EDGE. Uses the cell's EAST bound so the cut lands on a
         // shared lattice line and the city mesh's own edge still meets ground.
-        if (-f.half + (ix + 1) * f.cell <= WEST_MESH_EDGE) continue;
+        // Cliff settlements only: a cliffless village's Verge wraps all the
+        // way round, west included.
+        if (HAS_CLIFF && -f.half + (ix + 1) * f.cell <= WEST_MESH_EDGE) continue;
         cells.push(jz * f.n + ix);
       }
     }
@@ -738,6 +812,12 @@ export class Frontier {
         npcs: def.npcs || 0,
         npcHunter: Boolean(def.npcHunter),
         npcAnchors: [],
+        // B4b: a hidden POI's wild gate stays off the compass (and, when the
+        // one-line mapui filter lands, off the chart) until the clearing is
+        // discovered on foot — _stampWildGate copies this onto the portal and
+        // update()'s discovery flip below clears it. Absent = false, so every
+        // shipped POI is exactly as loud as it was.
+        hidden: Boolean(def.hidden),
       });
     }
   }
@@ -760,7 +840,7 @@ export class Frontier {
     if (rc > V.limit - 6) bad.push('outside_walkable');
     if (x <= S.wall.cliffX) bad.push('west_of_cliff');
     if (Math.max(Math.abs(x), Math.abs(z)) - S.wall.half < R.minWall) bad.push('too_close_to_wall');
-    if (Math.hypot(x, z - S.portals.breach.z) < R.minBreach) bad.push('breach_ash');
+    if (S.portals.breach && Math.hypot(x, z - S.portals.breach.z) < R.minBreach) bad.push('breach_ash');
     if (this.field && this.field.slope(x, z) > R.maxSlope) bad.push('slope');
     for (const other of V.pois) {
       if (other.id === def.id || other.id === ignoreId) continue;
@@ -1151,6 +1231,12 @@ export class Frontier {
       locked,
       anomaly: false,
       wild: true,
+      // Hidden rides the POI (B4b, THE BIRCHREACH's forest-kept gate):
+      // consumers that ADVERTISE position (citymode's compass pips, mapui's
+      // gate pips) skip a hidden portal; consumers that REACT to standing at
+      // it (prompt, portalAt, lock refresh) do not — a gate you are looking
+      // at is not hidden from you.
+      hidden: Boolean(poi.hidden),
       poi: poi.id,
       group: built.group,
       phase: rnd() * 6.283,
@@ -1238,6 +1324,13 @@ export class Frontier {
     const treeShadows = !!q.shadows && (q.instanceScale ?? 1) >= 0.9;
 
     for (const spec of SPECIES) {
+      // B4a: a species whose EVERY arc is absent from this settlement's band
+      // table places nothing and must not exist — a 0-count field still
+      // costs its draw calls forever (the emptyFields lesson, applied one
+      // step earlier). Threshold's table carries all three keys, so this
+      // filter is a no-op there and the stream is untouched; Emberfall's
+      // meadow-only table benches the amberwood/ashreach species here.
+      if (spec.bands && !spec.bands.some((k) => city.spec.verge.bands[k])) continue;
       const target = Math.max(1, Math.round(spec.n * density));
       const field = new NatureField(spec.key, target + 4, {
         castShadow: spec.solid > 0 && (spec.tree ? treeShadows : !!q.shadows),
@@ -1279,11 +1372,19 @@ export class Frontier {
       // Bare open country is meant to look bare; tufts belong where feet go.
       // Default lanes are east, south and the Breach road north. Flowers skip
       // the Breach road: blossom on burnt ground reads as the wrong asset.
-      const lanes = spec.lanes || [0, 90, 270];
+      // Species lanes first, then the SETTLEMENT'S own (spec.verge.lanes —
+      // Emberfall's roads run all four ways), then Threshold's shipped
+      // default (east, south, the Breach road north). The fallback keeps
+      // Threshold's draw count and values bit-identical.
+      const lanes = spec.lanes || V.lanes || [0, 90, 270];
       const lane = lanes[Math.floor(rnd() * lanes.length)];
       az = lane + (rnd() * 2 - 1) * 11;
     } else if (spec.bands) {
-      const arc = V.bands[spec.bands[Math.floor(rnd() * spec.bands.length)]].arc;
+      // Only arcs this settlement's table actually has. _buildScatter already
+      // benched all-absent species; for Threshold the filter keeps the full
+      // list, so the roll below is the shipped roll over the shipped array.
+      const av = spec.bands.filter((k) => V.bands[k]);
+      const arc = V.bands[av[Math.floor(rnd() * av.length)]].arc;
       az = arc[0] + rnd() * (arc[1] - arc[0]);
     } else {
       // Bandless fallback — every species in the table today names its bands,
@@ -1311,7 +1412,7 @@ export class Frontier {
     if (x < S.wall.cliffX + 8) return false;
     const rc = Math.max(Math.abs(x), Math.abs(z));
     if (rc < S.verge.scatterIn || rc > S.verge.limit - 6) return false;
-    if (Math.hypot(x, z - S.portals.breach.z) < 26) return false;
+    if (S.portals.breach && Math.hypot(x, z - S.portals.breach.z) < 26) return false;
     if (this.field.slope(x, z) > 0.4) return false;
     if (spec.high != null && this.field.height(x, z) < spec.high) return false;
     // Off the B1 tracks: a tree or a boulder ON the packed earth un-builds
@@ -1390,6 +1491,10 @@ export class Frontier {
       const dz = playerPos.z - p.pos.z;
       if (dx * dx + dz * dz > p.radius * p.radius) continue;
       p.discovered = true;
+      // Discovery un-hides the gate everywhere at once: the poi record (map
+      // diamonds) already flips above; the portal record is the compass/map
+      // pip's authority and must flip WITH it or the two UIs disagree.
+      if (p.portal && p.portal.hidden) p.portal.hidden = false;
       this.onDiscover?.(p);
     }
   }
@@ -1462,7 +1567,9 @@ export class Frontier {
           this.city.spec.verge.pois.find((d) => d.id === p.id), p.pos.x, p.pos.z, p.id,
         ),
       })),
-      limit: VERGE_LIMIT,
+      // Instance-scope (B4a): the OWNER settlement's limit, not the module's
+      // Threshold binding — same number for every shipped descriptor today.
+      limit: this.city.spec.verge.limit,
     };
   }
 }

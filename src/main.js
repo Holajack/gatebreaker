@@ -15,6 +15,7 @@ import { ShopUI } from './ui/shopui.js';
 import { AssayUI } from './ui/cityui.js';
 import { InventoryUI } from './ui/inventoryui.js';
 import { MapUI } from './ui/mapui.js';
+import { SETTLEMENTS } from './world/settlements.js';
 import { DialogUI } from './ui/dialogui.js';
 import { JournalUI } from './ui/journalui.js';
 import * as Weapons from './game/weapons.js';
@@ -38,6 +39,11 @@ const ui = new UI({
     Save.wipe();
     saveData = Save.freshSave();
     game.save = saveData;
+    // The settlement hook outlives saves by design (it is a session override,
+    // not save state) — but an ERASED hunter must wake in Threshold, not in
+    // whatever town the last session was standing in (review fix: the stale
+    // hook sat ABOVE the fresh save in citymode's precedence chain).
+    game.settlementSpec = null;
     ui.attach(saveData);
     game.refreshDerived(true);
     ui.refreshTitle();
@@ -75,6 +81,18 @@ const app = new AppState({
         break;
       case 'city':
         audio.unlock();
+        // Waygate travel (Wave B5): the route payload may name a settlement
+        // slug, but game.enterCity's signature strips unknown keys, so the
+        // slug rides the game.settlementSpec hook citymode.enter reads (its
+        // fallback chain: payload -> this hook -> save.settlement ->
+        // Threshold). Set here — the router is the one place every 'city'
+        // entry passes through — so appState.go('city', { settlement, atPortal })
+        // is a complete travel instruction without touching game.js. An
+        // unknown slug is left to citymode's own fallback rather than
+        // clobbering the hook with undefined.
+        if (payload?.settlement && SETTLEMENTS[payload.settlement]) {
+          game.settlementSpec = SETTLEMENTS[payload.settlement];
+        }
         game.enterCity(payload);
         break;
       case 'gates':

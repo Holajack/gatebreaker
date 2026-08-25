@@ -516,6 +516,8 @@ export class Interiors {
   _plotOk(ci, cj, wc, dc) {
     const city = this.city;
     const { half: WALL_HALF, plazaR: PLAZA_R } = city.spec.wall;
+    // Both nullable (B4a): a settlement without a market strip or a spire —
+    // Emberfall — authors null and the matching keep-outs below are skipped.
     const { marketZone: MARKET_ZONE, spireKeep: SPIRE_KEEP } = city.spec.interiors;
     const x0 = ci * KIT_CELL - KIT_CELL / 2;
     const x1 = (ci + wc - 1) * KIT_CELL + KIT_CELL / 2;
@@ -538,15 +540,18 @@ export class Interiors {
 
     // Off the market strip — city._buildProps plants its stalls there without
     // consulting anything.
-    if (x1 > MARKET_ZONE.x0 && x0 < MARKET_ZONE.x1
+    if (MARKET_ZONE && x1 > MARKET_ZONE.x0 && x0 < MARKET_ZONE.x1
       && z1 > MARKET_ZONE.z0 && z0 < MARKET_ZONE.z1) return false;
 
     // Leave the spire its site.
-    if (Math.hypot(cx - SPIRE_KEEP.x, cz - SPIRE_KEEP.z)
+    if (SPIRE_KEEP && Math.hypot(cx - SPIRE_KEEP.x, cz - SPIRE_KEEP.z)
       < SPIRE_KEEP.r + Math.max(x1 - x0, z1 - z0) / 2) return false;
 
-    // The two fountains, which _buildProps also places unconditionally.
-    for (const f of [{ x: 0, z: 17.5 }, { x: -58, z: -12 }]) {
+    // The fountains, which _buildProps places without a boxes test — read
+    // from the SAME descriptor row it places from (spec.props.fountains),
+    // retiring the hand-mirrored coordinate pair this loop used to carry
+    // (the drift the AUTHORITY WARNING on spec.interiors documents).
+    for (const f of (city.spec.props.fountains || [])) {
       if (f.x > x0 - 4 && f.x < x1 + 4 && f.z > z0 - 4 && f.z < z1 + 4) return false;
     }
 
@@ -574,7 +579,11 @@ export class Interiors {
     const { ci, cj, wc, dc } = plot;
     const b = {
       id: def.id,
-      name: def.name,
+      // A settlement may rename a shared ENTERABLES row without forking its
+      // structure (spec.interiors.names, keyed by id) — Emberfall's
+      // waystation IS the tavern row wearing the village's sign. Absent
+      // means the row's own name, so Threshold reads exactly as shipped.
+      name: this.city.spec.interiors.names?.[def.id] || def.name,
       style: def.style,
       dressing: def.dressing,
       ci, cj, wc, dc,

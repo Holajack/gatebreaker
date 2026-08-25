@@ -311,9 +311,19 @@ export class Citizens {
    */
   build(rnd, { save = null } = {}) {
     this._rnd = rnd;
-    for (const spec of rosterFor(currentTier())) {
-      const npc = this._spawn(spec, rnd);
-      if (npc) this.npcs.push(npc);
+    // A settlement may decline the town roster (spec.crowd.town === false —
+    // B4b, THE BIRCHREACH): sixteen civilians strolling a forest is the town
+    // simulation wearing the wrong coat, and _pickPoint indexes this.streets,
+    // which an all-'track' region has none of. Guarded on ABSENCE so both
+    // towns run the shipped loop — and its rnd() draws — bit for bit. Camp
+    // hunters are unaffected: _spawnCamps below reads the built POI records,
+    // and stationed npcs wander their station, never _pickPoint.
+    const wantTownCrowd = this.city.spec.crowd?.town !== false;
+    if (wantTownCrowd) {
+      for (const spec of rosterFor(currentTier())) {
+        const npc = this._spawn(spec, rnd);
+        if (npc) this.npcs.push(npc);
+      }
     }
     // After the crowd, so the anchor probes can lean on a settled city and so
     // the companion's character-budget slot is taken last (a civilian that

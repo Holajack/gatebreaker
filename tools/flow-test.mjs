@@ -96,7 +96,7 @@ try {
   ok(arrived.hasCity, 'no City was built on entering the hub');
   // WORLD_SPEC step 7 appends the Verge's wild gates to city.portals; the
   // town's own six are the non-wild ones.
-  ok(arrived.portals.filter((p) => !p.wild).length === 6,
+  ok(arrived.portals.filter((p) => !p.wild && p.rank).length === 6,
     `expected 6 town portals, saw ${arrived.portals.filter((p) => !p.wild).length}`);
   ok(!arrived.gateBuilt, 'a gate was built on entering the city — this is the bug the owner reported');
   ok(arrived.enemies === 0, `${arrived.enemies} enemies exist in the hub`);

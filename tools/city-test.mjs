@@ -113,10 +113,12 @@ try {
       stats: city.stats,
       kitStats: kit.cityKitStats(),
       portals: city.portals.map((p) => ({
+        id: p.id,
         rank: p.rank,
         color: p.color,
         locked: p.locked,
         wild: Boolean(p.wild),
+        way: p.way ? { ...p.way } : null,
         meshes: p.group.children.length,
         pos: { x: +p.pos.x.toFixed(2), y: +p.pos.y.toFixed(2), z: +p.pos.z.toFixed(2) },
       })),
@@ -143,9 +145,26 @@ try {
   // WORLD_SPEC step 7: the Verge appends its wild gates to city.portals (that
   // is what makes portalAt/nearestPortal/compass/prompt work on them without a
   // line of change), so the town's own six are the non-wild ones.
-  const townPortals = build.portals.filter((p) => !p.wild);
-  ok(townPortals.length === 6, `expected 6 town portals, got ${townPortals.length}`);
+  //
+  // WAVE B5 RETARGET: this.portals now also carries the settlement's
+  // WAYGATES (kind:'way', rank null, silver-white) — travel went live, and
+  // Threshold ships exactly one, beside the north gate. The old "6 town
+  // portals" truth is now "6 RANK portals + 1 waygate": the rank ladder is
+  // unchanged, the waygate sits outside it (no rank colour, never locked),
+  // and its `way` payload names Emberfall's return gate.
+  const townPortals = build.portals.filter((p) => !p.wild && !p.way);
+  ok(townPortals.length === 6, `expected 6 rank town portals, got ${townPortals.length}`);
+  const wayPortals = build.portals.filter((p) => p.way);
+  ok(wayPortals.length === 1, `expected 1 waygate in Threshold (B5), got ${wayPortals.length}`);
+  const wg = wayPortals[0];
+  ok(wg && wg.id === 'way-threshold-north' && wg.rank === null && !wg.locked
+    && wg.way.toSettlement === 'emberfall' && wg.way.toPortalId === 'way-emberfall-green',
+    `the waygate record is wrong: ${JSON.stringify(wg)}`);
+  ok(wg && wg.meshes === 4, `waygate has ${wg?.meshes} meshes, the shared portal build makes 4`);
+  ok(wg && !Object.values(EXPECT_COLORS).includes(wg.color),
+    `the waygate wears a rank colour (0x${wg?.color?.toString(16)}) — it must sit outside the ladder`);
   for (const p of build.portals) {
+    if (p.way) continue;   // asserted above; EXPECT_COLORS is rank-keyed
     ok(EXPECT_COLORS[p.rank] === p.color,
       `portal ${p.rank} colour is 0x${p.color.toString(16)}, spec says 0x${EXPECT_COLORS[p.rank]?.toString(16)}`);
     ok(p.meshes === 4, `portal ${p.rank} has ${p.meshes} meshes, spec says 4`);
@@ -723,8 +742,10 @@ try {
   ok(fallback.facadeVerts > 0 && fallback.facadeHeight > 0, 'buildFacade produced nothing');
   ok(fallback.blockBoxes > 0 && fallback.blockObstacles > 0, 'buildBlock returned no collision');
   ok(fallback.fieldIsInstanced, 'makePropField did not return an InstancedMesh');
-  ok(fallback.stats.portals - fallback.stats.wildGates === 6,
-    `the procedural city built ${fallback.stats.portals - fallback.stats.wildGates} town portals`);
+  // B5 retarget: stats.portals counts the waygate too (it lives in
+  // city.portals like every other portal), so town = portals - wild - 1 way.
+  ok(fallback.stats.portals - fallback.stats.wildGates === 7,
+    `the procedural city built ${fallback.stats.portals - fallback.stats.wildGates} town portals (6 rank + 1 waygate expected)`);
   ok(fallback.stats.wildGates === 2,
     `the procedural Verge built ${fallback.stats.wildGates} wild gates, spec says 2`);
   ok(fallback.calls > 10, `the procedural city only issued ${fallback.calls} draw calls — it is empty`);

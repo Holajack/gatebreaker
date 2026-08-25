@@ -19,8 +19,13 @@ import { Interiors } from './interiors.js';
 // tools/ imports validateLayout from the same module and asserts them off
 // city.layoutMeta afterwards, so builder and test read one table.
 import {
-  LAYOUT_RULES, DISTRICT_PROFILES, districtOfPoint, silhouetteTuple,
+  LAYOUT_RULES, districtOfPoint, silhouetteTuple,
   corridorCap, pointSegDistance, segParam, compareAlongStreet,
+  // B4a: the builder resolves its rules/profiles PER SETTLEMENT through this
+  // one function (Threshold gets the module tables back by reference, so its
+  // path is bit-identical); validateLayout resolves through the same one, so
+  // builder and assert can never read two tables.
+  layoutTablesFor,
 } from './layoutrules.js';
 // The settlement descriptor — this town's identity as one data object. A LEAF
 // module (imports nothing), so reading it here at module-eval time is safe
@@ -81,6 +86,14 @@ export const PORTAL_COLORS = {
   ANOMALY: 0xff7af0,
 };
 
+// The waygate's dye (Wave B5). ONE colour for the whole way network, not per
+// settlement: rank colours answer "how deep is this gate" and a waygate has no
+// depth, so it must sit outside that ladder — a neutral silver-white, taken
+// from the existing palette discipline (it is THRESHOLD.palettes.city.detail,
+// the town's trim/highlight white) rather than a new saturated primary that
+// would read as a seventh rank.
+export const WAY_COLOR = 0xd8e0ee;
+
 // Geometry of the town, in metres — moved to THRESHOLD.wall in settlements.js
 // so a second town can exist without forking this file. Everything else still
 // derives from those numbers; every builder below reads them through this.spec
@@ -99,10 +112,20 @@ export const PORTAL_COLORS = {
 // makes the two lattices interlock: 170 = 25 x 6.8, so every second city vertex
 // lands on a frontier vertex and no seam vertex is ever orphaned.
 // Exported CONSTANTS rather than this.spec reads, deliberately: they are the
-// terrain contract's public face (frontier.js and tools/ import them), and
-// deriving them from THRESHOLD here keeps one authoring point without changing
-// any importer. A future second settlement that wants a different lattice pays
-// for that refactor when it exists; today's descriptor clones share Threshold's.
+// terrain contract's public face (tools/ imports them), and deriving them
+// from THRESHOLD here keeps one authoring point without changing any importer.
+//
+// B4a STATUS OF THESE BINDINGS — read before adding a consumer:
+// FRONTIER_CELL/FRONTIER_HALF, VERGE_EDGE and BLEND_R0/R1 are THRESHOLD-
+// sourced MODULE constants. The ENGINE no longer reads any of them on a build
+// path: heightAt/groundNormal read spec.terrain.blend, build() reads
+// spec.terrain.vergeEdge/stitch, and Frontier.build derives its lattice from
+// city.spec.wall.groundCell at instance scope. What remains on them is the
+// TOOLS' terrain contract (frontier-test's spec numbers) — which stays true
+// because EMBERFALL shares Threshold's lattice by law (settlements.js,
+// SHARED-LATTICE LAW). A settlement with a DIFFERENT lattice must not exist
+// until these exports become per-spec queries; that refactor is paid for by
+// whoever authors it, and this comment is where the bill is posted.
 export const FRONTIER_CELL = THRESHOLD.wall.groundCell * 2;   // 6.8
 export const FRONTIER_HALF = FRONTIER_CELL * 42; // 285.6
 
@@ -154,11 +177,34 @@ export const BLEND_R1 = THRESHOLD.terrain.blend[1];
  * flattening the city field's clamped rim is exactly the seam bug BLEND_R0 was
  * moved to avoid. Generation and signage are deliberately different lists.
  *
- * Module-level and THRESHOLD-backed even though districts now live on the
- * descriptor: citymode imports this binding, and the banner system is a
- * per-app singleton until a second settlement actually exists.
+ * Module-level even though districts live on the descriptor: citymode imports
+ * this binding, and the banner system is a per-app SINGLETON — deliberately,
+ * because two settlements never coexist in a scene (the same InstancedMesh
+ * law that makes B5's travel a full rebuild). B4a made it FOLLOW the built
+ * settlement instead of assuming Threshold: City.build repopulates it via
+ * setBannerDistricts, so whichever town last built owns the banners — which
+ * in the app is always the mounted one. A harness that keeps two Cities
+ * alive at once (city-test's scratch seeds) sees the LAST build's list,
+ * which is the documented singleton limitation, not a leak.
  */
 export const DISTRICTS = THRESHOLD.districts.slice();
+
+// How many entries are the TOWN's own (the truncation point for
+// clearVergeDistricts). Threshold's six at module load; setBannerDistricts
+// re-stamps it per build.
+let _bannerBase = THRESHOLD.districts.length;
+
+/**
+ * Point the banner list at a settlement's own districts. Called by
+ * City.build BEFORE the Verge builds (frontier registers its POIs on top).
+ * ARRAY IDENTITY IS THE CONTRACT — citymode holds the binding — so this
+ * empties and refills in place, never reassigns.
+ */
+export function setBannerDistricts(spec) {
+  DISTRICTS.length = 0;
+  DISTRICTS.push(...spec.districts);
+  _bannerBase = spec.districts.length;
+}
 
 /** Add a Verge POI to the banner list. Returns the entry so the caller can drop it. */
 export function registerVergeDistrict(entry) {
@@ -166,9 +212,9 @@ export function registerVergeDistrict(entry) {
   return entry;
 }
 
-/** Truncate back to the town six. Idempotent — dispose paths run twice here. */
+/** Truncate back to the built town's own entries. Idempotent — dispose paths run twice here. */
 export function clearVergeDistricts() {
-  DISTRICTS.length = THRESHOLD.districts.length;
+  DISTRICTS.length = _bannerBase;
 }
 
 // The interactables table (doors the player can stand in front of) lives on
@@ -277,8 +323,19 @@ export function groundBase(x, z, seed, edge = null, spec = THRESHOLD) {
 
   // West cliff: the ground simply stops. Spread over 16 m so the mesh's own
   // linear interpolation still tracks it and heightAt cannot drift.
-  const onLedge = smoothstep(CLIFF_X - 16, CLIFF_X - 1, x);
-  h = lerp(-34, h, onLedge);
+  //
+  // B4a: wall.cliff === false (Emberfall) means NO CLIFF — the ledge drop and
+  // the westEdge fall-away below are skipped outright rather than pushed out
+  // of range by arithmetic, because lerp(a, b, 1) is a float away from b and
+  // "identical when present" is the law here. onLedge stays 1 so the westEdge
+  // term below is exactly zero. Threshold has no `cliff` key, so absent means
+  // the shipped path, bit for bit.
+  const hasCliff = spec.wall.cliff !== false;
+  let onLedge = 1;
+  if (hasCliff) {
+    onLedge = smoothstep(CLIFF_X - 16, CLIFF_X - 1, x);
+    h = lerp(-34, h, onLedge);
+  }
 
   // The world ENDS rather than being fenced in by a ridge.
   //
@@ -293,12 +350,18 @@ export function groundBase(x, z, seed, edge = null, spec = THRESHOLD) {
   const worldEdge = smoothstep(edge[0], edge[1], r);
   // West of the cliff the void floor keeps its ORIGINAL fall-away, whatever the
   // world edge is doing, so the Overlook does not become a 160 m grey shelf.
+  // (Zero without a cliff: onLedge is pinned to 1 above.)
   const westEdge = smoothstep(CITY_EDGE[0], CITY_EDGE[1], r) * (1 - onLedge);
   h = lerp(-46, h, 1 - Math.max(worldEdge, westEdge));
 
   // The Breach approach climbs: walking out to the S gate is uphill.
-  const bd = Math.hypot(x, z - spec.portals.breach.z);
-  h += smoothstep(62, 16, bd) * 7.5;
+  // B4a: a settlement without a breach (no portals.breach key — Emberfall)
+  // skips the bump; every other breach consumer guards the same way, so the
+  // key's absence IS the feature flag and no second boolean can drift from it.
+  if (spec.portals.breach) {
+    const bd = Math.hypot(x, z - spec.portals.breach.z);
+    h += smoothstep(62, 16, bd) * 7.5;
+  }
   return h;
 }
 
@@ -527,8 +590,13 @@ function distToSegment(x, z, s) {
  * player; the Breach faces back down its road (yaw 0, the shipped value).
  * citymode._spawnVector steps out along this yaw, which is why it must be
  * the walkable side.
+ *
+ * EXPORTED since Wave B5: mapui's settlement switcher draws a remote
+ * settlement's pips from its DESCRIPTOR (static placements — no live City is
+ * ever built for a town you are merely looking at), and this is the one
+ * function that knows what a placement's anchor means. Read-only, no RNG.
  */
-function resolvePortalPlacement(spec, pl) {
+export function resolvePortalPlacement(spec, pl) {
   const a = pl.anchor || {};
   if (a.kind === 'breach') {
     return { x: 0, z: spec.portals.breach.z, yaw: 0, scale: 1.85, outside: true };
@@ -685,7 +753,7 @@ export class City {
     // Fail at construction, not mid-build: a descriptor missing a section
     // would otherwise surface as a NaN heightfield three builders later.
     for (const key of ['wall', 'terrain', 'streets', 'districts', 'portals',
-      'interactables', 'palettes', 'interiors', 'verge']) {
+      'interactables', 'palettes', 'interiors', 'verge', 'props']) {
       if (!spec[key]) throw new Error(`[city] settlement '${spec.slug}' descriptor missing '${key}'`);
     }
     this.spec = spec;
@@ -782,7 +850,35 @@ export class City {
     // dispose() detaches the group from the scene; a rebuilt City must come
     // back, whether this instance is fresh or reused across city entries.
     if (!this.group.parent) this.scene.add(this.group);
-    const rnd = mulberry32((seed ^ 0x9e3779b9) >>> 0);
+    // The build stream, FORKED PER SETTLEMENT: spec.seedSalt XORs into the
+    // seed before the mix constant, so two settlements built from one save
+    // seed roll independent dice. Threshold carries no salt (^ 0 — the
+    // shipped stream, bit for bit); every new settlement must author one.
+    const salt = (this.spec.seedSalt || 0) >>> 0;
+    const rnd = mulberry32(((seed ^ salt) ^ 0x9e3779b9) >>> 0);
+    // The WAYGATE stream (Wave B5): kind:'way' placements were authored into
+    // every settlement's stream contract as ZERO main-stream draws (see
+    // _buildPortals), so activating them must not spend the town's own dice.
+    // They get their own forked mulberry32 — 'WAYG' — minted per build exactly
+    // like the interiors fork below, and the main stream's DRAW SEQUENCE
+    // stays byte-identical to the pre-B5 build in all three settlements.
+    // The BUILT TOWN near a waygate does not (review finding, accepted as
+    // part of the owner-approved feature): the gate's keep-out and dais make
+    // _blockedForProp/_natureSpotOk REJECT candidates the shipped town
+    // accepted, so street furniture and scatter re-place around the new
+    // portal — a new gate must clear its own ground. Same dice, different
+    // answers; the frontier baseline was re-recorded for exactly this.
+    this._waySeed = ((seed ^ salt) ^ 0x57415947) >>> 0;
+
+    // The banner list follows the built settlement (see setBannerDistricts).
+    // BEFORE anything else: the Verge registers its POIs on top of the town's
+    // own entries, and citymode walks the module binding every frame.
+    setBannerDistricts(this.spec);
+
+    // The per-settlement layout tables, resolved ONCE per build. Threshold
+    // resolves to the module tables by reference — same objects, same
+    // behaviour; _layout and _buildProps read through this handle.
+    this._lt = layoutTablesFor(this.spec);
 
     // The Verge is ON unless a caller explicitly opts out. Default-off would
     // mean the only configuration anyone ever plays is the one no test covers;
@@ -838,6 +934,11 @@ export class City {
     // then buried under a dais reads as a bug from three metres away. Radius
     // is the dais collider (2.6 x scale) plus prop slack. _blockedForProp is
     // the single consumer.
+    //
+    // kind:'way' placements (B4a, inert until B5's travel) ARE in this list
+    // on purpose even though _buildPortals skips them: the waygate's future
+    // site stays clear of lanterns and fences from the settlement's first
+    // build, so activating it later is a data flip, not a re-layout.
     this._portalSites = this.spec.portals.placements.map((pl) => {
       const site = resolvePortalPlacement(this.spec, pl);
       return { x: site.x, z: site.z, keepR: 2.6 * site.scale + 1.0 };
@@ -880,7 +981,12 @@ export class City {
     // 3. Geometry.
     this._buildSkyAndLight();
     this._buildGround();
-    this._buildCityWall();
+    // B4a: the wall is OPTIONAL (wall.built === false skips it — Emberfall).
+    // A wall-less settlement's boundary is the Verge blend itself: resolve()'s
+    // walk limit still fences the player, and nothing else consumes the wall
+    // geometry (its collision runs and gate towers are all built inside
+    // _buildCityWall). Threshold has no `built` key — absent means built.
+    if (this.spec.wall.built !== false) this._buildCityWall();
     this._buildBuildings(buildings, rnd);
     this._buildProps(rnd, buildings);
     this._buildPortals(rnd, save);
@@ -906,7 +1012,9 @@ export class City {
     // boxes with a hole in one of them, and the hash is what collision reads.
     // Forked stream, never the town's own: a rebuild must reproduce, and the
     // window dice in here must not shift the procedural city by one draw.
-    this.interiors.build(mulberry32((seed ^ 0x5bf03635) >>> 0));
+    // Salted per settlement exactly like the main stream above (^ 0 for
+    // Threshold — the shipped fork, bit for bit).
+    this.interiors.build(mulberry32(((seed ^ salt) ^ 0x5bf03635) >>> 0));
     this._triangles += this.interiors.triangles;
 
     for (const f of this.fields) { f.finalize().addTo(this.group); this._triangles += f.triangles; }
@@ -1072,7 +1180,19 @@ export class City {
     const n = f.n, stride = f.stride;
     const verts = stride * stride;
     const { half: WALL_HALF, plazaR: PLAZA_R } = this.spec.wall;
-    const BREACH_Z = this.spec.portals.breach.z;
+    // null = no breach in this settlement; the ash ring below is skipped.
+    const BREACH = this.spec.portals.breach || null;
+    // 'green' = the settlement's central disc is a village common (worn
+    // grass, painted in the track vocabulary) instead of the plaza's
+    // flagstone rings. Absent = flagstones — Threshold's shipped paint.
+    const GREEN = this.spec.wall.plazaStyle === 'green';
+    // The dry-out band, descriptor-overridable (B4b): [r0, r1] for the lerp
+    // toward the dusty `dry` tone. The default is the shipped town derivation
+    // — ground wears out toward the walls — byte for byte; THE BIRCHREACH
+    // authors [200, 320] because a forest floor that parches from r=38 (its
+    // half is 64) would paint the whole wood as drought. Absent key =
+    // Threshold/Emberfall untouched.
+    const DRY_BAND = this.spec.terrain.dryBand || [WALL_HALF - 26, WALL_HALF + 40];
 
     // No convertSRGBToLinear anywhere in this file: ColorManagement is on, so
     // new THREE.Color(hex) is already in the linear working space and a second
@@ -1140,7 +1260,7 @@ export class City {
         c.copy(grass);
         c.lerp(grassWarm, smoothstep(0.38, 0.62, fbm(x * 0.016 + 31, z * 0.016 - 8, seed + 101, 2)));
         c.lerp(grassCool, smoothstep(0.45, 0.68, fbm(x * 0.041 - 12, z * 0.041 + 4, seed + 202, 2)) * 0.9);
-        c.lerp(dry, smoothstep(WALL_HALF - 26, WALL_HALF + 40, r));
+        c.lerp(dry, smoothstep(DRY_BAND[0], DRY_BAND[1], r));
         c.lerp(rock, Math.min(1, f.slope(x, z) / 0.5) * 0.85);
 
         // Paving, with a kerb band just outside each street's width. The band
@@ -1168,7 +1288,13 @@ export class City {
         // (B1's law; the cut line hides inside the wall gates' own footprint).
         // Painted BEFORE pave so the Breach road overrides the watchtower
         // track where the two share the north gate's mouth.
-        if (r > WALL_HALF) {
+        //
+        // trim.track.inside (B4b) un-gates the paint from r > wall.half: a
+        // forest region's spine is a track THROUGH the core, and it has no
+        // wall-gate footprint to hide the cut line in (Threshold) and no
+        // +-half geometry trick to close it with (Emberfall). Absent key =
+        // the shipped gate, bit for bit.
+        if (r > WALL_HALF || TRIM.track.inside === true) {
           const TF = TRIM.track.feather;
           let trackW = 0;
           for (const s of this.tracks) {
@@ -1194,17 +1320,30 @@ export class City {
         const dPlaza = Math.hypot(x, z);
         const inPlaza = dPlaza < PLAZA_R + 2;
         if (inPlaza) {
-          const ringI = Math.floor(dPlaza / 6.5);
-          const sectorI = Math.floor((Math.atan2(z, x) + Math.PI) / (Math.PI / 5));
-          c2.copy((ringI + sectorI) % 2 ? flagAlt : flag);
-          c.lerp(c2, 1 - smoothstep(PLAZA_R - 1, PLAZA_R + 2, dPlaza));
+          if (GREEN) {
+            // The village green: grass worn toward the trodden hex at the
+            // middle, strongest at the centre where feet cross, fading out
+            // by the rim. The same colour family as the tracks arriving at
+            // it, so the green reads as the place the roads pool — a common,
+            // not a paved civic disc.
+            c.lerp(track, (1 - smoothstep(PLAZA_R * 0.35, PLAZA_R + 2, dPlaza)) * 0.5);
+          } else {
+            const ringI = Math.floor(dPlaza / 6.5);
+            const sectorI = Math.floor((Math.atan2(z, x) + Math.PI) / (Math.PI / 5));
+            c2.copy((ringI + sectorI) % 2 ? flagAlt : flag);
+            c.lerp(c2, 1 - smoothstep(PLAZA_R - 1, PLAZA_R + 2, dPlaza));
+          }
         }
 
-        const dBreach = Math.hypot(x, z - BREACH_Z);
-        if (dBreach < 20) c.lerp(ash, 1 - smoothstep(13, 20, dBreach));
+        if (BREACH) {
+          const dBreach = Math.hypot(x, z - BREACH.z);
+          if (dBreach < 20) c.lerp(ash, 1 - smoothstep(13, 20, dBreach));
+        }
 
         vcol[k * 3] = c.r; vcol[k * 3 + 1] = c.g; vcol[k * 3 + 2] = c.b;
-        vstone[k] = Math.max(pave, inPlaza ? 1 : 0);
+        // A green is grass, not stone: it keeps the grass's full-luminance
+        // face jitter instead of the paving's damped one.
+        vstone[k] = Math.max(pave, inPlaza && !GREEN ? 1 : 0);
       }
     }
 
@@ -1448,6 +1587,9 @@ export class City {
    */
   _layout(rnd) {
     const { half: WALL_HALF, plazaR: PLAZA_R, buildingBudget: BUILDING_BUDGET } = this.spec.wall;
+    // Per-settlement tables (B4a). Threshold: the module tables by reference.
+    const LT = this._lt || layoutTablesFor(this.spec);
+    const RULES = LT.rules;
     const cellsHalf = Math.floor((WALL_HALF - 6) / KIT_CELL);
     const dim = cellsHalf * 2 + 1;
     const occ = new Uint8Array(dim * dim);
@@ -1504,7 +1646,7 @@ export class City {
         const x = ci * KIT_CELL, z = cj * KIT_CELL;
         let near = Infinity;
         for (const s of this.streets) near = Math.min(near, distToSegment(x, z, s));
-        if (near < LAYOUT_RULES.frontageMax) anchors.push({ ci, cj, near });
+        if (near < RULES.frontageMax) anchors.push({ ci, cj, near });
       }
     }
     for (let i = anchors.length - 1; i > 0; i--) {
@@ -1535,7 +1677,9 @@ export class City {
         ax: ci * KIT_CELL, az: cj * KIT_CELL,     // the anchor cell, for frontage
         w: wc * KIT_CELL, d: dc * KIT_CELL,
         ridgeAlongZ: alongZ,
-        district: districtOfPoint(cx, cz, this.districts),
+        // `single` (a hamlet) bypasses districtOfPoint: its civic ring radii
+        // describe a town shape a one-quarter village does not have.
+        district: LT.single || districtOfPoint(cx, cz, this.districts),
         street: null, streetT: 0, streetPt: null,
         floors: 1, style: 'timber', roof: 'gable', cap: Infinity,
         isSpire: false, chimney: false, awning: false,
@@ -1549,14 +1693,14 @@ export class City {
         const dd = pointSegDistance(cx, cz, s);
         if (dd < bestD) { bestD = dd; b.street = i; b.streetT = segParam(cx, cz, s); }
       });
-      b.cap = corridorCap(b);
+      b.cap = corridorCap(b, RULES);
       return b;
     };
 
     // Would accepting `b` with this tuple break an anti-repetition rule?
     const conflicts = (b) => {
       const tuple = silhouetteTuple(b);
-      const minR = LAYOUT_RULES.minSpacing.identicalSilhouettePair;
+      const minR = RULES.minSpacing.identicalSilhouettePair;
       for (const o of out) {
         if (silhouetteTuple(o) !== tuple) continue;
         if (Math.hypot(o.cx - b.cx, o.cz - b.cz) < minR) return true;
@@ -1570,7 +1714,7 @@ export class City {
         let run = 1;
         for (let i = k - 1; i >= 0 && silhouetteTuple(list[i]) === tuple; i--) run++;
         for (let i = k; i < list.length && silhouetteTuple(list[i]) === tuple; i++) run++;
-        if (run > LAYOUT_RULES.antiRepetition.maxIdenticalRun) return true;
+        if (run > RULES.antiRepetition.maxIdenticalRun) return true;
       }
       return false;
     };
@@ -1593,8 +1737,11 @@ export class City {
     // land on: it is a deliberate site beside the Assay Hall, far enough off
     // the north avenue that it is the corridor's BACKGROUND rather than the
     // thing blocking it (which is also what validateLayout asserts).
-    const S = LAYOUT_RULES.spireSite;
-    {
+    // A settlement without a spireSite (rules row sets it null — a hamlet
+    // has no landmark tower) skips the whole search; nothing below draws
+    // rnd(), so the skip does not shift the stream.
+    const S = RULES.spireSite;
+    if (S) {
       let bestCell = null, bestScore = Infinity;
       for (let cj = -cellsHalf; cj <= cellsHalf; cj++) {
         for (let ci = -cellsHalf; ci <= cellsHalf; ci++) {
@@ -1603,7 +1750,7 @@ export class City {
           if (Math.abs(cx) < S.minAbsX) continue;
           if (Math.hypot(cx - S.prefer.x, cz - S.prefer.z) > S.maxR) continue;
           const probe = { cx, cz, w: 2 * KIT_CELL, d: 2 * KIT_CELL };
-          if (Number.isFinite(corridorCap(probe))) continue;
+          if (Number.isFinite(corridorCap(probe, RULES))) continue;
           const score = Math.hypot(cx - S.prefer.x, cz - S.prefer.z);
           if (score < bestScore) { bestScore = score; bestCell = { ci, cj }; }
         }
@@ -1611,7 +1758,7 @@ export class City {
       if (bestCell) {
         const b = record(bestCell.ci, bestCell.cj, 2, 2, true);
         b.isSpire = true;
-        b.floors = LAYOUT_RULES.landmarkHeights.spire;
+        b.floors = RULES.landmarkHeights.spire;
         b.style = 'stone';
         b.roof = 'spire';
         this._placeDoor(b);
@@ -1643,7 +1790,11 @@ export class City {
       // fifth of its buildings.
       for (const alongZ of [firstAlongZ, !firstAlongZ]) {
         let wc = 0, dc = 0;
+        // maxWing (B4a): a hamlet caps the search so its biggest building is
+        // a farmhouse, not a terrace. Threshold's table says 7 — the shipped
+        // list, unchanged.
         for (const len of [7, 6, 5, 4, 3, 2]) {
+          if (len > (RULES.maxWing ?? 7)) continue;
           const w = alongZ ? 2 : len;
           const d = alongZ ? len : 2;
           if (free(a.ci, a.cj, w, d)) { wc = w; dc = d; break; }
@@ -1652,11 +1803,11 @@ export class City {
         fitted = true;
 
         const b = record(a.ci, a.cj, wc, dc, alongZ);
-        const profile = DISTRICT_PROFILES[b.district] || DISTRICT_PROFILES.outskirts;
+        const profile = LT.profiles[b.district] || LT.profiles[LT.single] || LT.profiles.outskirts;
         // Ordinary buildings never reach the spire's storey count, whatever
         // the profile range says — the Assay quarter's range only goes that
         // high because the spire lives in it.
-        const ceiling = Math.min(b.cap, LAYOUT_RULES.landmarkHeights.spire - 1);
+        const ceiling = Math.min(b.cap, RULES.landmarkHeights.spire - 1);
 
         // The tuple the dice WANT, then every other legal tuple in a shuffled
         // order. Preference first keeps the district's character; the
@@ -2089,7 +2240,15 @@ export class City {
 
   _buildProps(rnd, buildings) {
     const { half: WALL_HALF, plazaR: PLAZA_R, cliffX: CLIFF_X, walkLimit: WALK_LIMIT } = this.spec.wall;
-    const BREACH_Z = this.spec.portals.breach.z;
+    // null = no breach; the ash keep-outs below are skipped (same absent-key
+    // guard as groundBase / _buildGround / _natureSpotOk).
+    const BREACH_Z = this.spec.portals.breach ? this.spec.portals.breach.z : null;
+    // The settlement's authored furniture (B4a): the LOOPS live here, the
+    // NUMBERS live on the descriptor (spec.props — Threshold's are the
+    // shipped literals, moved byte for byte). Each family is gated on its
+    // row so a hamlet with no market creates no zero-count field (an
+    // InstancedMesh with count 0 still costs a draw call every frame).
+    const P = this.spec.props;
     const density = this._buildDensity;
     const add = (key, capacity) => {
       const f = new KitField(key, Math.max(1, Math.ceil(capacity)), { name: key });
@@ -2098,6 +2257,12 @@ export class City {
     };
 
     // --- lanterns along every street, both kerbs ---------------------------
+    // Gated on streets EXISTING (B4b): an all-'track' settlement (THE
+    // BIRCHREACH) has zero built streets, and the ungated field was a
+    // count-0 InstancedMesh drawn every frame for nothing. Threshold and
+    // Emberfall both have streets, so their path — including every rnd()
+    // draw — is untouched.
+    if (this.streets.length) {
     const lantern = add('town_lantern', 230 * density + 20);
     for (const s of this.streets) {
       const len = Math.hypot(s.x2 - s.x1, s.z2 - s.z1);
@@ -2117,37 +2282,56 @@ export class City {
     }
     // Lamp flames, so the streets read at night without a single PointLight.
     this._buildLampGlow(lantern);
+    }
 
     // --- plaza ring: pillars ------------------------------------------------
     // The pillars used to alternate the kit's red/green banners — decorative
     // noise in exactly the colour language the portals use for RANK. The ring
     // now carries rank-coloured cloth instead (_buildFlags), so the plaza
     // reads as gate signage rather than as bunting.
-    const pillar = add('town_pillar_stone', 40);
-    for (let i = 0; i < 24; i++) {
-      const a = (i / 24) * Math.PI * 2;
-      const x = Math.cos(a) * (PLAZA_R + 2.4), z = -Math.sin(a) * (PLAZA_R + 2.4);
-      const y = this.field.height(x, z);
-      pillar.place(x, y, z, -a);
-      this.obstacles.push({ pos: { x, z }, radius: 0.5 });
+    // Count is descriptor data (Threshold 24, a village green 0 — a common
+    // ringed by civic stonework stops being a common). _buildFlags gates its
+    // hanging standards on the same number: they are authored to stand ON
+    // these pillars.
+    if (P.plazaPillars > 0) {
+      const pillar = add('town_pillar_stone', 40);
+      for (let i = 0; i < P.plazaPillars; i++) {
+        const a = (i / P.plazaPillars) * Math.PI * 2;
+        const x = Math.cos(a) * (PLAZA_R + 2.4), z = -Math.sin(a) * (PLAZA_R + 2.4);
+        const y = this.field.height(x, z);
+        pillar.place(x, y, z, -a);
+        this.obstacles.push({ pos: { x, z }, radius: 0.5 });
+      }
     }
 
-    // --- fountain: one in the plaza, one on Quarter Row --------------------
-    const fountain = add('town_fountain_round', 2);
-    for (const p of [{ x: 0, z: 17.5 }, { x: -58, z: -12 }]) {
-      fountain.place(p.x, this.field.height(p.x, p.z), p.z, 0);
-      this.obstacles.push({ pos: { x: p.x, z: p.z }, radius: 2.4 });
-      this.propMeta.fountains.push({ x: p.x, z: p.z });
+    // --- fountains (descriptor list) ---------------------------------------
+    // Threshold: the plaza fountain + Quarter Row's. Emberfall: the village
+    // WELL stand-in (no well piece in the kit — audit finding, flagged for
+    // the Blender pass). interiors._plotOk keeps its plots clear of this
+    // SAME list, which retires one of the hand-mirrored coordinate pairs the
+    // Wave A report flagged.
+    if (P.fountains && P.fountains.length) {
+      const fountain = add('town_fountain_round', P.fountains.length);
+      for (const p of P.fountains) {
+        fountain.place(p.x, this.field.height(p.x, p.z), p.z, 0);
+        this.obstacles.push({ pos: { x: p.x, z: p.z }, radius: 2.4 });
+        this.propMeta.fountains.push({ x: p.x, z: p.z });
+      }
     }
 
     // --- market street: stalls and carts by the Exchange -------------------
+    // The whole family is descriptor data (P.market null = no market — a
+    // hamlet trades from the waystation, not a strip). Threshold's row is
+    // the shipped strip: cx -4, +-8.5, z 31 + k*5.4, 12 stalls.
+    if (P.market) {
+    const M = P.market;
     const stallR = add('town_stall_red', 14);
     const stallG = add('town_stall_green', 14);
     const cart = add('town_cart', 16);
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < M.n; i++) {
       const side = i % 2 ? 1 : -1;
-      const x = -4 + side * 8.5 + (rnd() - 0.5) * 1.2;
-      const z = 31 + (i >> 1) * 5.4;
+      const x = M.cx + side * M.side + (rnd() - 0.5) * 1.2;
+      const z = M.z0 + (i >> 1) * M.step;
       const y = this.field.height(x, z);
       (i % 3 ? stallR : stallG).place(x, y, z, side < 0 ? Math.PI / 2 : -Math.PI / 2);
       this.obstacles.push({ pos: { x, z }, radius: 1.3 });
@@ -2160,31 +2344,46 @@ export class City {
         this.obstacles.push({ pos: { x: cxp, z: czp }, radius: 1.2 });
       }
     }
+    }
 
-    // --- Quarter Row: benches, hedges, fences, washing poles ---------------
-    const bench = add('town_stall_bench', 26);
-    const hedge = add('town_hedge', 420 * density + 20);
-    const fence = add('town_fence', 560 * density + 20);
+    // --- benches, hedges, fences -------------------------------------------
+    // Garden hedges/fences are settlement-generic (they follow the buildings);
+    // the bench WALK is authored (P.benchRow) and the overlook bench is
+    // cliff-town furniture, so the bench field only exists when either does.
+    const bench = (P.benchRow || P.overlookBench) ? add('town_stall_bench', 26) : null;
+    // Gated on buildings EXISTING (B4b, the lantern gate's argument): gardens
+    // follow buildings, and a zero-building forest was paying two empty
+    // instanced fields. The garden loop below draws rnd() per BUILDING, so
+    // with any buildings at all the stream is bit-identical.
+    const hedge = buildings.length ? add('town_hedge', 420 * density + 20) : null;
+    const fence = buildings.length ? add('town_fence', 560 * density + 20) : null;
     // minSpacing.benches is enforced HERE, not just asserted: the old spacing
     // was 2.8 m of x-step against a 6 m rule, and two benches back to back on
     // the same side of the walk is the "duplicated for no reason" reading at
     // street furniture scale.
-    const benchMin = LAYOUT_RULES.minSpacing.benches;
+    const benchMin = (this._lt ? this._lt.rules : LAYOUT_RULES).minSpacing.benches;
     const benchOk = (x, z) => {
       for (const p of this.propMeta.benches) if (Math.hypot(p.x - x, p.z - z) < benchMin) return false;
       return true;
     };
-    for (let i = 0; i < 18; i++) {
-      const x = -30 - i * 2.8 + (rnd() - 0.5) * 3;
-      const z = (rnd() < 0.5 ? -1 : 1) * (7 + rnd() * 3);
-      if (this._blockedForProp(x, z, 1)) continue;
-      if (!benchOk(x, z)) continue;
-      bench.place(x, this.field.height(x, z), z, z < 0 ? 0 : Math.PI);
-      this.obstacles.push({ pos: { x, z }, radius: 0.7 });
-      this.propMeta.benches.push({ x, z });
+    if (P.benchRow) {
+      const BR = P.benchRow;
+      for (let i = 0; i < BR.n; i++) {
+        const x = BR.x0 - i * BR.step + (rnd() - 0.5) * 3;
+        const z = (rnd() < 0.5 ? -1 : 1) * (BR.zBase + rnd() * BR.zSpread);
+        if (this._blockedForProp(x, z, 1)) continue;
+        if (!benchOk(x, z)) continue;
+        bench.place(x, this.field.height(x, z), z, z < 0 ? 0 : Math.PI);
+        this.obstacles.push({ pos: { x, z }, radius: 0.7 });
+        this.propMeta.benches.push({ x, z });
+      }
     }
-    // The overlook bench, facing the drop.
-    if (benchOk(CLIFF_X + 4.5, 0)) {
+    // The overlook bench, facing the drop. Descriptor-gated AND cliff-gated:
+    // without the drop there is nothing to face, and the un-guarded call was
+    // exactly the class of Threshold assumption B4a exists to retire (a bench
+    // floating at the sentinel cliffX, outside the world, invisible in every
+    // test that samples the walkable area).
+    if (P.overlookBench && this.spec.wall.cliff !== false && benchOk(CLIFF_X + 4.5, 0)) {
       bench.place(CLIFF_X + 4.5, this.field.height(CLIFF_X + 4.5, 0), 0, Math.PI / 2);
       this.propMeta.benches.push({ x: CLIFF_X + 4.5, z: 0 });
     }
@@ -2214,6 +2413,11 @@ export class City {
     }
 
     // --- trees: gardens, plaza edge, and the outskirts ---------------------
+    // P.townTrees === false stands the family down (B4b): THE BIRCHREACH
+    // grows naturekit birches via spec.nature, and citykit town_tree
+    // silhouettes interleaved with them read as two forests — kit-mixing,
+    // the cohesion failure. Absent key = the shipped pass, draws and all.
+    if (P.townTrees !== false) {
     const tree = add('town_tree', 90 * density + 10);
     const treeH = add('town_tree_high', 70 * density + 10);
     let placed = 0;
@@ -2226,7 +2430,7 @@ export class City {
         if (Math.hypot(x, z) < PLAZA_R + 4) continue;
       } else {
         if (x < CLIFF_X) continue;
-        if (Math.hypot(x, z - BREACH_Z) < 30) continue;
+        if (BREACH_Z !== null && Math.hypot(x, z - BREACH_Z) < 30) continue;
         if (this.field.slope(x, z) > 0.42) continue;
       }
       const y = this.field.height(x, z);
@@ -2235,8 +2439,12 @@ export class City {
       this.obstacles.push({ pos: { x, z }, radius: 0.75 });
       placed++;
     }
+    }
 
     // --- rock scatter outside the wall -------------------------------------
+    // P.outskirtRocks === false: same stand-down as townTrees — the forest's
+    // rocks are the naturekit moss family, one silhouette language.
+    if (P.outskirtRocks !== false) {
     const rockL = add('town_rock_large', 40);
     const rockS = add('town_rock_small', 60);
     for (let i = 0; i < Math.round(70 * density); i++) {
@@ -2244,11 +2452,12 @@ export class City {
       const r = WALL_HALF + 10 + rnd() * 40;
       const x = Math.cos(a) * r, z = -Math.sin(a) * r;
       if (x < CLIFF_X || Math.max(Math.abs(x), Math.abs(z)) > WALK_LIMIT - 8) continue;
-      if (Math.hypot(x, z - BREACH_Z) < 22) continue;
+      if (BREACH_Z !== null && Math.hypot(x, z - BREACH_Z) < 22) continue;
       const y = this.field.height(x, z);
       const big = rnd() < 0.4;
       (big ? rockL : rockS).place(x, y, z, rnd() * 6.283, 0.7 + rnd() * 0.7);
       this.obstacles.push({ pos: { x, z }, radius: big ? 1.7 : 1.1 });
+    }
     }
   }
 
@@ -2371,7 +2580,11 @@ export class City {
         // mostly street corridor), 40% the walled interior, 20% the outskirts.
         let x, z;
         const pick = rnd();
-        if (pick < 0.4 && !spec.solid) {
+        // `this.streets.length` (B4b): an all-'track' settlement has no
+        // street to hug and the un-guarded index returned undefined. Both
+        // towns have streets, so their branch choice — and every draw — is
+        // bit-identical.
+        if (pick < 0.4 && !spec.solid && this.streets.length) {
           const s = this.streets[Math.floor(rnd() * this.streets.length)];
           const t = rnd();
           const nx = s.x2 - s.x1, nz = s.z2 - s.z1;
@@ -2395,6 +2608,95 @@ export class City {
             const nx = x + Math.cos(a) * rr, nz = z + Math.sin(a) * rr;
             if (!this._natureSpotOk(nx, nz, 0.35)) continue;
             placed += this._placeNature(group, spec, nx, nz, rnd);
+          }
+        }
+      }
+    }
+
+    // ----------------------------------------------- forest density fields
+    //
+    // B4b, descriptor-driven: spec.nature.rows is a second scatter table for
+    // settlements whose identity IS the vegetation (THE BIRCHREACH). The base
+    // table above is Threshold-tuned ground DUSTING; a forest needs trees in
+    // the core by the hundred, biased along the track verges so the wood
+    // crowds the path the way the ask words it ("heavy naturekit density
+    // fields along the track edges").
+    //
+    // LAWS, all inherited rather than re-stated:
+    //   * absent key = ZERO extra rnd() draws — Threshold/Emberfall streams
+    //     are byte-identical (the fork-per-new-content law's other half).
+    //   * every candidate passes _natureSpotOk, so solids join
+    //     this.obstacles as real colliders BEFORE _buildHash/attachNavGrid
+    //     (movement honesty), and _blockedForProp inside it enforces the
+    //     WALKABLE-CORRIDOR LAW: nothing solid within track w + corridor of
+    //     any track centerline. tools/forest-test.mjs walks the spine with a
+    //     real CharacterBody to prove the law held.
+    //   * rows ride this._scatter, so the runtime density lever thins trees
+    //     and switches their colliders off index-aligned, like every field.
+    this._buildForest(rnd);
+  }
+
+  /** The spec.nature.rows walker — see the note at its call site above. */
+  _buildForest(rnd) {
+    const F = this.spec.nature;
+    if (!F || !Array.isArray(F.rows) || !F.rows.length) return;
+    const density = this._buildDensity;
+    // Solid clearance past a track's half-width w; 1.2 m default leaves a
+    // >= 2 x (w + 1.2) corridor, comfortable for the 0.45 m body and wide
+    // enough that canopies overhang the path without trunks blocking it.
+    const corridor = F.corridor ?? 1.2;
+    // Uniform samples reach walkLimit - 8; _natureSpotOk's own cap is
+    // walkLimit - 6, and the settlement's verge.scatterIn is authored to meet
+    // it (see THE_BIRCHREACH.wall.walkLimit) so core and Verge scatter join.
+    const RANGE = this.spec.wall.walkLimit - 8;
+    for (const row of F.rows) {
+      // Mapped onto the base table's row shape so _placeNature (and its
+      // obstacle/solids bookkeeping) is reused verbatim, not re-implemented.
+      const spec = {
+        key: row.key, sx: row.s, sy: row.sy || null,
+        solid: row.solid || 0, clump: Boolean(row.clump),
+      };
+      const target = Math.max(1, Math.round(row.n * density));
+      const field = new NatureField(row.key, target + 4, { castShadow: spec.solid > 0 });
+      this.fields.push(field);
+      const group = { field, solids: [] };
+      this._scatter.push(group);
+      let placed = 0;
+      // x16 tries (base table uses x14): the track-hug branch wastes some
+      // candidates past the walk cap where branch tracks run out to the POIs.
+      for (let tries = 0; tries < target * 16 && placed < target; tries++) {
+        let x, z;
+        const pick = rnd();
+        if (pick < 0.55 && this.tracks.length) {
+          // Hug a track verge: corridor-clear of the centerline, then up to
+          // ~11 m into the wood — the band the walking player actually sees.
+          const s = this.tracks[Math.floor(rnd() * this.tracks.length)];
+          const t = rnd();
+          const nx = s.x2 - s.x1, nz = s.z2 - s.z1;
+          const len = Math.hypot(nx, nz) || 1;
+          const side = rnd() < 0.5 ? -1 : 1;
+          const off = s.w + corridor + 0.8 + rnd() * 11;
+          x = s.x1 + nx * t - (nz / len) * side * off;
+          z = s.z1 + nz * t + (nx / len) * side * off;
+        } else {
+          x = (rnd() * 2 - 1) * RANGE;
+          z = (rnd() * 2 - 1) * RANGE;
+        }
+        if (!this._natureSpotOk(x, z, spec.solid > 0 ? corridor : 0.4)) continue;
+        placed += this._placeNature(group, spec, x, z, rnd);
+        if (spec.clump) {
+          const extra = 3 + Math.floor(rnd() * 4);
+          for (let e = 0; e < extra && placed < target; e++) {
+            const a = rnd() * 6.283;
+            const rr = 0.6 + rnd() * 1.6;
+            const cx = x + Math.cos(a) * rr, cz = z + Math.sin(a) * rr;
+            // SOLID clump members owe the track the full corridor, exactly
+            // like their primary (review fix: bush_2 is solid 0.7 + clump —
+            // a primary at the corridor line could seed children 0.85 m into
+            // the walkway, and three seeds could pinch the spine below body
+            // width). Decorative clumps keep the loose 0.35 pad.
+            if (!this._natureSpotOk(cx, cz, spec.solid > 0 ? corridor : 0.35)) continue;
+            placed += this._placeNature(group, spec, cx, cz, rnd);
           }
         }
       }
@@ -2426,11 +2728,11 @@ export class City {
    */
   _natureSpotOk(x, z, clearance) {
     const { plazaR: PLAZA_R, cliffX: CLIFF_X, walkLimit: WALK_LIMIT } = this.spec.wall;
-    const BREACH_Z = this.spec.portals.breach.z;
+    const BREACH_Z = this.spec.portals.breach ? this.spec.portals.breach.z : null;
     if (x < CLIFF_X + 3) return false;
     if (Math.max(Math.abs(x), Math.abs(z)) > WALK_LIMIT - 6) return false;
     if (Math.hypot(x, z) < PLAZA_R + 3) return false;
-    if (Math.hypot(x, z - BREACH_Z) < 23) return false;
+    if (BREACH_Z !== null && Math.hypot(x, z - BREACH_Z) < 23) return false;
     for (const d of this.districts) {
       if (d.id === 'plaza' || d.id === 'breach') continue;
       if (Math.hypot(x - d.pos.x, z - d.pos.z) < d.pad) return false;
@@ -2472,6 +2774,11 @@ export class City {
     // and the dais obstacle + the flags in _buildFlags follow the built
     // portal, so moving a gate is a descriptor edit and nothing else.
     for (const pl of this.spec.portals.placements) {
+      // Waygate slots (kind:'way') stay out of THIS loop: the settlement's
+      // main stream contract was authored without them (zero rnd() draws),
+      // and Wave B5 honours that by building them in a second pass below from
+      // their own forked stream — see the way pass after this loop.
+      if (pl.kind === 'way') continue;
       const rank = pl.rank;
       const gate = GATES.find((g) => g.rank === rank);
       const site = resolvePortalPlacement(this.spec, pl);
@@ -2520,8 +2827,70 @@ export class City {
       this.obstacles.push({ pos: { x: px, z: pz }, radius: 2.6 * site.scale });
     }
 
+    // --- the WAYGATES (Wave B5: travel is live) ---------------------------
+    // Second pass, own forked stream (this._waySeed, minted in build()): the
+    // rank loop above must reproduce the pre-B5 stream byte for byte, and a
+    // waygate's one phase draw would have shifted every draw after the
+    // portals in all three settlements. Same shared geometry, same
+    // buildPortalVisual — one builder, one behaviour (the rule that created
+    // buildPortalVisual in the first place).
+    //
+    // The record differs from a rank portal's in exactly the fields travel
+    // needs: rank is null (a waygate has no depth — setPortalState's rank
+    // walks and citymode.refreshPortalLocks can never touch it, which is what
+    // keeps a waygate permanently unlocked: walking through one always
+    // works), kind:'way' marks it for the consumers that must skip it
+    // (_buildFlags' rank signage), and `way` carries the destination payload
+    // citymode's confirm routes through appState.
+    const wayRnd = mulberry32(this._waySeed);
+    for (const pl of this.spec.portals.placements) {
+      if (pl.kind !== 'way') continue;
+      const site = resolvePortalPlacement(this.spec, pl);
+      const px = site.x, pz = site.z;
+      const py = this.field.height(px, pz);
+
+      const built = buildPortalVisual(this.group, {
+        rank: 'way',                    // names the group 'portal_way'
+        color: WAY_COLOR,
+        scale: site.scale,
+        locked: false,
+        yaw: site.yaw,
+        geos,
+      });
+      built.group.position.set(px, py, pz);
+      this._ownedMaterials.push(...built.materials);
+      this._triangles += PORTAL_TRIANGLES;
+
+      const portal = {
+        id: pl.id,
+        rank: null,
+        kind: 'way',
+        way: { toSettlement: pl.to.settlement, toPortalId: pl.to.portalId },
+        gate: null,
+        pos: new THREE.Vector3(px, py, pz),
+        radius: (site.outside ? 6.5 : 5.2),
+        color: WAY_COLOR,
+        locked: false,
+        anomaly: false,
+        wild: false,
+        group: built.group,
+        phase: wayRnd() * 6.283,
+        meshes: built.meshes,
+        _flick: 0,
+      };
+      this.portals.push(portal);
+      this._applyPortalState(portal);
+      // Solid dais, exactly like a rank gate's — the keep-out _portalSites
+      // has carried since B4a becomes a real collider now that the visual is
+      // standing on it.
+      this.obstacles.push({ pos: { x: px, z: pz }, radius: 2.6 * site.scale });
+    }
+
     this._assertPortalPlacements();
-    this._buildBreachPlatform(rnd);
+    // Breach-keyed like every other breach consumer: no portals.breach, no
+    // ruin platform (and no rnd() draws for it — the guard sits BEFORE the
+    // dice, so a breachless settlement's stream simply never includes them).
+    if (this.spec.portals.breach) this._buildBreachPlatform(rnd);
   }
 
   /**
@@ -2660,10 +3029,18 @@ export class City {
     // rather than authored-empty flagstone; out-of-wall portals (the Breach)
     // keep their road-mouth pairs. Runs before the Verge builds, so
     // this.portals is exactly the town's own here.
-    const inWall = this.portals.filter((p) => Math.max(Math.abs(p.pos.x), Math.abs(p.pos.z)) < WALL_HALF);
+    // Waygates (kind:'way', Wave B5) fly NO flags: the cloth families are RANK
+    // signage ("this is the purple gate") and a waygate has no rank — its
+    // silver oval is its own sign. Filtering here is also what keeps every
+    // settlement's flag stream byte-identical to its pre-B5 build (each flag
+    // draws rnd() for its phase, and waygates joined this.portals only when
+    // travel went live), and what keeps Threshold's waygate out of the `away`
+    // family, whose spots are the Breach road's literals.
+    const flaggable = this.portals.filter((p) => p.kind !== 'way');
+    const inWall = flaggable.filter((p) => Math.max(Math.abs(p.pos.x), Math.abs(p.pos.z)) < WALL_HALF);
     const plaza = inWall.filter((p) => Math.hypot(p.pos.x, p.pos.z) < PLAZA_R + 4);
     const district = inWall.filter((p) => !plaza.includes(p));
-    const away = this.portals.filter((p) => !inWall.includes(p));
+    const away = flaggable.filter((p) => !inWall.includes(p));
     const flags = [];       // { fly, x, z, topY, w, h, yaw, phase, color }
     const poles = [];
 
@@ -2689,9 +3066,16 @@ export class City {
     // wayfinding rose — the sector dyed teal points down the street that
     // leads to the teal gate. That is the plaza's old one-look promise ("this
     // city holds these gates") kept, plus a direction.
-    if (inWall.length) {
-      for (let i = 0; i < 24; i++) {
-        const a = (i / 24) * Math.PI * 2;
+    // Gated on the SAME descriptor number that builds the stone ring
+    // (_buildProps P.plazaPillars): these little standards are authored to
+    // stand ON the kit pillars (the pole starts at y+1.95, the pillar's own
+    // top), so a settlement without the ring — Emberfall's green — would get
+    // 24 banner poles floating two metres in the air. Its plaza portals keep
+    // their flying flag pairs below, which ARE self-standing.
+    if (inWall.length && (this.spec.props.plazaPillars || 0) > 0) {
+      const nP = this.spec.props.plazaPillars;
+      for (let i = 0; i < nP; i++) {
+        const a = (i / nP) * Math.PI * 2;
         const x = Math.cos(a) * (PLAZA_R + 2.4), z = -Math.sin(a) * (PLAZA_R + 2.4);
         let best = inWall[0], bestD = Infinity;
         for (const p of inWall) {
@@ -2778,9 +3162,15 @@ export class City {
 
     // --- road pairs for portals outside the wall --------------------------
     for (const p of away) {
-      // The only out-of-wall road today runs due north; if another is ever
-      // added, generalise the gate mouth below — the colours already follow
-      // the portal, which is the part that must not be hardcoded.
+      // THRESHOLD-ONLY GEOMETRY, LOUDLY: the spots below are the north
+      // Breach road's literals (the ±6.8 arrival pair at p.z+15 and the
+      // north gate mouth at -WALL_HALF+8). They are correct for exactly one
+      // portal in exactly one settlement — Threshold's S — and today no other
+      // settlement HAS an out-of-wall portal (Emberfall's two are in-core,
+      // so `away` is empty there and this loop never runs). The moment a
+      // second settlement ships an outside portal, generalise the mouth off
+      // the portal's own approach track; the colours already follow the
+      // portal, which is the part that must not be hardcoded.
       const spots = [
         { x: -6.8, z: p.pos.z + 15 }, { x: 6.8, z: p.pos.z + 15 },   // arrival
         { x: -(7 + 1.7), z: -WALL_HALF + 8 }, { x: 7 + 1.7, z: -WALL_HALF + 8 }, // gate mouth
@@ -3294,7 +3684,13 @@ export class City {
     // line continues as a frontier fence north and south of the wall" means: the
     // Verge opens the map to 258 m on the other three sides but the drop stays
     // the drop for its whole length, all the way out to the Verge's own bound.
-    const westLim = this.spec.wall.cliffX + 1 + radius;
+    // B4a: only a CLIFF settlement pins its west bound to the cliff line. A
+    // cliffless one (Emberfall) is bounded symmetrically on all four sides —
+    // its cliffX is a far-out sentinel and clamping there would let the
+    // player walk 60 m past the world's ground.
+    const westLim = this.spec.wall.cliff !== false
+      ? this.spec.wall.cliffX + 1 + radius
+      : -lim;
     if (pos.x < westLim) { pos.x = westLim; slide(1, 0); }
     if (pos.z > lim) { pos.z = lim; slide(0, -1); }
     if (pos.z < -lim) { pos.z = -lim; slide(0, 1); }

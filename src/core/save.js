@@ -78,6 +78,18 @@ export function freshSave() {
     // has always opened on. Deliberately NOT a schema bump: a missing field
     // reads as 15.0 and that is the whole migration.
     worldTime: 15.0,
+    // --- The two Wave B5 world fields. Both absent-means-default on the
+    // shop/worldTime precedent — NOT a schema bump, because every save written
+    // before waygates existed was, by definition, standing in Threshold having
+    // visited only Threshold, which is exactly what these defaults say.
+    //   settlement — the slug of the town the player is in; citymode.enter is
+    //                the single writer. THIS LINE IS THE MIGRATION: an absent
+    //                value reads as 'threshold'.
+    //   visited    — append-only discovery list the map's settlement switcher
+    //                and TRAVEL gating read; marked on arrival, never removed.
+    //                An absent value reads as ['threshold'].
+    settlement: 'threshold',
+    visited: ['threshold'],
     // --- The four CLASSES_SPEC fields. All additive, all defaulting to "the
     // system does not exist for this save", which is exactly the state every
     // profile written before Wave 3-B is in — so, on the shop/worldTime
@@ -137,6 +149,34 @@ function sanitiseAsh(v) {
 // here, or the new class silently unsaves.
 const CLASS_KEYS = ['vanguard', 'berserker', 'bladedancer', 'hexweaver', 'binder', 'oracle', 'templar', 'reaver'];
 const ARCHON_PATH_KEYS = ['shadow', 'flame', 'frost', 'storm', 'beast'];
+
+// The settlement slug allowlist, duplicated from src/world/settlements.js's
+// SETTLEMENTS registry on the exact trade CLASS_KEYS made with classes.js:
+// this module deliberately imports nothing merely to validate a string (and
+// settlements.js, though dependency-free, is 50 KB of world data the headless
+// progression test has no business loading). Add a settlement there, add its
+// slug here, or the new town silently unsaves back to Threshold.
+const SETTLEMENT_KEYS = ['threshold', 'emberfall', 'birchreach'];
+
+// A hand-edited or future-build slug must never reach citymode.enter — it
+// would look up undefined in the registry and fall through anyway, but the
+// save should not carry a value the running build cannot honour.
+function sanitiseSettlement(v) {
+  return SETTLEMENT_KEYS.includes(v) ? v : 'threshold';
+}
+
+// Structural + allowlist. 'threshold' is always present (the migration's
+// default IS "you have stood in Threshold" — every save has), duplicates are
+// dropped, unknown slugs are dropped rather than thrown on.
+function sanitiseVisited(v) {
+  const out = ['threshold'];
+  if (Array.isArray(v)) {
+    for (const s of v) {
+      if (SETTLEMENT_KEYS.includes(s) && !out.includes(s)) out.push(s);
+    }
+  }
+  return out;
+}
 
 // An unknown string — a future build's class, a hand-edit — must NOT reach
 // classes.applyLayers(); null ("no class") is always safe and always sane.
@@ -333,6 +373,11 @@ function withClassFields(out, raw) {
     out.archonState.migTokenGranted = true;
     out.respecTokens = Math.min(99, out.respecTokens + 1);
   }
+  // The Wave B5 world fields ride the same funnel (this function wraps both
+  // the v1 and v2 exits, exactly why the class fields live here): the `...raw`
+  // spreads above can carry hand-edited garbage for either.
+  out.settlement = sanitiseSettlement(raw.settlement);
+  out.visited = sanitiseVisited(raw.visited);
   return out;
 }
 
