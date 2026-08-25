@@ -14,6 +14,9 @@ import { preloadCity } from './world/city.js';
 import { ShopUI } from './ui/shopui.js';
 import { AssayUI } from './ui/cityui.js';
 import { InventoryUI } from './ui/inventoryui.js';
+import { MapUI } from './ui/mapui.js';
+import { DialogUI } from './ui/dialogui.js';
+import { JournalUI } from './ui/journalui.js';
 import * as Weapons from './game/weapons.js';
 
 const canvas = document.getElementById('scene');
@@ -57,6 +60,14 @@ ui.onStatChange = persist;
 // made the game feel like a wave shooter with a lobby.
 const app = new AppState({
   onEnter(screen, payload) {
+    // RECONCILE THE MAP OVERLAY on every transition: AppState._transition
+    // force-hides every .screen (including #map) without going through
+    // MapUI.close(), so a transition that fires while the map is up — dying
+    // mid-gate auto-replaces to 'results' with no user input — would leave
+    // _open true, body.gb-map set (hiding #cityUi under the next city), and
+    // a gate-paused sim never unpaused (review finding). Closing here keeps
+    // flag, classList and pause in one story on every path.
+    if (screen !== 'map' && game.mapUI?.isOpen) game.mapUI.close();
     switch (screen) {
       case 'title':
         game.quit();
@@ -71,6 +82,16 @@ const app = new AppState({
         break;
       case 'run':
         game.beginRun(payload);
+        break;
+      // The world map (Wave B5a). In town the map opens as a pure overlay and
+      // never routes through here — see mapui.js's header for why (a 'map' ->
+      // back -> 'city' round trip would rebuild the whole town). This case
+      // exists for router-driven entries (tools via __app, a future title-
+      // screen chart): open() keeps the panel's isOpen flag true alongside the
+      // classList flip _transition already performed on #map, so the back
+      // chain's overlay check and the screen stack can never disagree.
+      case 'map':
+        game.mapUI?.open();
         break;
       default:
         break;
@@ -105,6 +126,27 @@ game.assayUI = new AssayUI({ game, audio });
 // header of inventoryui.js.
 game.invUI = new InventoryUI({ game, audio });
 
+// The hunter's chart (Wave B5a). Constructed once, here, for the same reason
+// the shop is: it outlives every city rebuild, and a panel that rebuilt its
+// DOM per open would leak a #map node per visit. Its open button lives in the
+// HUD (injected by mapui.js itself) — the button BELONGS in cityui's chrome,
+// but that file is owned elsewhere this stage; the orchestrator rehomes it.
+game.mapUI = new MapUI({ game, audio });
+// Router reconciliation: when the map was ENTERED as a screen (app.go('map')
+// — tools, future title chart), closing the panel must also pop the stack, or
+// AppState stays on 'map' with every screen hidden: the pause-soft-lock class
+// of bug. Overlay opens leave app.current untouched, so this is a no-op for
+// the normal in-town path and never triggers a city rebuild there.
+game.mapUI.onClosed = () => { if (app.is('map')) app.back(); };
+
+// Wave C's surfaces (dialogui/journalui, same overlay recipe as the map).
+// Constructed once here like every panel; the journal injects its own HUD
+// button beside the map's (consolidating all injected buttons into city
+// chrome is a Wave G item — see mapui's own rehome note).
+game.dialog = new DialogUI();
+game.journalUI = new JournalUI({ game });
+game.journalUI.injectHudButton();
+
 // Three ways in, one of them a thumb: the HUD button, the pause panel and
 // desktop's I key. Delegated from document so the HUD button works in the city
 // and in a gate without ui.js needing to know the panel exists.
@@ -116,6 +158,8 @@ function toggleInventory() {
   // lost the race unreachable.
   if (game.shopUI?.isOpen) game.shopUI.close();
   if (game.assayUI?.isOpen) game.assayUI.close();
+  if (game.mapUI?.isOpen) game.mapUI.close();
+  if (game.journalUI?.open) game.journalUI.hide();
   game.invUI.toggle();
 }
 document.addEventListener('click', (e) => {
@@ -184,6 +228,16 @@ function handleBack() {
   // The Assay Hall's desk rides the same rule: back closes the panel and
   // leaves you standing in the doorway you opened it from.
   if (game.assayUI?.isOpen) { game.assayUI.close(); return; }
+  // The hunter's chart rides it too. close() fires onClosed, which pops the
+  // AppState stack ONLY when the map was router-entered (app.is('map')), so an
+  // overlay-opened map closes without touching the mounted city while a
+  // screen-entered one hands the stack back — either way nothing is left
+  // hidden with no owner (the pause-soft-lock class of bug).
+  if (game.mapUI?.isOpen) { game.mapUI.close(); return; }
+  // Dialogue: back ADVANCES (exactly like tap) — closing mid-script and
+  // losing the line is the one thing a story surface must never do.
+  if (game.dialog?.open) { game.dialog.advance(); return; }
+  if (game.journalUI?.open) { game.journalUI.hide(); return; }
   // THE REACH's offer (CLASSES_SPEC step 7) rides above the results panel;
   // back means NOT YET — decline, consume nothing, the offer returns on the
   // next eligible S clear.

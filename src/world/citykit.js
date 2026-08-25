@@ -415,6 +415,22 @@ function procDoorway(hex) {
   ]);
 }
 
+/**
+ * The NARROW open frame the 87 sealed buildings wear since Wave B3
+ * (town_wall_doorway_base, a ~1.2 m person-door against square_wide's 1.6 m
+ * shop opening). Same jambs-and-lintel construction as procDoorway; the hole
+ * matters even though nobody walks through it, because the recessed void
+ * panel city.js hangs 0.4 m behind it has to be VISIBLE through the fallback
+ * frame or the no-GLB town regrows the flat painted doors B3 removed.
+ */
+function procDoorwayBase(hex) {
+  return group([
+    slab(0.8, 1.0, 0, 2, -1, -0.6, hex),
+    slab(0.8, 1.0, 0, 2, 0.6, 1, hex),
+    slab(0.8, 1.0, 1.85, 2, -0.6, 0.6, hex),
+  ]);
+}
+
 const PROC = {
   // --- walls -------------------------------------------------------------
   town_wall:                      () => procWall(COL.plaster),
@@ -431,6 +447,9 @@ const PROC = {
   // The open doorways the enterable buildings are entered through.
   town_wall_doorway_square_wide:      () => procDoorway(COL.plaster),
   town_wall_wood_doorway_square_wide: () => procDoorway(COL.wood),
+  // The sealed buildings' doorway frames (B3 — see city._buildBuildings).
+  town_wall_doorway_base:             () => procDoorwayBase(COL.plaster),
+  town_wall_wood_doorway_base:        () => procDoorwayBase(COL.wood),
   // The civic style's window (step 8's plaza-ring identity).
   town_wall_window_stone:         () => procWall(COL.stone, 'window'),
   town_wall_wood_window_shutters: () => procWall(COL.wood, 'window'),

@@ -64,6 +64,38 @@ const DOOR_GAP = 2.0;
 // ring (piece-local x 0.8..1.0), so this is the collision thickness too.
 const WALL_T = 0.2;
 
+// --- the animated door leaf (Wave B3: doors that don't lie) -----------------
+//
+// The kit ships NO standalone leaf: town_wall_door is a whole wall with the
+// door modelled shut (376 tris), and every town_wall_doorway_* is an open
+// frame. So the leaf is authored here — a plank slab with one brace, hinged on
+// a Group at the jamb, sharing cityMaterials().shell exactly like everything
+// else this module merges (no new material, no new program). Five leaves are
+// five small Meshes rather than one InstancedMesh on purpose: the shell
+// material is only ever used on plain Meshes when the kit GLB is loaded, and
+// an instanced draw would mint a fresh USE_INSTANCING program variant — the
+// exact growth the city-test budget assert exists to catch. Five tightly-
+// bounded meshes also frustum-cull individually, which one town-spanning
+// instanced buffer never could.
+//
+// COLLISION: the leaf deliberately has NONE. The door gap IS the walkway —
+// _collide leaves DOOR_GAP open — and a swinging collider would shove the
+// body that triggered it back out of its own doorway (or pin an NPC mid-
+// crossing). A door you can clip during its 0.35 s swing is a far smaller lie
+// than a door that pushes people.
+const LEAF_W = 1.5;              // the doorway pieces' clear opening is 1.6 m
+const LEAF_H = 1.72;             // under the square_wide lintel at 1.75
+const LEAF_T = 0.07;
+const LEAF_OPEN_DIST = 2.2;      // open when the player is this near the gap...
+const LEAF_CLOSE_DIST = 2.6;     // ...close past this. Hysteresis for the same
+                                 // reason the roof has it: a player idling AT
+                                 // the trigger radius must not strobe the door.
+const LEAF_EASE = 0.35;          // seconds, smoothstepped below
+const LEAF_ANGLE = Math.PI * (100 / 180);  // ~100 deg, inward
+// Roof-fade ramp (replaces the binary cap pop): seconds from fully drawn to
+// fully hidden and back.
+const CAP_FADE = 0.25;
+
 /**
  * The five. WHERE each one wants to stand is settlement identity and lives on
  * the descriptor (spec.interiors.prefer, keyed by id) — the plot search takes
@@ -360,11 +392,21 @@ export class Interiors {
     this.insideId = null;
 
     this._ownedGeometries = [];
+    this._ownedMaterials = [];
     this._reserved = [];      // the footprint boxes plan() put in city.boxes
     this._triangles = 0;
     this.shellMesh = null;    // the one merged shell for all five, see build()
     this.capMesh = null;      // the one merged cap; hiding is per draw GROUP
     this._capTotal = 0;
+    // The hinged door leaves (one Group of five pivots) and the roof-fade
+    // state. `_fadeId` is the building whose cap slice is currently ramping or
+    // hidden; `_fadeAlpha` runs 1 (fully drawn) -> 0 (hidden). Both are driven
+    // by update(), which citymode ticks from the same per-frame hook as the
+    // inside/outside hysteresis — interiors have no tick of their own.
+    this.doorGroup = null;
+    this._capFadeMat = null;
+    this._fadeId = null;
+    this._fadeAlpha = 1;
   }
 
   get triangles() { return this._triangles; }
@@ -699,10 +741,40 @@ export class Interiors {
       });
       this._capTotal = start;
       const geo = mergeAll(capGeos);
-      // A one-element material ARRAY, not a bare material: three only honours
+      // A material ARRAY, not a bare material: three only honours
       // geometry.groups when the material is an array, and groups are how one
       // building's roof disappears out of the middle of a shared buffer.
-      const mesh = new THREE.Mesh(geo, [cityMaterials().shell]);
+      //
+      // Slot 1 is the ROOF-FADE material (B3): a clone of the shared shell
+      // material that only the occupied building's slice is ever assigned to,
+      // so its opacity ramp cannot drag the other four caps (or the whole
+      // town, which shares the original) down with it. Cloned ONCE at build.
+      //
+      // Measured, not assumed — TWICE (the first measurement was wrong, review
+      // finding, verified against three.module.js r169 setProgram's
+      // needsProgramChange chain ~30554-30660): `material.transparent` is NOT
+      // in the program change-detection list, so flipping it at runtime NEVER
+      // re-selects a program — the material's FIRST render pins whichever
+      // variant it compiled, forever. A runtime toggle therefore isn't a
+      // "cached-program switch", it's a no-op that leaves correctness to the
+      // ordering accident of which state rendered first. So:
+      //   * transparent is set TRUE once, here, at creation — the clone
+      //     compiles the transparent variant on its first render and keeps it
+      //     for its whole life. It only ever renders mid-ramp (the settled
+      //     cap uses the shared opaque shell via _applyCapGroups' slot swap),
+      //     so the transparent-sort cost exists only for the 0.25 s a fade is
+      //     actually running.
+      //   * the compile happens once per CITY BUILD (not per session — the
+      //     clone dies with Interiors.dispose() on every dungeon round-trip
+      //     and the program's usedTimes hits 0), a few-ms hitch at the first
+      //     door of each town visit. interior-test's leak baseline is taken
+      //     after its walk phase has already forced the compile; city-test's
+      //     walk never enters a building, so its zero-growth assert is honest.
+      const fadeMat = cityMaterials().shell.clone();
+      fadeMat.transparent = true;
+      this._capFadeMat = fadeMat;
+      this._ownedMaterials.push(fadeMat);
+      const mesh = new THREE.Mesh(geo, [cityMaterials().shell, fadeMat]);
       mesh.name = 'interior_caps';
       mesh.castShadow = true;
       mesh.receiveShadow = true;
@@ -722,9 +794,110 @@ export class Interiors {
       this._applyCapGroups();
     }
 
+    this._buildDoorLeaves();
+
     city.group.add(this.group);
     this.built = true;
     return this;
+  }
+
+  /**
+   * One hinged leaf per enterable, on the shared shell material. See the LEAF_*
+   * block up top for why this is five Meshes, why the leaf is authored rather
+   * than a kit piece, and why it carries NO collision.
+   */
+  _buildDoorLeaves() {
+    if (!this.buildings.length) return;
+    // One geometry for all five. Hinge edge at local x = 0, leaf swinging
+    // through local +X, face across local z — a pivot Group's rotation.y is
+    // then the whole animation. A plank tone one stop darker than the floor
+    // boards plus a brace so it reads as a door, not a plank.
+    const leafGeo = mergeAll([
+      paintedBox(LEAF_W, LEAF_H - 0.06, LEAF_T, LEAF_W / 2, (LEAF_H - 0.06) / 2 + 0.04, 0, 0x6b4526),
+      paintedBox(LEAF_W - 0.16, 0.13, LEAF_T + 0.03, LEAF_W / 2, LEAF_H * 0.55, 0, 0x4a2e18),
+    ]);
+    this._ownedGeometries.push(leafGeo);
+    this._triangles += this.buildings.length
+      * (leafGeo.index ? leafGeo.index.count : leafGeo.attributes.position.count) / 3;
+    this.doorGroup = new THREE.Group();
+    this.doorGroup.name = 'interior_doors';
+    for (const b of this.buildings) {
+      const d = b.door;
+      // Wall tangent (90 deg off the outward normal); the hinge jamb sits at
+      // the -tangent end of the 1.6 m opening, 0.68 m INSIDE the frame plane
+      // (the doorway piece occupies piece-local x 0.8..1.0, so 0.68 puts the
+      // closed leaf 12 cm behind the inner face — a reveal, not a z-fight,
+      // and the swing clears the frame).
+      const tx = -d.nz, tz = d.nx;
+      const pivot = new THREE.Group();
+      pivot.position.set(
+        d.x + d.nx * 0.68 - tx * (LEAF_W / 2 + 0.03),
+        b.base + 0.06,
+        d.z + d.nz * 0.68 - tz * (LEAF_W / 2 + 0.03),
+      );
+      const closedYaw = yawFor(tx, tz);
+      // Open swings INWARD (toward fx/fz). Rotating a vector by +90 deg about
+      // three's +Y maps (x, z) -> (z, -x), so the sign of the inward
+      // component of that image is the sign of the opening rotation.
+      const openSign = (tz * d.fx - tx * d.fz) > 0 ? 1 : -1;
+      pivot.rotation.y = closedYaw;
+      const mesh = new THREE.Mesh(leafGeo, cityMaterials().shell);
+      mesh.name = `door_leaf_${b.id}`;
+      // No cast: a leaf's shadow lives inside a doorway nobody can read it in,
+      // and five casters would each buy a shadow-pass draw per frame forever.
+      mesh.castShadow = false;
+      mesh.receiveShadow = true;
+      pivot.add(mesh);
+      this.doorGroup.add(pivot);
+      b.leaf = { pivot, closedYaw, openDelta: openSign * LEAF_ANGLE, t: 0, target: 0 };
+    }
+    this.group.add(this.doorGroup);
+  }
+
+  // ---------------------------------------------------------------- per-frame
+
+  /**
+   * The one per-frame entry point: door-leaf swings and the roof-fade ramp.
+   *
+   * Interiors do not tick on their own — citymode calls this from the same
+   * hook that runs the inside/outside hysteresis (its update loop), so a
+   * paused game freezes doors and fades exactly like it freezes everything
+   * else. Everything here settles: once every leaf and the fade sit at their
+   * targets this function is a handful of float compares and no writes.
+   */
+  update(dt, playerPos) {
+    if (!this.built) return;
+    if (playerPos) {
+      for (const b of this.buildings) {
+        const L = b.leaf;
+        if (!L) continue;
+        const dd = Math.hypot(playerPos.x - b.door.x, playerPos.z - b.door.z);
+        // Asymmetric band, same shape as citymode's INSIDE_HYST: open inside
+        // LEAF_OPEN_DIST, close only past LEAF_CLOSE_DIST.
+        L.target = L.target ? (dd < LEAF_CLOSE_DIST ? 1 : 0) : (dd < LEAF_OPEN_DIST ? 1 : 0);
+        if (L.t !== L.target) {
+          const step = dt / LEAF_EASE;
+          L.t = L.target > L.t
+            ? Math.min(L.target, L.t + step)
+            : Math.max(L.target, L.t - step);
+          // Smoothstep: the leaf starts and lands soft instead of slamming.
+          const e = L.t * L.t * (3 - 2 * L.t);
+          L.pivot.rotation.y = L.closedYaw + L.openDelta * e;
+        }
+      }
+    }
+    // Roof fade: ramp the occupied slice's alpha toward hidden (0) while the
+    // player is inside it, back toward drawn (1) once they leave.
+    if (this._fadeId) {
+      const target = this.insideId === this._fadeId ? 0 : 1;
+      if (this._fadeAlpha !== target) {
+        const step = dt / CAP_FADE;
+        this._fadeAlpha = target > this._fadeAlpha
+          ? Math.min(target, this._fadeAlpha + step)
+          : Math.max(target, this._fadeAlpha - step);
+        this._applyCapGroups();
+      }
+    }
   }
 
   /**
@@ -956,30 +1129,60 @@ export class Interiors {
     return null;
   }
 
-  /** Idempotent. null puts every cap back. */
+  /** Idempotent. null starts every cap ramping back (update() finishes it). */
   setInside(id) {
     if (id === this.insideId) return;
     this.insideId = id && this.byId.has(id) ? id : null;
+    if (this.insideId && this._fadeId !== this.insideId) {
+      // A NEW occupied building claims the single fade slot. If another slice
+      // was still ramping back in, it snaps fully drawn — the hysteresis band
+      // plus the 4 m minimum between enterables makes a same-frame handover
+      // effectively unreachable, and a one-frame snap on the building you just
+      // left beats carrying two ramps' worth of state forever.
+      this._fadeId = this.insideId;
+      this._fadeAlpha = 1;
+    }
     this._applyCapGroups();
   }
 
   /**
-   * Draw the cap buffer as everything EXCEPT the occupied building's slice.
+   * Draw the cap buffer as everything EXCEPT the occupied building's slice,
+   * which — while the B3 roof-fade ramp is mid-flight — is drawn on the fade
+   * material (slot 1) at the ramp's current opacity instead of popping.
    *
-   * One group when nobody is indoors, two when someone is (and one when the
-   * occupied building happens to sit at either end of the buffer). Groups are
-   * read fresh by the renderer every frame, so there is no dirty flag and no
-   * per-frame work here at all — this runs once per threshold crossing.
+   * One group when nobody is indoors, up to three while a fade runs, and the
+   * old two once the slice is fully hidden (the fade group is dropped at
+   * alpha 0, so a settled interior renders exactly what it did before B3).
+   * Groups are read fresh by the renderer every frame, so there is no dirty
+   * flag — this runs once per threshold crossing and once per ramp step.
    */
   _applyCapGroups() {
     const mesh = this.capMesh;
     if (!mesh) return;
     const geo = mesh.geometry;
     geo.clearGroups();
-    const b = this.insideId ? this.byId.get(this.insideId) : null;
-    if (!b || !b.capRange) { geo.addGroup(0, this._capTotal, 0); return; }
+    const b = this._fadeId ? this.byId.get(this._fadeId) : null;
+    const restored = !this.insideId && this._fadeAlpha >= 1;
+    if (!b || !b.capRange || restored) {
+      // Fully drawn: retire the fade slot so update() goes back to no-op.
+      // (No transparent toggle here — the flag is set once at creation; a
+      // runtime flip never re-selects a program in r169, review finding.)
+      this._fadeId = null;
+      this._fadeAlpha = 1;
+      geo.addGroup(0, this._capTotal, 0);
+      return;
+    }
     const { start, count } = b.capRange;
     if (start > 0) geo.addGroup(0, start, 0);
+    if (this._fadeAlpha > 0) {
+      geo.addGroup(start, count, 1);
+      this._capFadeMat.opacity = this._fadeAlpha;
+      // No transparent toggle: the material is transparent for life (set at
+      // creation) and only ever ASSIGNED mid-ramp — a settled cap swaps back
+      // to the shared opaque shell slot above, which is what actually keeps
+      // it out of the transparent sort. The old runtime flip was a verified
+      // no-op in r169 (programs don't re-select on `transparent`).
+    }
     const end = start + count;
     if (end < this._capTotal) geo.addGroup(end, this._capTotal - end, 0);
   }
@@ -993,8 +1196,13 @@ export class Interiors {
       // player is indoors. The warm quads ride the city's own window field and
       // cost nothing here.
       drawGroups: (this.shellMesh ? 1 : 0)
-        + (this.capMesh ? Math.max(1, this.capMesh.geometry.groups.length) : 0),
+        + (this.capMesh ? Math.max(1, this.capMesh.geometry.groups.length) : 0)
+        + (this.doorGroup ? this.doorGroup.children.length : 0),
       inside: this.insideId,
+      // B3: leaf/fade state, for harnesses. fadeAlpha 1 with no fadeId means
+      // every cap is fully drawn — the pre-B3 "outside" state exactly.
+      doorLeaves: this.doorGroup ? this.doorGroup.children.length : 0,
+      fade: { id: this._fadeId, alpha: +this._fadeAlpha.toFixed(3) },
       buildings: this.buildings.map((b) => ({
         id: b.id, x: b.cx, z: b.cz, w: b.w, d: b.d,
         door: { x: b.door.x, z: b.door.z, outX: b.door.outX, outZ: b.door.outZ },
@@ -1008,16 +1216,25 @@ export class Interiors {
     this.setInside(null);
     if (this.shellMesh) { this.shellMesh.removeFromParent(); this.shellMesh = null; }
     if (this.capMesh) { this.capMesh.removeFromParent(); this.capMesh = null; }
+    if (this.doorGroup) { this.doorGroup.removeFromParent(); this.doorGroup = null; }
     for (const b of this.buildings) {
       b.meshes.shell = null;
       b.meshes.cap = null;
       b.roofMeshes = [];
       b.upperMeshes = [];
+      b.leaf = null;
     }
     // MATERIALS are citykit's (cityMaterials().shell, freed by disposeCityKit)
-    // and City's; only these merged buffers are ours.
+    // and City's — EXCEPT the roof-fade clone, which is ours and would leak a
+    // material (though not a program: the clone shares the cached one) per
+    // rebuild otherwise. Merged buffers and the leaf geometry are ours too.
     for (const g of this._ownedGeometries) g.dispose();
     this._ownedGeometries.length = 0;
+    for (const m of this._ownedMaterials) m.dispose();
+    this._ownedMaterials.length = 0;
+    this._capFadeMat = null;
+    this._fadeId = null;
+    this._fadeAlpha = 1;
     this._capTotal = 0;
     this.group.clear();
     this.group.removeFromParent();

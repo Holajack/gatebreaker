@@ -12,7 +12,7 @@
 
 export const SCREENS = [
   'boot', 'title', 'city', 'gates', 'run', 'hud', 'levelup', 'pause',
-  'results', 'how', 'barracks', 'assay', 'trial',
+  'results', 'how', 'barracks', 'assay', 'trial', 'map',
 ];
 
 // `hud` and `pause` ride on top of whatever is underneath rather than replacing

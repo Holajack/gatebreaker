@@ -21,6 +21,10 @@
 //    portal's z). tools/city-test.mjs and tools/frontier-test.mjs assert the
 //    built layout and the 15:00 keyframe against the shipped values, so an
 //    "improvement" here fails a test rather than quietly moving the town.
+//    Wave B amendments — the streets.graph 'track' edges and the district
+//    portal placements — are DELIBERATE exceptions (owner-approved world
+//    changes), each carrying its own rationale block; the rule still binds
+//    everything else, and still binds the in-wall street transcription.
 //
 // 3. CONSUMERS READ, NEVER WRITE. City stores the descriptor as this.spec and
 //    every builder reads through it inside functions; frontier.js and
@@ -38,6 +42,119 @@
 const WALL_HALF = 88;     // walled interior spans -88..88 on x and z
 const PLAZA_R = 26;       // flagstone disc at the centre
 const BREACH_Z = -126;    // the S portal, outside the north wall
+
+// The seven Verge POI anchors, hoisted so verge.pois and the street graph's
+// track edges read the SAME literals — this kills EDIT drift (one copy moved,
+// the other stale), not BUILD drift: frontier.js still jitters each built POI
+// ±7 m off its anchor (seeded), so a track's painted terminus can land toward
+// the pad's feather rather than its centre (~10 m worst case). The 10 m pad
+// radius and the shared trodden hex absorb that; if it ever reads wrong, the
+// fix is continuing the paint from anchor to the BUILT poi position at paint
+// time, not tightening this table. Per-POI rationale stays on verge.pois.
+const VERGE_POIS = [
+  { id: 'verge_ruin_arch', x: 206, z: 10 },
+  { id: 'camp_hunters_east', x: 192, z: -104 },
+  { id: 'wildgate_e', x: 198, z: 96 },
+  { id: 'camp_farmstead', x: 150, z: 200 },
+  { id: 'verge_ruin_hall', x: 40, z: 210 },
+  { id: 'wildgate_c', x: -62, z: 206 },
+  { id: 'verge_watchtower', x: -30, z: -208 },
+];
+// Anchor lookup for the verge.pois entries below — id-keyed, never indexed,
+// for the same reason districts are consumed by id.
+const POI_AT = Object.fromEntries(VERGE_POIS.map((p) => [p.id, p]));
+
+// ---------------------------------------------------------------------------
+// The street graph (Wave B1) — roads as nodes + edges instead of a parameter
+// blob. city.js's buildStreets() is a plain walker now: it emits one stamped
+// segment per edge, IN EDGE ORDER, because segment order feeds the ground
+// paint pass, _layout's frontage search and interiors' plot scoring — reorder
+// an edge and the whole town re-derives.
+//
+// TRANSCRIPTION, NOT REDESIGN, for every class except 'track': each in-wall
+// edge below reproduces the segment the old blob generated, byte for byte,
+// including the float dust — ring_20 is ring_0 up to Math.sin(2*PI) ~ 2.4e-16,
+// and it is kept as its own node because the old 20-gon's closing segment
+// ended on exactly that value, and "identical in-wall surfaces" is asserted
+// by tools/city-test.mjs against the stamped result, not against intent.
+//
+// 'track' edges are NEW (Wave B1's Verge roads): one kerbless packed-earth
+// road from the city's nearest wall opening to each POI that had none, so
+// approach paths read as built rather than scattered. They are handed back on
+// a SEPARATE list by the walker (city.tracks, never city.streets): _layout,
+// the lantern pass, interiors' plot search and validateLayout all iterate
+// city.streets, and a track outside the wall must not shift a single one of
+// their draws or distances. The watchtower track deliberately grazes the
+// Breach ash ring (any straight line north does); the ash paint overrides the
+// trodden earth there, which reads as the path burning out near the ruin.
+const STREET_GRAPH = (() => {
+  const nodes = {
+    // Plaza lip and avenue ends. Avenues stop avenueStop=2 m inside the wall;
+    // the west one stops overlookStop=4 m east of the cliff parapet instead.
+    plaza_n: { x: 0, z: -PLAZA_R },
+    plaza_s: { x: 0, z: PLAZA_R },
+    plaza_e: { x: PLAZA_R, z: 0 },
+    plaza_w: { x: -PLAZA_R, z: 0 },
+    ave_n_end: { x: 0, z: -WALL_HALF + 2 },
+    ave_s_end: { x: 0, z: WALL_HALF - 2 },
+    ave_e_end: { x: WALL_HALF - 2, z: 0 },
+    overlook: { x: -WALL_HALF + 4, z: 0 },
+    // Wall openings. gate_n doubles as the Breach road's head, exactly where
+    // the old blob started it; gate_e / gate_s exist for the track edges.
+    gate_n: { x: 0, z: -WALL_HALF },
+    gate_e: { x: WALL_HALF, z: 0 },
+    gate_s: { x: 0, z: WALL_HALF },
+    breach_road_end: { x: 0, z: BREACH_Z + 14 },   // 14 m short of the S portal
+  };
+  const edges = [];
+  const E = (a, b, cls, w) => edges.push({ a, b, class: cls, w });
+
+  // Four avenues out of the plaza, then the Breach road — same order, same
+  // widths as the old literal list (order 1-5 of 33).
+  E('plaza_n', 'ave_n_end', 'avenue', 6);
+  E('plaza_s', 'ave_s_end', 'avenue', 6);
+  E('plaza_e', 'ave_e_end', 'avenue', 6);
+  E('plaza_w', 'overlook', 'avenue', 6);
+  E('gate_n', 'breach_road_end', 'avenue', 4.5);
+
+  // Ring road: the 58 m 20-gon (cheap to rasterise), edges 6-25. 21 nodes,
+  // see the float-dust note above.
+  for (let i = 0; i <= 20; i++) {
+    const a = (i / 20) * Math.PI * 2;
+    nodes[`ring_${i}`] = { x: Math.cos(a) * 58, z: -Math.sin(a) * 58 };
+  }
+  for (let i = 0; i < 20; i++) E(`ring_${i}`, `ring_${i + 1}`, 'ring', 4.5);
+
+  // Cross streets, edges 26-33: mirrored across both axes AND both signs,
+  // x-street then z-street per offset, inner pair (32) then outer (66) —
+  // the old nested-loop emission order, preserved because it is load-bearing.
+  for (const k of [-1, 1]) {
+    for (const c of [{ off: 32, span: WALL_HALF - 5, w: 4 }, { off: 66, span: 68, w: 3.4 }]) {
+      nodes[`lane_x${k * c.off}_n`] = { x: k * c.off, z: -c.span };
+      nodes[`lane_x${k * c.off}_s`] = { x: k * c.off, z: c.span };
+      E(`lane_x${k * c.off}_n`, `lane_x${k * c.off}_s`, 'lane', c.w);
+      nodes[`lane_z${k * c.off}_w`] = { x: -c.span, z: k * c.off };
+      nodes[`lane_z${k * c.off}_e`] = { x: c.span, z: k * c.off };
+      E(`lane_z${k * c.off}_w`, `lane_z${k * c.off}_e`, 'lane', c.w);
+    }
+  }
+
+  // Verge tracks (NEW): one per POI, from its nearest wall opening. Nearest is
+  // computed rather than authored so a re-anchored POI cannot keep a stale
+  // gate; the gate list is the three real openings (the west side is cliff).
+  const gates = ['gate_n', 'gate_e', 'gate_s'];
+  for (const p of VERGE_POIS) {
+    nodes[`poi_${p.id}`] = { x: p.x, z: p.z };
+    let best = gates[0], bestD = Infinity;
+    for (const g of gates) {
+      const d = Math.hypot(p.x - nodes[g].x, p.z - nodes[g].z);
+      if (d < bestD) { bestD = d; best = g; }
+    }
+    E(best, `poi_${p.id}`, 'track', 3);
+  }
+
+  return { nodes, edges };
+})();
 
 export const THRESHOLD = {
   slug: 'threshold',
@@ -68,20 +185,33 @@ export const THRESHOLD = {
     stitch: [138, 155],
   },
 
-  // buildStreets() parameters. Avenues run plaza -> wall on all four compass
-  // lines (the west one stops at the cliff parapet instead of a gate); the
-  // Breach road continues the north avenue outside the wall; cross streets are
-  // mirrored in both axes per entry, span metres either side of centre.
+  // The road network as DATA (Wave B1): a graph of junction nodes + classed
+  // edges (avenue|ring|lane|track, width in metres) that buildStreets() walks
+  // in edge order, plus the ONE trim vocabulary the ground painter consumes.
+  // The graph itself is authored above (STREET_GRAPH) with the transcription
+  // and ordering laws; the parameter blob it replaced generated the identical
+  // in-wall segments.
   streets: {
-    avenueW: 6,
-    avenueStop: 2,         // avenues end this far inside the wall
-    overlookStop: 4,       // the west avenue ends this far east of the cliff
-    breachRoad: { w: 4.5, stop: 14 },  // ends 14 m short of the S portal
-    ring: { r: 58, sides: 20, w: 4.5 },  // 20-gon: cheap to rasterise
-    cross: [
-      { off: 32, span: WALL_HALF - 5, w: 4 },
-      { off: 66, span: 68, w: 3.4 },
-    ],
+    graph: STREET_GRAPH,
+
+    // Trim vocabulary, named ONCE per settlement so kerb families cannot mix:
+    // the painter reads these instead of burying the numbers per call site.
+    //   kerb   — the darker seam band just outside a street's width. `in`/`out`
+    //            are [start, end] offsets past s.w for the two smoothsteps
+    //            whose product is the band (see city.js _buildGround); the
+    //            band is ~2 m wide because the ground grid is 3.4 m — a true
+    //            0.5 m kerb lands on almost no vertices and reads as dashes.
+    //   pave   — the paved-surface feather, offsets past s.w.
+    //   track  — the kerbless packed-earth treatment for 'track' edges: same
+    //            feather vocabulary, no kerb band, the Verge's trodden-ground
+    //            colour (the exact hex frontier.js uses for POI pads, so a
+    //            track arriving at a pad is one continuous material) at less
+    //            than full strength — earth over grass, not stone over it.
+    trim: {
+      kerb: { color: 0x6e6a55, in: [-0.6, 0.1], out: [1.7, 3.0], strength: 0.8 },
+      pave: { feather: [-0.6, 2.4] },
+      track: { color: 0x9c8f74, feather: [-0.6, 2.4], strength: 0.85 },
+    },
   },
 
   /**
@@ -99,12 +229,53 @@ export const THRESHOLD = {
     { id: 'breach',   name: 'THE BREACH',     pos: { x: 0, z: BREACH_Z }, pad: 18, service: null },
   ],
 
-  // -Z is north. Angles are measured with 0 = east and +ve toward north, so
-  // the arc reads E..A left-to-right walking in from the south. `ring` is the
-  // plaza radius E..A stand on; the S portal stands alone at breach.z.
+  // Gate placement (Wave B2) — `placements` is AUTHORITATIVE and ORDERED:
+  // city._buildPortals walks it top to bottom drawing one rnd() per entry, so
+  // the E,D,C,B,A,S order is part of the settlement's RNG contract; reorder
+  // it and every draw after the portals re-derives.
+  //
+  // Anchors:  { kind:'plaza-ring', angleDeg }  — on the plaza ring (`ring` m),
+  //             0 = east, +ve toward north (-Z);
+  //           { kind:'district', district, x, z } — an exact spot in a named
+  //             district, ON or immediately beside a streets.graph edge;
+  //           { kind:'breach' } — alone outside the north wall at breach.z.
+  //
+  // The owner's ask: "gates throughout the city instead of congregated". E
+  // keeps the plaza ring — the assay yard is the first-minutes teaching
+  // moment and the one gate a fresh save can enter must be the one the spawn
+  // camera frames. The rest dissolve into the districts, each ON a road so
+  // the B1 network leads you there: D beside the east avenue on the Ashworks
+  // pad (the barracks district trains for exactly that gate), C on the north
+  // avenue at the z=-66 cross — the road to the north wall, B on the z=66
+  // cross past the market's last stall (the exchange district, whose Verge
+  // band holds the Roofless Hall ruin the south tracks run to), A across the
+  // city from D on the west avenue in Quarter Row. Spots are >=30 m apart,
+  // inside building-exclusion corridors (street corridor or district-pad
+  // core, so no procedural plot can ever claim them), and prompt-zone-clear
+  // of every interactable — city._assertPortalPlacements() throws at build
+  // time on any violation, which is what makes the assay z=-32 class of
+  // hand-patched collision impossible to reintroduce silently.
   portals: {
     ring: 22,
-    angles: { E: 198, D: 144, C: 90, B: 36, A: -18 },
+    placements: [
+      { id: 'plaza-e', rank: 'E', anchor: { kind: 'plaza-ring', angleDeg: 198 } },
+      { id: 'gate-d', rank: 'D', anchor: { kind: 'district', district: 'ashworks', x: 44, z: -4 } },
+      { id: 'gate-c', rank: 'C', anchor: { kind: 'district', district: 'assay', x: 5, z: -62 } },
+      { id: 'gate-b', rank: 'B', anchor: { kind: 'district', district: 'exchange', x: 12, z: 66 } },
+      { id: 'gate-a', rank: 'A', anchor: { kind: 'district', district: 'row', x: -60, z: 4 } },
+      { id: 'breach-s', rank: 'S', anchor: { kind: 'breach' } },
+    ],
+    // FOR THE OWNER — the shipped plaza ring, kept as a paste-back: replace
+    // `placements` above with this block to re-congregate E..A on the ring
+    // (the 22 m arc reads E..A left-to-right walking in from the south).
+    // placements: [
+    //   { id: 'plaza-e', rank: 'E', anchor: { kind: 'plaza-ring', angleDeg: 198 } },
+    //   { id: 'plaza-d', rank: 'D', anchor: { kind: 'plaza-ring', angleDeg: 144 } },
+    //   { id: 'plaza-c', rank: 'C', anchor: { kind: 'plaza-ring', angleDeg: 90 } },
+    //   { id: 'plaza-b', rank: 'B', anchor: { kind: 'plaza-ring', angleDeg: 36 } },
+    //   { id: 'plaza-a', rank: 'A', anchor: { kind: 'plaza-ring', angleDeg: -18 } },
+    //   { id: 'breach-s', rank: 'S', anchor: { kind: 'breach' } },
+    // ],
     breach: { z: BREACH_Z },
   },
 
@@ -201,7 +372,7 @@ export const THRESHOLD = {
         name: 'THE SUNKEN ARCH',
         // Dead east on the east avenue's line (the street runs out along
         // z = 0), so it is the thing you see through the east gate.
-        x: 206, z: 10, pad: 10, radius: 24, stamp: 'ruinArch',
+        x: POI_AT.verge_ruin_arch.x, z: POI_AT.verge_ruin_arch.z, pad: 10, radius: 24, stamp: 'ruinArch',
       },
       {
         id: 'camp_hunters_east',
@@ -209,34 +380,34 @@ export const THRESHOLD = {
         // npcs/npcHunter are read by citizens.js after City.build has run both
         // frontier and crowd — a staging post with nobody in it answers the
         // owner's "is anyone out here" with no.
-        x: 192, z: -104, pad: 10, radius: 24, stamp: 'campHunters', npcs: 2, npcHunter: true,
+        x: POI_AT.camp_hunters_east.x, z: POI_AT.camp_hunters_east.z, pad: 10, radius: 24, stamp: 'campHunters', npcs: 2, npcHunter: true,
       },
       {
         id: 'wildgate_e',
         name: 'AN UNWATCHED GATE',
-        x: 198, z: 96, pad: 12, radius: 24, stamp: 'wildGate', rank: 'E',
+        x: POI_AT.wildgate_e.x, z: POI_AT.wildgate_e.z, pad: 12, radius: 24, stamp: 'wildGate', rank: 'E',
       },
       {
         id: 'camp_farmstead',
         name: 'THE OUTFARM',
-        x: 150, z: 200, pad: 10, radius: 24, stamp: 'campFarmstead', npcs: 1,
+        x: POI_AT.camp_farmstead.x, z: POI_AT.camp_farmstead.z, pad: 10, radius: 24, stamp: 'campFarmstead', npcs: 1,
       },
       {
         id: 'verge_ruin_hall',
         name: 'THE ROOFLESS HALL',
-        x: 40, z: 210, pad: 10, radius: 24, stamp: 'ruinHall',
+        x: POI_AT.verge_ruin_hall.x, z: POI_AT.verge_ruin_hall.z, pad: 10, radius: 24, stamp: 'ruinHall',
       },
       {
         id: 'wildgate_c',
         name: 'A SEALED WILD GATE',
-        x: -62, z: 206, pad: 12, radius: 24, stamp: 'wildGate', rank: 'C',
+        x: POI_AT.wildgate_c.x, z: POI_AT.wildgate_c.z, pad: 12, radius: 24, stamp: 'wildGate', rank: 'C',
       },
       {
         id: 'verge_watchtower',
         name: 'THE ASHREACH WATCH',
         // North, on the Breach side: a tower on the skyline is the only
         // landmark out here that reads from inside the walls.
-        x: -30, z: -208, pad: 10, radius: 24, stamp: 'watchtower',
+        x: POI_AT.verge_watchtower.x, z: POI_AT.verge_watchtower.z, pad: 10, radius: 24, stamp: 'watchtower',
       },
     ],
   },

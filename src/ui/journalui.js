@@ -85,7 +85,36 @@ export class JournalUI {
     this._root = root;
   }
 
+  /**
+   * HUD open button beside the map's — same injected pattern, same Wave G
+   * rehome note (all injected buttons consolidate into city chrome later).
+   */
+  injectHudButton() {
+    const bar = document.querySelector('#hud .hud-top');
+    if (!bar || document.getElementById('btnJournal')) return;
+    const btn = document.createElement('button');
+    btn.className = 'icon-btn';
+    btn.textContent = '▤';
+    btn.id = 'btnJournal';
+    btn.type = 'button';
+    btn.setAttribute('aria-label', 'Contracts');
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.game.audio?.ui?.();
+      if (this.open) this.hide(); else this.show();
+    });
+    const anchor = document.getElementById('btnMap');
+    if (anchor) bar.insertBefore(btn, anchor); else bar.appendChild(btn);
+  }
+
   show() {
+    // ONE overlay at a time — the same law every panel enforces.
+    const g = this.game;
+    if (g?.shopUI?.isOpen) g.shopUI.close();
+    if (g?.assayUI?.isOpen) g.assayUI.close();
+    if (g?.invUI?.isOpen) g.invUI.close();
+    if (g?.mapUI?.isOpen) g.mapUI.close();
     this._ensure();
     this._render();
     this._root.classList.remove('hidden');

@@ -78,15 +78,70 @@ const BLUR = /* glsl */`
   }
 `;
 
+// Region grade (Wave B6). The composite quad is the ONLY full-screen draw we
+// own, and it never samples the framebuffer — it is blended over the scene.
+// So the grade has to live in the blend equation, not in shader arithmetic
+// over the scene color:
+//
+//   out = src * ONE + dst * SRC_ALPHA
+//
+// with the vignette factor written into src ALPHA. That single change of
+// blend factors is what lets one quad both ADD (lift, glow) and DARKEN
+// (vignette) without a second pass. It is bit-identical to the shipped
+// AdditiveBlending when alpha is exactly 1.0: the old mode was
+// (SRC_ALPHA, ONE) with the shader writing alpha 1.0 — src*1 + dst*1 —
+// and the new mode with alpha 1.0 is src*1 + dst*1.0, the same product.
+// Fixed-function blending multiplies by the exact factor value, so *1.0
+// cannot drift.
+//
+// What each uniform can and cannot reach, given that constraint:
+//   uGradeLift  — additive, reaches the WHOLE frame (it rides src).
+//   uVignette   — multiplicative darken, reaches the WHOLE frame (dst*alpha),
+//                 and dims the glow/lift src by the same factor so the corner
+//                 falloff is uniform, not "dark scene, bright halos".
+//   uGradeSat   — reaches ONLY the composite contribution (glow + lift).
+//                 A true scene-wide saturation remix needs per-channel access
+//                 to dst, which fixed-function blending cannot express and
+//                 framebuffer-fetch does not exist in WebGL2; the only fix is
+//                 rendering the scene to a target first — a new pass, which
+//                 this module's contract forbids. Muted regions therefore mute
+//                 their emissives, not their albedo. Documented, not hidden.
+//
+// Defaults short-circuit: sat and vignette sit behind dynamically-uniform
+// branches (no divergence cost — the condition is a uniform), so at defaults
+// the executed arithmetic is LITERALLY the shipped expression plus one
+// `+ vec3(0.0)` (exact identity for the finite non-negative values this
+// shader produces) and an alpha of exactly 1.0. visual-test's probes MEASURE
+// this (they print, they don't gate — its exit code ignores luma drift; a
+// hardening task if that ever bites).
 const COMPOSITE = /* glsl */`
   uniform sampler2D tGlow;
   uniform float uStrength;
+  uniform vec3 uGradeLift;
+  uniform float uGradeSat;
+  uniform float uVignette;
   varying vec2 vUv;
   void main() {
     vec3 g = texture2D(tGlow, vUv).rgb * uStrength;
     g = vec3(1.0) - exp(-g);      // soft rolloff so glow never clips to flat white
     g = pow(g, vec3(0.4545));     // linear -> sRGB, matching the framebuffer
-    gl_FragColor = vec4(g, 1.0);
+    if (uGradeSat != 1.0) {
+      // Rec.709 luma — same weights the tone mapper's luminance uses, so a
+      // desaturated glow lands on the gray the scene would call "same
+      // brightness" rather than shifting value as it loses hue.
+      g = mix(vec3(dot(g, vec3(0.2126, 0.7152, 0.0722))), g, uGradeSat);
+    }
+    g += uGradeLift;              // exact +0.0 at defaults — identity
+    float vig = 1.0;
+    if (uVignette > 0.0) {
+      // Radial falloff: flat inside r=0.25, eased to full effect at the
+      // corner (r = sqrt(0.5) for centered UV). smoothstep keeps the onset
+      // invisible at low strengths instead of printing a circle.
+      float fall = smoothstep(0.25, 0.7071, length(vUv - 0.5));
+      vig = max(1.0 - uVignette * fall, 0.0);
+      g *= vig;                   // dim our own contribution with the scene
+    }
+    gl_FragColor = vec4(g, vig); // alpha scales dst via ONE/SRC_ALPHA blend
   }
 `;
 
@@ -121,9 +176,23 @@ export class Glow {
       depthTest: false, depthWrite: false,
     });
     this.compMat = new THREE.ShaderMaterial({
-      uniforms: { tGlow: { value: this.rtA.texture }, uStrength: { value: this.strength } },
+      uniforms: {
+        tGlow: { value: this.rtA.texture },
+        uStrength: { value: this.strength },
+        uGradeLift: { value: new THREE.Vector3(0, 0, 0) },
+        uGradeSat: { value: 1.0 },
+        uVignette: { value: 0.0 },
+      },
       vertexShader: VERT, fragmentShader: COMPOSITE,
-      blending: THREE.AdditiveBlending,
+      // Custom (ONE, SRC_ALPHA) instead of AdditiveBlending (SRC_ALPHA, ONE):
+      // dst gets multiplied by the shader's alpha so uVignette can darken the
+      // scene from this same quad. With alpha 1.0 (the default grade) both
+      // modes reduce to src*1 + dst*1 — see the COMPOSITE comment for why
+      // that is exact, not merely close.
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.SrcAlphaFactor,
       transparent: true, depthTest: false, depthWrite: false,
     });
     this.blurQuad = new FullScreenQuad(this.blurMat);
@@ -141,6 +210,45 @@ export class Glow {
     this.strength = force ? v : Math.min(v, MAX_STRENGTH);
     this.compMat.uniforms.uStrength.value = this.strength;
     return this.strength;
+  }
+
+  /**
+   * Region grade identity (Wave B6). Pass { lift:[r,g,b], glowSat, vignette }
+   * or null to restore the shipped look. Any omitted field falls back to its
+   * default — a region that only wants a vignette should not have to restate
+   * the rest. NOT persisted anywhere: the caller (citymode via the settlement
+   * descriptor's palette row) re-applies on every world build, which is what
+   * keeps save files and this renderer decoupled.
+   *
+   * Ranges (magnitudes unclamped, malformed values fail soft to defaults):
+   * lift is a small additive push (sensible 0..~0.06 per channel — it adds to
+   * EVERY pixel, so 0.05 already reads as haze), glowSat multiplies the
+   * COMPOSITE CONTRIBUTION ONLY (0 = monochrome glow, 1 = shipped — see
+   * setGrade's rename note; it is not scene saturation and cannot be),
+   * vignette is 0 (off) .. 1 (corners to black). The tier gate matters:
+   * low/medium run bloom:false, Glow.render() early-returns before the
+   * composite quad, and the grade never draws there — REGION IDENTITY ON
+   * THOSE TIERS RIDES THE PALETTE/FOG ROWS (daynight/env data), which reach
+   * every tier; this grade is the high-tier garnish on top, by design.
+   */
+  setGrade(grade) {
+    const u = this.compMat.uniforms;
+    // Field is `glowSat`, NOT `sat` (renamed while zero call sites and zero
+    // palette rows existed — review finding): it desaturates ONLY the
+    // glow+lift composite contribution, never the scene, an architectural
+    // limit of a quad that cannot sample the framebuffer. A field named
+    // plain `sat` in a REGION grade promised scene-wide saturation it cannot
+    // deliver, and Wave E's palette authors would have written sat:0.5
+    // expecting a muted region.
+    const { lift, glowSat, vignette } = grade || {};
+    // Defensive: values come from authored descriptor rows — exactly the
+    // input that gets a typo. Malformed rows fail SOFT (defaults), never
+    // NaN-poison the composite into a black region.
+    if (lift && Number.isFinite(lift[0]) && Number.isFinite(lift[1]) && Number.isFinite(lift[2])) {
+      u.uGradeLift.value.set(lift[0], lift[1], lift[2]);
+    } else u.uGradeLift.value.set(0, 0, 0);
+    u.uGradeSat.value = Number.isFinite(glowSat) ? glowSat : 1.0;
+    u.uVignette.value = Number.isFinite(vignette) ? Math.max(0, vignette) : 0.0;
   }
 
   setSize(w, h, pixelRatio) {

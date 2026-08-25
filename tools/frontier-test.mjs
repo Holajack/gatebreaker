@@ -54,7 +54,16 @@ const SWIFTSHADER = argv.includes('--swiftshader');
 // (+6.3%) and 102 -> 104 draw groups (+2: one merged shell, one merged cap for
 // all five). Six procedural buildings gave up their plots; the interiors cost
 // ~43k triangles including floors, furniture and both storeys of wall.
-const BASELINE = { triangles: 450784, drawGroups: 104 };
+//
+// Re-recorded at Wave B2+B3 TOGETHER (the two agents landed in one tree, so
+// the B2-only interim record of 451722/104 never matched a buildable state):
+// B2 (gates into the districts) re-hangs the rank flags per-district and adds
+// portal keep-outs to _blockedForProp (+938 tris of shifted street furniture);
+// B3 (doors that don't lie) swaps every sealed building's painted-shut
+// town_wall_door (376 tris) for town_wall_doorway_base (64) plus the shared
+// city_door_voids InstancedMesh (~-310 tris per sealed building net), and the
+// voids field adds draw groups. 450784 -> 432622 tris; groups 104 -> 108.
+const BASELINE = { triangles: 432622, drawGroups: 108 };
 // The Verge roughly doubles the world, and STEP 7's POI stamps add ~100k on top
 // of step 6's scatter. This ratio is an inventory guard against an accidental
 // blowup, NOT the per-frame cost: POI stamps are merged meshes with tight

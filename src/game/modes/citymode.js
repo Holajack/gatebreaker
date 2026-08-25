@@ -10,18 +10,29 @@ import { GATES } from '../config.js';
 // must be visible AT THE GATE, and this prompt is the S gate's doorstep.
 import { canAscend } from '../classes.js';
 import { makeDayState } from '../../render/daynight.js';
+// B3 "honest venues": the sealed doors' lines come from the strings module —
+// its first live consumer, per its own "migrate opportunistically" rule.
+import { t } from '../strings.js';
 
 // How far past a portal's own radius the prompt still shows. Generous, because
 // a phone player steers with a thumb and "stand exactly here" is not a thing
 // you can ask of one.
 const PROMPT_SLACK = 2.2;
 
-// What is actually behind each service door, for the ones that lead somewhere.
-// Anything not listed falls through to 'NOT YET OPEN', which cityui.js softens
-// to 'CLOSED' — see its setPrompt.
+// What is actually behind each service door. Anything not listed falls
+// through to 'NOT YET OPEN', which cityui.js softens to 'CLOSED' — see its
+// setPrompt. Since B3 only the stash still falls through (Wave F decides its
+// fate); the barracks and the trial stair carry diegetic story lines instead
+// of the papered-over dev sign. Those two live in src/game/strings.js
+// ('door.barracks.sealed' / 'door.trial.sealed'), where they are [BIBLE]-
+// flagged: PROVISIONAL until the owner approves the story bible, and Wave C's
+// wiring pass owns any rewrite — this table just stops asking players to
+// read scaffolding.
 const INTERACT_SUB = {
   assay: 'RIFT CONTRACTS',
   exchange: 'WEAPONS FOR ASH',
+  barracks: t('door.barracks.sealed'),
+  trial: t('door.trial.sealed'),
 };
 
 // city.js drops the ground to y = -34 west of x = -88 so the world ends in a
@@ -64,6 +75,11 @@ const EYE = 1.55;             // where the collision probe leaves the body
 // wall, inside a room 6-10 m across. Anything longer and the camera sits in the
 // street looking at a roofless box from outside.
 const CAM_INSIDE = 5.0;
+// B3: the boom no longer snaps between its indoor and outdoor lengths — it
+// eases over this many seconds, both directions. The blend drives the SAME
+// single scale factor k the snap used to pick, so the two endpoints (and the
+// shipped outdoor camera, bit for bit) are untouched; only the transition is.
+const CAM_BOOM_EASE = 0.3;
 // Half of the spec's 0.5 m hysteresis band, applied either side of the
 // footprint edge. Without it the doorway threshold flickers the roof on and off
 // at walking pace, which is worse than either state.
@@ -101,6 +117,11 @@ export class CityMode extends GameMode {
     // player move, and two watchers with two thresholds flicker against each
     // other at the doorway.
     this._insideId = null;
+    // The camera-boom ease (B3): 0 = full outdoor boom, 1 = CAM_INSIDE.
+    // updateCamera slews it toward whatever _insideId implies at
+    // dt / CAM_BOOM_EASE, and snaps it on teleports along with the rest of
+    // the rig.
+    this._insideBlend = 0;
 
     // One DayState for the life of the mode. game.worldClock.sample() writes
     // into it and allocates nothing, so the whole day/night system costs zero
@@ -135,6 +156,12 @@ export class CityMode extends GameMode {
     if (!this.city) this.city = new City(g.scene, g.renderer, g.camera, g.quality);
     this.city.build(this._seed, g.save);
     this.refreshPortalLocks();
+    // Region grade (Wave B6): the descriptor's palette row drives the glow
+    // composite's grade uniforms — re-applied per build because setGrade
+    // persists nothing. Threshold carries no row yet (null = shipped look);
+    // Wave B stage 2's settlements get their own. Low/medium tiers never run
+    // the composite — their region identity rides the palette/fog rows.
+    g.glow?.setGrade(this.city.spec.palettes?.grade ?? null);
 
     if (!this.ui) {
       this.ui = new CityUI({ onConfirm: () => this.confirmPrompt() });
@@ -185,15 +212,33 @@ export class CityMode extends GameMode {
     const city = this.city;
     if (spawnAt) return _v.copy(spawnAt).clone();
     if (atPortal) {
-      // atPortal is a stable portal id ('plaza-e', 'wild-wildgate_e', ...) or,
+      // atPortal is a stable portal id ('plaza-e', 'gate-d', 'wild-...') or,
       // from legacy callers, a bare rank. Id match first — it is exact — then
-      // rank, whose first match is always the plaza gate (built before the
+      // an ALIAS pass for ids minted between Wave A and B2 ('plaza-d' etc:
+      // those portals are 'gate-d' now, and 'plaza-d' matches neither an id
+      // nor a rank, so without this a Wave-A-era return payload silently fell
+      // through to spawnPoint() — review finding). A prefixed id aliases to
+      // its rank: each rank has exactly one town portal, so rank is enough.
+      // Then bare rank, whose first match is the town gate (built before the
       // frontier's wild ones).
+      const alias = String(atPortal).match(/^(?:plaza|gate|breach)-([a-z])$/);
+      const aliasRank = alias ? alias[1].toUpperCase() : null;
       const portal = city.portals.find((q) => q.id === atPortal)
+        || (aliasRank && city.portals.find((q) => !q.wild && q.rank === aliasRank))
         || city.portals.find((q) => q.rank === atPortal);
       if (portal) {
-        // Step out of the portal toward the plaza, not on top of the dais.
-        const away = _v2.set(-portal.pos.x, 0, -portal.pos.z);
+        // Step out along the portal's OWN facing — the built visual's yaw
+        // (buildPortalVisual rotates local +Z to the walkable side; every
+        // builder authors yaw so the oval faces the approach). The old
+        // "toward the plaza centre" vector was the same direction for every
+        // plaza-ring gate but is wrong the moment a gate lives in a district
+        // (B2): a dais beside a street corner could step the returning player
+        // into the frontage behind it. Radial fallback kept for a portal that
+        // somehow has no visual, so a rescue path exists.
+        const yaw = portal.group ? portal.group.rotation.y : null;
+        const away = yaw != null
+          ? _v2.set(Math.sin(yaw), 0, Math.cos(yaw))
+          : _v2.set(-portal.pos.x, 0, -portal.pos.z);
         if (away.lengthSq() < 1e-4) away.set(0, 0, 1);
         away.normalize().multiplyScalar(portal.radius + 1.6);
         const x = portal.pos.x + away.x;
@@ -242,6 +287,7 @@ export class CityMode extends GameMode {
     this._prompt = null;
     this._camReady = false;
     this._insideId = null;
+    this._insideBlend = 0;
   }
 
   // -------------------------------------------------------------- per frame
@@ -306,6 +352,10 @@ export class CityMode extends GameMode {
     p.mp = Math.min(d.maxMp, p.mp + Math.max(d.mpRegen, d.maxMp * 0.08) * dt);
 
     this._updateInside();
+    // The B3 door leaves and the roof-fade ramp ride the same per-frame hook
+    // as the hysteresis above — interiors have no tick of their own, and
+    // putting theirs anywhere else would let a paused door keep swinging.
+    this.city?.interiors?.update(dt, p.pos);
     this._updatePrompt();
     this._updateDistrict();
     this._updateCompass(dt);
@@ -435,22 +485,31 @@ export class CityMode extends GameMode {
     const city = this.city;
     const p = this.game.player;
     if (!city) return;
-    let best = null, bestD = Infinity;
+    // Up to three pips, nearest first (B2): with the gates spread through the
+    // districts one arrow stopped being wayfinding — it named the closest
+    // gate and said nothing about the other four directions a hunter might
+    // actually want. Three is the cap because the compass is a 4 Hz pill on a
+    // phone: nearest-three covers "where I am, and my two next options"
+    // without becoming a legend.
+    const near = [];
     for (const portal of city.portals) {
       if (portal.locked) continue;
-      const d = Math.hypot(p.pos.x - portal.pos.x, p.pos.z - portal.pos.z);
-      if (d < bestD) { bestD = d; best = portal; }
+      near.push({ portal, d: Math.hypot(p.pos.x - portal.pos.x, p.pos.z - portal.pos.z) });
     }
-    if (!best) { this.ui?.setCompass(NaN, 0, 0); return; }
+    near.sort((a, b) => a.d - b.d);
+    if (!near.length) { this.ui?.setCompass(NaN, 0, 0); return; }
     // Screen space: with the orbit untouched the camera looks down -Z, so
     // world -Z is up on screen and a positive CSS rotation is clockwise from
     // there. A dragged yaw rotates the whole frame with it: the camera's
     // ground forward sits at world angle -yaw in this convention, so the
-    // as-seen bearing is the world angle plus yaw — the arrow points at the
+    // as-seen bearing is the world angle plus yaw — each pip points at its
     // portal AS SEEN, not as mapped.
-    const angle = Math.atan2(best.pos.x - p.pos.x, -(best.pos.z - p.pos.z))
-      + this.game.input.look.yaw;
-    this.ui?.setCompass(angle, bestD, PORTAL_COLORS[best.rank] || 0xbfd0ff);
+    const yaw = this.game.input.look.yaw;
+    this.ui?.setCompass(near.slice(0, 3).map(({ portal, d }) => ({
+      angle: Math.atan2(portal.pos.x - p.pos.x, -(portal.pos.z - p.pos.z)) + yaw,
+      distance: d,
+      color: PORTAL_COLORS[portal.rank] || 0xbfd0ff,
+    })));
   }
 
   // ---------------------------------------------------------------- camera
@@ -466,9 +525,30 @@ export class CityMode extends GameMode {
     // player's head looking at the floor. The bias exists to push the hero
     // below centre on an 11.3 m boom; at 5 m it is two thirds of the rig.
     // k = 1 outdoors, so the shipped camera is untouched bit for bit.
+    //
+    // B3: k no longer SNAPS between its two values at the threshold — the
+    // blend slews at dt / CAM_BOOM_EASE (0.3 s door to door, both ways) and
+    // is smoothstepped so the boom starts and lands soft. Rate-limited slew
+    // rather than an exponential lerp because the ask is a fixed duration:
+    // an exponential never arrives, and this settles EXACTLY at the endpoint
+    // so the settled camera stays bit-identical to the pre-B3 one. Teleports
+    // (`!_camReady`, set by arrival and the void rescue) snap the blend with
+    // the rest of the rig — a 0.3 s zoom after a cross-map teleport would
+    // read as a glitch, exactly like the 200 m sweep the snap rule exists for.
     const inside = Boolean(this._insideId);
     const boomLen = Math.hypot(CAM_OFFSET.y, CAM_OFFSET.z);
-    const k = inside ? CAM_INSIDE / boomLen : 1;
+    const goal = inside ? 1 : 0;
+    if (!this._camReady) {
+      this._insideBlend = goal;
+    } else if (this._insideBlend !== goal) {
+      const step = dt / CAM_BOOM_EASE;
+      this._insideBlend = goal > this._insideBlend
+        ? Math.min(goal, this._insideBlend + step)
+        : Math.max(goal, this._insideBlend - step);
+    }
+    const bl = this._insideBlend;
+    const ease = bl * bl * (3 - 2 * bl);
+    const k = 1 + (CAM_INSIDE / boomLen - 1) * ease;
     const bias = 3.4 * k;
 
     _v.copy(p.pos).addScaledVector(p.vel, 0.18);

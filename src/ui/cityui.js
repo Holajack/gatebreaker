@@ -1,5 +1,7 @@
 // The city's diegetic overlay: portal / door prompt, district banner, and a
-// compass to the nearest portal you are actually allowed to walk into.
+// compass with up to three rank-tinted pips — the nearest portals you are
+// actually allowed to walk into, nearest largest (Wave B2: the gates spread
+// into the districts, so one arrow stopped being wayfinding).
 //
 // Pure DOM and CSS. It builds its own nodes and injects its own stylesheet so
 // it does not share a file — or a merge conflict — with ui.js or styles.css.
@@ -52,7 +54,14 @@ const CSS = `
   opacity: 0; transition: opacity 260ms ease;
 }
 #cityCompass.on { opacity: 1; }
-#cityCompassArrow { width: 14px; height: 14px; display: block; }
+/* Pip 0 is the nearest target and reads first; pips 1-2 are the next-nearest
+   gates at two-thirds size — present enough to steer by, small enough that
+   the pill stays a glance, not a legend. */
+#cityCompass .pip { width: 10px; height: 10px; display: block; }
+/* Specificity must BEAT '#cityCompass .pip' (1,1,0) or the nearest-gate
+   arrow silently renders 10px like the rest — a bare '#cityCompassArrow'
+   (1,0,0) loses that fight (review finding, confirmed). */
+#cityCompass .pip#cityCompassArrow { width: 14px; height: 14px; }
 
 #cityPrompt {
   position: absolute; right: 18px; bottom: 116px;
@@ -130,16 +139,26 @@ export class CityUI {
     this.districtEl = div('cityDistrict', wrap);
 
     this.compassEl = div('cityCompass', wrap);
-    const svg = document.createElementNS(SVG_NS, 'svg');
-    svg.id = 'cityCompassArrow';
-    svg.setAttribute('viewBox', '0 0 16 16');
-    svg.setAttribute('aria-hidden', 'true');
-    const path = document.createElementNS(SVG_NS, 'path');
-    path.setAttribute('d', 'M8 1 L13 14 L8 11 L3 14 Z');
-    path.setAttribute('fill', 'currentColor');
-    svg.appendChild(path);
-    this.compassEl.appendChild(svg);
-    this.compassArrow = svg;
+    // Up to THREE arrow pips (Wave B2): the gates live in the districts now,
+    // and one arrow to "the nearest" says nothing about the other roads. The
+    // first pip is the nearest target and renders larger; all three share one
+    // build path so single-target callers (the legacy setCompass signature —
+    // frontier POI discovery aims it at one thing) simply light pip 0.
+    this.compassPips = [];
+    for (let i = 0; i < 3; i++) {
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      if (i === 0) svg.id = 'cityCompassArrow';
+      svg.setAttribute('class', `pip pip${i}`);
+      svg.setAttribute('viewBox', '0 0 16 16');
+      svg.setAttribute('aria-hidden', 'true');
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', 'M8 1 L13 14 L8 11 L3 14 Z');
+      path.setAttribute('fill', 'currentColor');
+      svg.appendChild(path);
+      this.compassEl.appendChild(svg);
+      this.compassPips.push(svg);
+    }
+    this.compassArrow = this.compassPips[0];
     this.compassText = document.createElement('span');
     this.compassText.id = 'cityCompassText';
     this.compassText.textContent = '—';
@@ -231,15 +250,35 @@ export class CityUI {
   }
 
   /**
-   * @param {number} angleRad screen-space bearing, 0 = up
-   * @param {number} distance metres
-   * @param {number} color portal colour
+   * Aim the compass. Two shapes, one method:
+   *
+   *   setCompass([{ angle, distance, color }, ...])  — up to 3 targets,
+   *     NEAREST FIRST (the caller sorts; this renders). Pip 0 is the big
+   *     arrow and owns the distance text; extra pips render smaller in their
+   *     own tint. Empty array hides the pill.
+   *   setCompass(angleRad, distance, color)          — the legacy single-
+   *     target signature, kept working verbatim (frontier POI discovery and
+   *     any older caller aim one thing): it is the array form with one entry.
+   *
+   * @param {Array<{angle:number,distance:number,color:number}>|number} angleRad
+   *   screen-space bearing(s), 0 = up
+   * @param {number} [distance] metres (single-target form)
+   * @param {number} [color] portal colour (single-target form)
    */
   setCompass(angleRad, distance, color) {
-    if (!Number.isFinite(angleRad)) { this.compassEl.classList.remove('on'); return; }
-    this.compassArrow.style.transform = `rotate(${angleRad}rad)`;
-    this.compassArrow.style.color = hex(color || 0xbfd0ff);
-    this.compassText.textContent = `${Math.round(distance)} M`;
+    const targets = Array.isArray(angleRad)
+      ? angleRad
+      : (Number.isFinite(angleRad) ? [{ angle: angleRad, distance, color }] : []);
+    if (!targets.length) { this.compassEl.classList.remove('on'); return; }
+    for (let i = 0; i < this.compassPips.length; i++) {
+      const pip = this.compassPips[i];
+      const t = targets[i];
+      if (!t || !Number.isFinite(t.angle)) { pip.style.display = 'none'; continue; }
+      pip.style.display = 'block';
+      pip.style.transform = `rotate(${t.angle}rad)`;
+      pip.style.color = hex(t.color || 0xbfd0ff);
+    }
+    this.compassText.textContent = `${Math.round(targets[0].distance)} M`;
     this.compassEl.classList.add('on');
   }
 

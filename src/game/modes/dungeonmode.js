@@ -134,6 +134,10 @@ export class DungeonMode extends GameMode {
     g.frameClock?.setTarget(60);
     g.quality?.setTargetFps(60);
 
+    // Clear the city's region grade (Wave B6) — gates get their own per-rank
+    // identity rows in Wave E; until then a gate renders the shipped look.
+    g.glow?.setGrade(null);
+
     // Biome roll. forceBiome (dev/payload) wins outright; otherwise B+ ranks
     // may roll an anomaly — the gate opens into another gate's palette. The
     // shallow copy travels through _beginGate into this.gate, which is what

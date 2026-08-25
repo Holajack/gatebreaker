@@ -236,6 +236,21 @@ const _ss = new THREE.Vector3();
 const _sup = new THREE.Vector3(0, 1, 0);
 const _seuler = new THREE.Euler();
 
+/**
+ * Point-to-segment distance over the descriptor's road segments. Same math as
+ * city.js's distToSegment, duplicated rather than exported across the
+ * deliberate city<->frontier import cycle for a three-line pure function —
+ * the cycle survives because cross-bindings are call-time only, and a new
+ * module-scope import edge is exactly what must not be added for this.
+ */
+function segDist(x, z, s) {
+  const dx = s.x2 - s.x1, dz = s.z2 - s.z1;
+  const l2 = dx * dx + dz * dz;
+  let t = l2 > 0 ? ((x - s.x1) * dx + (z - s.z1) * dz) / l2 : 0;
+  t = Math.min(1, Math.max(0, t));
+  return Math.hypot(x - (s.x1 + dx * t), z - (s.z1 + dz * t));
+}
+
 /** Paint a flat colour into a geometry's `color` attribute. Matches city.js. */
 function paintGeo(g, hex) {
   const c = new THREE.Color(hex);
@@ -573,6 +588,32 @@ export class Frontier {
         // and the whole point of the bands is that you can see which way you
         // are walking from the ground you are standing on.
         c.lerp(dry, (1 - smoothstep(148, 184, Math.hypot(x, z))) * 0.8);
+        // Verge tracks (Wave B1): the descriptor's 'track'-class road edges,
+        // painted with the SAME kerbless packed-earth treatment the city
+        // ground pass uses (spec.streets.trim.track — one vocabulary, two
+        // meshes, no seam: the city mesh owns the ground nearer the wall and
+        // this annulus owns it further out, and identical math on identical
+        // heights produces identical colour where they overlap). The trodden
+        // hex is the POI pads' own, so a track ARRIVING at a pad reads as one
+        // continuous worn surface — the approach path is the discoverability
+        // trick below, extended all the way back to the wall gate. Painted
+        // BEFORE the Breach ash widening, matching the city pass: near the
+        // ruin the ash wins and the path reads as burnt out.
+        {
+          const TRIM = this.city.spec.streets.trim;
+          const TF = TRIM.track.feather;
+          let trackW = 0;
+          for (const s of this.city.tracks) {
+            const d = segDist(x, z, s);
+            if (d < s.w + TF[1]) trackW = Math.max(trackW, 1 - smoothstep(s.w + TF[0], s.w + TF[1], d));
+          }
+          if (trackW > 0) {
+            band.setHex(TRIM.track.color);
+            c.lerp(band, trackW * TRIM.track.strength);
+          }
+        }
+
+
         // Ash widens around the Breach on every side, band or not.
         c.lerp(ash, 1 - smoothstep(30, 86, Math.hypot(x, z - BREACH_Z)));
 
@@ -1273,6 +1314,15 @@ export class Frontier {
     if (Math.hypot(x, z - S.portals.breach.z) < 26) return false;
     if (this.field.slope(x, z) > 0.4) return false;
     if (spec.high != null && this.field.height(x, z) < spec.high) return false;
+    // Off the B1 tracks: a tree or a boulder ON the packed earth un-builds
+    // the road, the same rule the city's _blockedForProp applies inside the
+    // wall. Deliberately a shifted rnd contract for the Verge scatter (this
+    // wave re-derives the out-of-wall world; see the Wave B report) — grass
+    // and flowers skip the surface too, because a trodden path that grows an
+    // untouched meadow stripe down its middle reads as paint, not wear.
+    for (const s of this.city.tracks) {
+      if (segDist(x, z, s) < s.w + Math.max(clearance, 0.6)) return false;
+    }
     for (const o of this._solids) {
       const dx = x - o.pos.x, dz = z - o.pos.z;
       const min = o.radius + clearance;

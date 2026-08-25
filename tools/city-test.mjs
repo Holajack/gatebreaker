@@ -364,44 +364,51 @@ try {
     //
     // Portal waypoints are the STANDING SPOT, not the portal origin: the dais
     // is a solid 2.6 m collider, so aiming at p.pos means walking into a wall
-    // and never arriving. This is the same offset the prompt radius uses.
+    // and never arriving. The spot is offset along the portal's own FACING
+    // (the built group's yaw — the same direction _spawnVector steps out
+    // along since Wave B2), which for every gate is its walkable, road-facing
+    // side; "toward the plaza centre" stopped being that the moment the gates
+    // left the plaza ring.
     const stand = (p) => {
-      const len = Math.hypot(p.pos.x, p.pos.z) || 1;
-      const inward = p.rank === 'S' ? { x: 0, z: 1 } : { x: -p.pos.x / len, z: -p.pos.z / len };
+      const yaw = p.group.rotation.y;
       const r = p.radius - 0.8;
-      return { x: p.pos.x + inward.x * r, z: p.pos.z + inward.z * r };
+      return { x: p.pos.x + Math.sin(yaw) * r, z: p.pos.z + Math.cos(yaw) * r };
     };
     // The route follows the STREET NETWORK, not straight lines between
     // landmarks. Steering straight at a target across a city block wedges on
     // the first building and reports the city as unreachable when the fault is
     // the pathfinder — that is exactly the hole navgrid.js exists to fill, and
     // this tool must not pretend to have it.
-    const R = 58;                 // ring-road radius, mirrors buildStreets()
+    const R = 58;                 // ring-road radius, mirrors the descriptor's ring edges
     const ring = [];
     for (let i = 0; i <= 8; i++) {
       const a = (i / 8) * Math.PI * 2;
       ring.push({ x: Math.cos(a) * R, z: -Math.sin(a) * R });
     }
+    // Wave B2 retarget: the gates live in the districts now (descriptor
+    // portals.placements), so each one is visited WHERE ITS AVENUE PASSES IT
+    // instead of as a cluster of ring spots — the route is the same
+    // avenue/ring circuit, with a standing-spot detour per gate. The Verge's
+    // wild gates stay excluded: walking out to the Verge is frontier-test's
+    // job, and it does it on the axes the gates actually open onto.
+    const byId = (id) => city.portals.find((p) => p.id === id);
     const route = [
-      // The five PLAZA portals, approached from their standing spots. The
-      // Verge's wild gates are in city.portals too now (WORLD_SPEC step 7) and
-      // are excluded here on purpose: this route follows the street network and
-      // deliberately has no pathfinder, so a waypoint 200 m outside the wall
-      // steers the body straight into a wall corner and reports the town as
-      // unreachable. Walking out to the Verge is frontier-test's job, and it
-      // does it on the axes the gates actually open onto.
-      ...city.portals.filter((p) => p.rank !== 'S' && !p.wild).map(stand),
+      stand(byId('plaza-e')),
       { x: 0, z: 0 },
-      // north avenue to the Assay Hall
-      { x: 0, z: -18 }, { x: 0, z: -30 }, { x: 0, z: -48 }, { x: 0, z: -18 },
-      // east avenue to the Ashworks
-      { x: 30, z: 0 }, { x: 44, z: 0 }, { x: 44, z: 10 }, { x: 44, z: 0 },
+      // north avenue: the C gate at the z=-66 cross, then back via the Assay Hall
+      { x: 0, z: -18 }, { x: 0, z: -30 }, { x: 0, z: -48 },
+      stand(byId('gate-c')), { x: 0, z: -48 }, { x: 0, z: -18 },
+      // east avenue: the D gate on the Ashworks pad
+      { x: 30, z: 0 }, { x: 44, z: 0 },
+      stand(byId('gate-d')), { x: 44, z: 0 }, { x: 44, z: 10 }, { x: 44, z: 0 },
       // the ring road, all the way round
       ...ring,
-      // west avenue and the cliff overlook
-      { x: -30, z: 0 }, { x: -60, z: 0 }, { x: -82, z: 0 }, { x: -60, z: 0 },
-      // south avenue and the market
-      { x: 0, z: 20 }, { x: 0, z: 30 }, { x: 0, z: 60 }, { x: 0, z: 30 },
+      // west avenue: the A gate in Quarter Row, then the cliff overlook
+      { x: -30, z: 0 }, { x: -50, z: 0 },
+      stand(byId('gate-a')), { x: -60, z: 0 }, { x: -82, z: 0 }, { x: -60, z: 0 },
+      // south avenue and the market, then the B gate on the z=66 cross
+      { x: 0, z: 20 }, { x: 0, z: 30 }, { x: 0, z: 60 }, { x: 0, z: 66 },
+      stand(byId('gate-b')), { x: 0, z: 66 }, { x: 0, z: 30 },
       // out of the north gate to the Breach and back
       { x: 0, z: -30 }, { x: 0, z: -70 }, { x: 0, z: -88 }, { x: 0, z: -110 },
       stand(city.portals.find((p) => p.rank === 'S')),

@@ -34,10 +34,15 @@ import { GATES } from '../game/config.js';
 // ---------------------------------------------------------------------------
 // THRESHOLD — the city hub
 // ---------------------------------------------------------------------------
-// A walkable town grown around a permanent gate cluster. Walled on three sides,
-// cliff on the fourth, six rank portals: E/D/C/B/A stand on one plaza ring so
-// all five colours read from a single standing position, and S is outside the
-// north wall so reaching it costs a walk.
+// A walkable town grown around permanent gates. Walled on three sides, cliff
+// on the fourth, six rank portals placed by the descriptor's
+// portals.placements (Wave B2, the owner's "gates throughout the city
+// instead of congregated"): E on the plaza ring — the assay yard, the
+// first-minutes teaching moment — D/C/B/A each in a district beside a B1
+// road, and S outside the north wall so reaching it costs a walk. The plaza
+// pillar ring dyes its sectors by bearing toward each gate, so the plaza
+// still answers "which gates does this city hold" in one look — and now also
+// "which way".
 //
 // This module builds a PLACE. It owns geometry, ground, collision and portal
 // visuals. It does not own the game mode, the camera, input, prompts or entry
@@ -472,39 +477,33 @@ const _n = { x: 0, y: 1, z: 0 };
 // Streets are painted into the ground's vertex colours rather than tiled with
 // road pieces: paving that IS the ground can never step, float or disagree
 // with heightAt, and it costs zero draw calls and zero triangles.
+//
+// Wave B1: the plan is a GRAPH in the descriptor (spec.streets.graph — nodes
+// plus classed edges) and this function is a walker, one stamped segment per
+// edge IN EDGE ORDER. The order law moved into the descriptor with the data,
+// because it is the data's law: segment order feeds the paint pass, _layout's
+// frontage search and interiors' plot scoring.
+//
+// TWO LISTS out, never one. 'track' edges are the Verge's kerbless roads and
+// they must not join `streets`: _layout's occupancy pre-block, the lantern
+// rows, interiors' street scoring and validateLayout's frontage numbers all
+// iterate city.streets, and a track appearing there would shift building
+// anchors — and with them every rnd() draw after the layout — for a road that
+// exists entirely outside the wall. The split is what keeps B1 a zero-change
+// step for the town inside it.
 
 function buildStreets(spec = THRESHOLD) {
-  const seg = (x1, z1, x2, z2, w) => ({ x1, z1, x2, z2, w });
-  const { half: WALL_HALF, plazaR: PLAZA_R, cliffX: CLIFF_X } = spec.wall;
-  const BREACH_Z = spec.portals.breach.z;
-  const ST = spec.streets;
-  const s = [
-    // Four avenues out of the plaza (the west one ends at the overlook).
-    seg(0, -PLAZA_R, 0, -WALL_HALF + ST.avenueStop, ST.avenueW),
-    seg(0, PLAZA_R, 0, WALL_HALF - ST.avenueStop, ST.avenueW),
-    seg(PLAZA_R, 0, WALL_HALF - ST.avenueStop, 0, ST.avenueW),
-    seg(-PLAZA_R, 0, CLIFF_X + ST.overlookStop, 0, ST.avenueW),
-    // The Breach road, outside the north gate.
-    seg(0, -WALL_HALF, 0, BREACH_Z + ST.breachRoad.stop, ST.breachRoad.w),
-  ];
-  // Ring road, as an N-gon so it stays cheap to rasterise (Threshold: 58 m, 20 sides).
-  const { r: R, sides: N } = ST.ring;
-  for (let i = 0; i < N; i++) {
-    const a0 = (i / N) * Math.PI * 2;
-    const a1 = ((i + 1) / N) * Math.PI * 2;
-    s.push(seg(Math.cos(a0) * R, -Math.sin(a0) * R, Math.cos(a1) * R, -Math.sin(a1) * R, ST.ring.w));
+  const { nodes, edges } = spec.streets.graph;
+  const streets = [];
+  const tracks = [];
+  for (const e of edges) {
+    const A = nodes[e.a];
+    const B = nodes[e.b];
+    if (!A || !B) throw new Error(`[city] streets.graph edge ${e.a}->${e.b}: unknown node`);
+    const s = { x1: A.x, z1: A.z, x2: B.x, z2: B.z, w: e.w, cls: e.class };
+    (e.class === 'track' ? tracks : streets).push(s);
   }
-  // Cross streets, so no block is more than ~20 m from a way through. Each
-  // entry is mirrored across both axes AND both signs — segment order per k
-  // (x-street then z-street, inner pair then outer) matches the old literal
-  // list exactly, because street order feeds the paint pass.
-  for (const k of [-1, 1]) {
-    for (const c of ST.cross) {
-      s.push(seg(k * c.off, -c.span, k * c.off, c.span, c.w));
-      s.push(seg(-c.span, k * c.off, c.span, k * c.off, c.w));
-    }
-  }
-  return s;
+  return { streets, tracks };
 }
 
 function distToSegment(x, z, s) {
@@ -513,6 +512,40 @@ function distToSegment(x, z, s) {
   let t = l2 > 0 ? ((x - s.x1) * dx + (z - s.z1) * dz) / l2 : 0;
   t = Math.min(1, Math.max(0, t));
   return Math.hypot(x - (s.x1 + dx * t), z - (s.z1 + dz * t));
+}
+
+/**
+ * Resolve one portals.placements entry to a world site (Wave B2). One
+ * function, two consumers — the keep-out list build() computes before the
+ * prop passes, and _buildPortals itself — so a dais and its keep-out cannot
+ * disagree about where the portal stands.
+ *
+ * yaw is the portal's FACING: for plaza-ring anchors it is the shipped
+ * "face the plaza centre" (identical math, so E's oval is bit-unchanged); a
+ * district portal faces the plaza too, because the B1 roads it stands beside
+ * all run plaza-ward and a gate that faces its own road faces the arriving
+ * player; the Breach faces back down its road (yaw 0, the shipped value).
+ * citymode._spawnVector steps out along this yaw, which is why it must be
+ * the walkable side.
+ */
+function resolvePortalPlacement(spec, pl) {
+  const a = pl.anchor || {};
+  if (a.kind === 'breach') {
+    return { x: 0, z: spec.portals.breach.z, yaw: 0, scale: 1.85, outside: true };
+  }
+  if (a.kind === 'plaza-ring') {
+    const rad = (a.angleDeg ?? 0) * Math.PI / 180;
+    const x = Math.cos(rad) * spec.portals.ring;
+    const z = -Math.sin(rad) * spec.portals.ring;
+    return { x, z, yaw: Math.atan2(-x, -z), scale: 1, outside: false };
+  }
+  if (a.kind === 'district') {
+    if (!spec.districts.some((d) => d.id === a.district)) {
+      throw new Error(`[city] portal ${pl.id}: anchor names unknown district '${a.district}'`);
+    }
+    return { x: a.x, z: a.z, yaw: Math.atan2(-a.x, -a.z), scale: 1, outside: false };
+  }
+  throw new Error(`[city] portal ${pl.id}: unknown anchor kind '${a.kind}'`);
 }
 
 // ---------------------------------------------------------------------------
@@ -675,6 +708,7 @@ export class City {
     this.fields = [];         // KitField instances
     this.districts = spec.districts;
     this.streets = [];
+    this.tracks = [];         // 'track'-class graph edges (Verge roads) — paint-only, never in this.streets
     this.built = false;
     // The retained _layout output — a few KB of plain objects, kept because
     // validateLayout() cannot re-derive style/floors/district/door from the
@@ -793,7 +827,21 @@ export class City {
     }
     this.field.bake();
 
-    this.streets = buildStreets(this.spec);
+    const roadNet = buildStreets(this.spec);
+    this.streets = roadNet.streets;
+    this.tracks = roadNet.tracks;
+
+    // Portal keep-outs, resolved from the DESCRIPTOR before any prop pass
+    // runs. Portals are built after buildings and props (they need the
+    // heightfield's final bake), but the props must already know where the
+    // daises will stand: a lantern, bench or garden fence placed first and
+    // then buried under a dais reads as a bug from three metres away. Radius
+    // is the dais collider (2.6 x scale) plus prop slack. _blockedForProp is
+    // the single consumer.
+    this._portalSites = this.spec.portals.placements.map((pl) => {
+      const site = resolvePortalPlacement(this.spec, pl);
+      return { x: site.x, z: site.z, keepR: 2.6 * site.scale + 1.0 };
+    });
 
     // 1b. The five enterable service buildings CLAIM THEIR PLOTS FIRST.
     //
@@ -1046,7 +1094,13 @@ export class City {
     const rock = new THREE.Color(0x8a8f9e);
     const road = new THREE.Color(0xbbb29a);
     const roadWorn = new THREE.Color(0x958a67);
-    const kerb = new THREE.Color(0x6e6a55);
+    // The trim vocabulary is DESCRIPTOR data (Wave B1): one kerb family and
+    // one packed-earth treatment per settlement, named once in streets.trim so
+    // a second call site can never fork the kerb numbers. Threshold's values
+    // are the shipped constants, moved.
+    const TRIM = this.spec.streets.trim;
+    const kerb = new THREE.Color(TRIM.kerb.color);
+    const track = new THREE.Color(TRIM.track.color);
     const flag = new THREE.Color(0xc6c9be);
     const flagAlt = new THREE.Color(0x9ba18d);
     const ash = new THREE.Color(0x5c5763);
@@ -1096,13 +1150,32 @@ export class City {
         // between paving and grass.
         let pave = 0;
         let kerbW = 0;
+        const PF = TRIM.pave.feather, KI = TRIM.kerb.in, KO = TRIM.kerb.out;
         for (const s of this.streets) {
           const d = distToSegment(x, z, s);
-          if (d < s.w + 2.4) {
-            pave = Math.max(pave, 1 - smoothstep(s.w - 0.6, s.w + 2.4, d));
+          if (d < s.w + PF[1]) {
+            pave = Math.max(pave, 1 - smoothstep(s.w + PF[0], s.w + PF[1], d));
             kerbW = Math.max(kerbW,
-              smoothstep(s.w - 0.6, s.w + 0.1, d) * (1 - smoothstep(s.w + 1.7, s.w + 3.0, d)));
+              smoothstep(s.w + KI[0], s.w + KI[1], d) * (1 - smoothstep(s.w + KO[0], s.w + KO[1], d)));
           }
+        }
+        // Verge tracks (Wave B1): the kerbless packed-earth class, painted in
+        // the same feather vocabulary but lerped toward the Verge's trodden
+        // colour at under full strength — earth worn into grass, not stone
+        // laid over it — and with NO kerb term, which is the whole visual
+        // difference between a road the town built and a path feet made.
+        // Gated to outside the wall so the in-wall stamp stays byte-identical
+        // (B1's law; the cut line hides inside the wall gates' own footprint).
+        // Painted BEFORE pave so the Breach road overrides the watchtower
+        // track where the two share the north gate's mouth.
+        if (r > WALL_HALF) {
+          const TF = TRIM.track.feather;
+          let trackW = 0;
+          for (const s of this.tracks) {
+            const d = distToSegment(x, z, s);
+            if (d < s.w + TF[1]) trackW = Math.max(trackW, 1 - smoothstep(s.w + TF[0], s.w + TF[1], d));
+          }
+          if (trackW > 0) c.lerp(track, trackW * TRIM.track.strength);
         }
         if (pave > 0) {
           // Wear drift along the surface so paving is not one flat tone: a
@@ -1639,10 +1712,11 @@ export class City {
    *
    * The old rule was `rnd() < 0.07` per ground-floor wall cell, which produced
    * terraces with four doors and terraces with none, half of them opening into
-   * the neighbour's gable. A single street-facing door is both cheaper (a door
-   * piece is 376 triangles against a plain wall's 32) and the thing that makes
-   * a street read as frontage — Lynch's PATHS, which is the whole point of
-   * anchoring buildings to streets in the first place.
+   * the neighbour's gable. A single street-facing door is both cheaper (the
+   * B3 doorway frame is 64 triangles + a 2-tri void panel against a plain
+   * wall's 32; the pre-B3 painted-shut door slab was 376) and the thing that
+   * makes a street read as frontage — Lynch's PATHS, which is the whole point
+   * of anchoring buildings to streets in the first place.
    */
   _placeDoor(b) {
     const s = b.street != null ? this.streets[b.street] : null;
@@ -1740,14 +1814,22 @@ export class City {
   // -------------------------------------------------------------- buildings
 
   _buildBuildings(buildings, rnd) {
+    // Wave B3 "doors that don't lie": the sealed 87 place the kit's OPEN
+    // doorway frame (town_wall_doorway_base, 64 tris — WORLD_SPEC names this
+    // exact swap) instead of town_wall_door's painted-shut slab (376 tris),
+    // with a recessed near-black panel 0.4 m behind the frame (see the
+    // doorVoids pass below) so the opening reads as depth, not as a decal.
+    // Same cell, same footprint, same full-rect collision box — a sealed
+    // doorway that LOOKS deep still does not admit anybody, and no doorway
+    // without a prompt ever promised otherwise.
     const wallKeys = {
-      timber: ['town_wall_wood', 'town_wall_wood_window_shutters', 'town_wall_wood_door'],
-      stone: ['town_wall', 'town_wall_window_small', 'town_wall_door'],
-      brick: ['town_wall', 'town_wall_window_small', 'town_wall_door'],
+      timber: ['town_wall_wood', 'town_wall_wood_window_shutters', 'town_wall_wood_doorway_base'],
+      stone: ['town_wall', 'town_wall_window_small', 'town_wall_doorway_base'],
+      brick: ['town_wall', 'town_wall_window_small', 'town_wall_doorway_base'],
       // The civic style is stone with the kit's other window: the atlas gives
       // every town_* wall the same plaster, so a district's identity has to
       // come from which PIECES it uses, not from a tint we do not control.
-      civic: ['town_wall', 'town_wall_window_stone', 'town_wall_door'],
+      civic: ['town_wall', 'town_wall_window_stone', 'town_wall_doorway_base'],
     };
 
     // Roof families, keyed by DISTRICT_PROFILES.roof.
@@ -1777,6 +1859,10 @@ export class City {
       tally.set(key, (tally.get(key) || 0) + 1);
     };
     const lights = [];
+    // One recessed dark panel per sealed doorway (B3) — filled in the building
+    // loop, built as its own InstancedMesh after the fields. Deterministic:
+    // pure door data, no rnd(), so the stream contract is untouched.
+    const doorVoids = [];
 
     for (const b of buildings) {
       const base = this.field.height(b.cx, b.cz) - 0.12;
@@ -1876,6 +1962,17 @@ export class City {
         const nx = Math.cos(door.yaw), nz = -Math.sin(door.yaw);
         emit('town_overhang', door.x + nx * 0.72, base, door.z + nz * 0.72, door.yaw);
       }
+      // B3: the dark panel behind this building's doorway frame. The frame
+      // slab occupies piece-local x 0.8..1.0 with +X outward, so its mid-plane
+      // sits 0.9 m outward of the door cell centre; the spec's "0.4 m behind
+      // the frame" is therefore +0.5 m along the outward normal — inside the
+      // wall's own 0.2 m collision thickness plus reveal, where no camera or
+      // body can ever reach it from the side. PlaneGeometry faces +Z, so the
+      // yaw maps +Z onto the outward normal (same nx/nz math as the awning).
+      if (door) {
+        const nx = Math.cos(door.yaw), nz = -Math.sin(door.yaw);
+        doorVoids.push({ x: door.x + nx * 0.5, y: base + 0.98, z: door.z + nz * 0.5, yaw: Math.atan2(nx, nz) });
+      }
       b.topY = (b.roof === 'spire' ? ry + 0.28 + 4.0
         : b.roof === 'flat' ? ry + 1.0
           : b.roof === 'high' ? ry + 2.28 : ry + 1.25);
@@ -1947,6 +2044,45 @@ export class City {
     glow.computeBoundingSphere();
     this.group.add(glow);
     this._triangles += lights.length * 2;
+
+    // --- B3: the recessed dark panels behind every sealed doorway ----------
+    //
+    // 2 triangles a building. UNLIT on purpose (MeshBasicMaterial): the panel
+    // plays a shadowed void behind an open frame, and a lit near-black under
+    // the day cycle would pick up sun and read as a painted grey door — the
+    // exact lie the doorway swap removes. toneMapped false keeps it pinned
+    // near black under ACES regardless of exposure, the same convention as
+    // the window quads above. NOT a new shader program: basic + toneMapped
+    // false + instanced is byte-for-byte the parameter set the `glow` field
+    // above already compiled, so the program cache serves this from the same
+    // slot — the city-test walk's zero-program-growth assert is the fence.
+    // No shadows either way: a caster would buy a shadow-pass draw for a
+    // surface that is already playing darkness.
+    // 1.9 wide, not 1.5: at 0.3 m behind the frame's inner face a 0.75 m
+    // half-width panel stops occluding past ~27° off the door normal — an
+    // oblique glance down a street saw a slit of THROUGH-THE-WALL daylight at
+    // the panel's edge (review finding, geometry-verified). 0.95 m half-width
+    // occludes to ~65°, beyond which the jambs self-occlude; the extra width
+    // hides inside the wall's own thickness. Same 2 tris.
+    const voidGeo = new THREE.PlaneGeometry(1.9, 1.95);
+    const voidMat = new THREE.MeshBasicMaterial({ color: 0x07070a, toneMapped: false });
+    this._ownedGeometries.push(voidGeo);
+    this._ownedMaterials.push(voidMat);
+    const voids = new THREE.InstancedMesh(voidGeo, voidMat, Math.max(1, doorVoids.length));
+    voids.name = 'city_door_voids';
+    voids.castShadow = false;
+    voids.receiveShadow = false;
+    doorVoids.forEach((v, i) => {
+      Q.setFromAxisAngle(UP, v.yaw);
+      P.set(v.x, v.y, v.z);
+      M.compose(P, Q, S);
+      voids.setMatrixAt(i, M);
+    });
+    voids.count = doorVoids.length;
+    voids.instanceMatrix.needsUpdate = true;
+    voids.computeBoundingSphere();
+    this.group.add(voids);
+    this._triangles += doorVoids.length * 2;
   }
 
   // ------------------------------------------------------------------ props
@@ -2145,6 +2281,16 @@ export class City {
 
   _blockedForProp(x, z, clearance) {
     for (const s of this.streets) if (distToSegment(x, z, s) < s.w + clearance) return true;
+    // Verge tracks count as streets here: a bench or a tree ON the packed
+    // earth un-builds the road B1 just built. (Tracks are outside the wall, so
+    // in-town prop placement is untouched by this line for every spot that
+    // could actually host a prop before B1.)
+    for (const s of this.tracks) if (distToSegment(x, z, s) < s.w + clearance) return true;
+    // Portal keep-outs, from the DESCRIPTOR (see build()): props run before
+    // _buildPortals, and a lantern under a dais is a bug either way round.
+    for (const p of this._portalSites || []) {
+      if (Math.hypot(x - p.x, z - p.z) < p.keepR + clearance) return true;
+    }
     for (const b of this.boxes) {
       if (Math.abs(x - b.x) < b.w / 2 + clearance && Math.abs(z - b.z) < b.d / 2 + clearance) return true;
     }
@@ -2308,8 +2454,6 @@ export class City {
   // ---------------------------------------------------------------- portals
 
   _buildPortals(rnd, save) {
-    const { ring: PORTAL_RING, angles: PORTAL_ANGLES } = this.spec.portals;
-    const BREACH_Z = this.spec.portals.breach.z;
     const level = Number(save?.level) || 1;
 
     // Geometry shared across all six portals AND the Verge's wild gates: six
@@ -2322,25 +2466,26 @@ export class City {
     this._ownedGeometries.push(...geos.geometries);
     this._ownedMaterials.push(...geos.materials);
 
-    const ranks = ['E', 'D', 'C', 'B', 'A', 'S'];
-    for (const rank of ranks) {
+    // Wave B2: placements is AUTHORITATIVE — one portal per descriptor entry,
+    // walked in descriptor order. The order carries the rnd() contract (one
+    // phase draw per portal, E..S, same count and order as the old rank loop)
+    // and the dais obstacle + the flags in _buildFlags follow the built
+    // portal, so moving a gate is a descriptor edit and nothing else.
+    for (const pl of this.spec.portals.placements) {
+      const rank = pl.rank;
       const gate = GATES.find((g) => g.rank === rank);
-      const outside = rank === 'S';
-      const a = (PORTAL_ANGLES[rank] ?? 0) * Math.PI / 180;
-      const px = outside ? 0 : Math.cos(a) * PORTAL_RING;
-      const pz = outside ? BREACH_Z : -Math.sin(a) * PORTAL_RING;
+      const site = resolvePortalPlacement(this.spec, pl);
+      const px = site.x, pz = site.z;
       const py = this.field.height(px, pz);
-      const scale = outside ? 1.85 : 1;
       const color = PORTAL_COLORS[rank];
       const locked = level < (gate?.reqLevel ?? 1);
 
       const built = buildPortalVisual(this.group, {
         rank,
         color,
-        scale,
+        scale: site.scale,
         locked,
-        // Face the plaza centre (the Breach faces back down its road).
-        yaw: outside ? 0 : Math.atan2(-px, -pz),
+        yaw: site.yaw,
         geos,
       });
       built.group.position.set(px, py, pz);
@@ -2349,14 +2494,16 @@ export class City {
 
       const portal = {
         // STABLE ID — the portal's identity across save/return payloads and
-        // (later) settlements. Ranks are ambiguous the moment a wild gate
-        // shares one with a plaza gate; ids never are. Return-to-portal flows
-        // key on this, falling back to rank only for legacy payloads.
-        id: (outside ? 'breach-' : 'plaza-') + rank.toLowerCase(),
+        // (later) settlements, authored in the descriptor now that placement
+        // is. Ranks are ambiguous the moment a wild gate shares one with a
+        // town gate; ids never are. Return-to-portal flows key on this,
+        // falling back to rank only for legacy payloads (which still lands on
+        // the right gate: rank finds the town portal first).
+        id: pl.id,
         rank,
         gate: gate || null,
         pos: new THREE.Vector3(px, py, pz),
-        radius: (outside ? 6.5 : 5.2),
+        radius: (site.outside ? 6.5 : 5.2),
         color,
         locked,
         anomaly: false,
@@ -2370,10 +2517,74 @@ export class City {
       this._applyPortalState(portal);
 
       // The dais is solid; you walk up to a portal, not through its plinth.
-      this.obstacles.push({ pos: { x: px, z: pz }, radius: 2.6 * scale });
+      this.obstacles.push({ pos: { x: px, z: pz }, radius: 2.6 * site.scale });
     }
 
+    this._assertPortalPlacements();
     this._buildBreachPlatform(rnd);
+  }
+
+  /**
+   * Build-time proof that the descriptor's gate placement is playable. Throws
+   * — a build failure, not a warning — on every rule that is descriptor-static
+   * (the same numbers on every seed), because a broken placement is a broken
+   * town and "assay sits at z=-32, not -30" (a hand-patched prompt collision
+   * found by playtest, see _buildInteractables) is exactly the class of bug
+   * this makes impossible to reintroduce: the collision now fails the build
+   * the moment it is authored instead of shipping until a thumb finds it.
+   *
+   * Seed-DEPENDENT hazards (a procedural building or prop wandering into a
+   * dais) are console.warn, not throw: placements are chosen inside building
+   * exclusion zones (street corridors / district-pad cores) so this should
+   * never fire, but a rule that throws on one seed in a thousand is a flaky
+   * build, and the warn still names the offender in every dev run.
+   */
+  _assertPortalPlacements() {
+    // citymode's PROMPT_SLACK: how far past a portal's radius the prompt still
+    // shows. Mirrored here (city.js cannot import citymode) so the assert
+    // tests the REAL contested zone, not just the trigger radius.
+    const PROMPT_SLACK = 2.2;
+    const town = this.portals.filter((p) => !p.wild);
+
+    for (let i = 0; i < town.length; i++) {
+      for (let j = i + 1; j < town.length; j++) {
+        const a = town[i], b = town[j];
+        const d = Math.hypot(a.pos.x - b.pos.x, a.pos.z - b.pos.z);
+        if (d < 30) {
+          throw new Error(`[city] portals ${a.id} and ${b.id} are ${d.toFixed(1)} m apart (min 30)`);
+        }
+      }
+    }
+    const { walkLimit, cliffX } = this.spec.wall;
+    for (const p of town) {
+      if (Math.max(Math.abs(p.pos.x), Math.abs(p.pos.z)) > walkLimit || p.pos.x < cliffX + 3) {
+        throw new Error(`[city] portal ${p.id} stands outside the walkable world at ${p.pos.x},${p.pos.z}`);
+      }
+      // Prompt zones are exclusive: a spot where the portal prompt and a door
+      // prompt both claim the player is two systems fighting over one strip
+      // of pavement.
+      for (const it of this.spec.interactables) {
+        const d = Math.hypot(p.pos.x - it.pos.x, p.pos.z - it.pos.z);
+        const need = p.radius + PROMPT_SLACK + it.radius;
+        if (d < need) {
+          throw new Error(`[city] portal ${p.id} prompt zone overlaps interactable '${it.id}' `
+            + `(${d.toFixed(1)} m apart, needs ${need.toFixed(1)})`);
+        }
+      }
+      // Seed-dependent belt: nothing solid may already stand under the dais.
+      const daisR = 2.6 * (p.radius > 6 ? 1.85 : 1);
+      for (const b of this.boxes) {
+        if (Math.abs(p.pos.x - b.x) < b.w / 2 + daisR && Math.abs(p.pos.z - b.z) < b.d / 2 + daisR) {
+          console.warn(`[city] portal ${p.id} dais intersects a building box at ${b.x},${b.z}`);
+        }
+      }
+      for (const o of this.obstacles) {
+        const d = Math.hypot(p.pos.x - o.pos.x, p.pos.z - o.pos.z);
+        if (d > 0.01 && d < daisR + o.radius) {
+          console.warn(`[city] portal ${p.id} dais overlaps an obstacle (r=${o.radius}) at ${o.pos.x.toFixed(1)},${o.pos.z.toFixed(1)}`);
+        }
+      }
+    }
   }
 
   /** A cracked ruin platform under the S portal, outside the city's protection. */
@@ -2441,8 +2652,18 @@ export class City {
    */
   _buildFlags(rnd) {
     const { half: WALL_HALF, plazaR: PLAZA_R } = this.spec.wall;
-    const plaza = this.portals.filter((p) => Math.hypot(p.pos.x, p.pos.z) < PLAZA_R + 4);
-    const away = this.portals.filter((p) => !plaza.includes(p));
+    // Three placement families now that gates live in the districts (B2), and
+    // the split is POSITIONAL, never a rank list, so it keeps following the
+    // descriptor: plaza portals fly their pairs exactly as shipped; district
+    // portals (in-wall, off the plaza) fly the same pairs but screened by
+    // _blockedForProp, because their surroundings are streets and frontage
+    // rather than authored-empty flagstone; out-of-wall portals (the Breach)
+    // keep their road-mouth pairs. Runs before the Verge builds, so
+    // this.portals is exactly the town's own here.
+    const inWall = this.portals.filter((p) => Math.max(Math.abs(p.pos.x), Math.abs(p.pos.z)) < WALL_HALF);
+    const plaza = inWall.filter((p) => Math.hypot(p.pos.x, p.pos.z) < PLAZA_R + 4);
+    const district = inWall.filter((p) => !plaza.includes(p));
+    const away = this.portals.filter((p) => !inWall.includes(p));
     const flags = [];       // { fly, x, z, topY, w, h, yaw, phase, color }
     const poles = [];
 
@@ -2462,12 +2683,18 @@ export class City {
     };
 
     // --- pillar-ring sectors ----------------------------------------------
-    if (plaza.length) {
+    // Sector colour comes from every IN-WALL portal, not just the plaza's own
+    // (with B2 there may be exactly one of those): each pillar takes the
+    // portal nearest by BEARING from the plaza centre, so the ring becomes a
+    // wayfinding rose — the sector dyed teal points down the street that
+    // leads to the teal gate. That is the plaza's old one-look promise ("this
+    // city holds these gates") kept, plus a direction.
+    if (inWall.length) {
       for (let i = 0; i < 24; i++) {
         const a = (i / 24) * Math.PI * 2;
         const x = Math.cos(a) * (PLAZA_R + 2.4), z = -Math.sin(a) * (PLAZA_R + 2.4);
-        let best = plaza[0], bestD = Infinity;
-        for (const p of plaza) {
+        let best = inWall[0], bestD = Infinity;
+        for (const p of inWall) {
           const pa = Math.atan2(-p.pos.z, p.pos.x);
           let d = Math.abs(pa - a);
           if (d > Math.PI) d = Math.PI * 2 - d;
@@ -2501,6 +2728,51 @@ export class City {
           fly: true, x, z, topY: top - 0.12, w: 1.45, h: 0.85,
           yaw: WIND, phase: rnd() * 6.283, color: p.color,
         });
+      }
+    }
+
+    // --- flying pairs flanking each district dais (B2) --------------------
+    // Same signage as a plaza gate — two flying flags in the portal's dye —
+    // but the flanks are screened: a district dais stands beside a street with
+    // frontage and props around it, and a pole through a lantern or a garden
+    // fence is worse than a flagless side. The tangent is perpendicular to
+    // the radial from the plaza, matching the plaza pairs' frame, so the pair
+    // brackets the dais as seen by a player arriving up the road.
+    for (const p of district) {
+      const len = Math.hypot(p.pos.x, p.pos.z) || 1;
+      const tx = -p.pos.z / len, tz = p.pos.x / len;
+      // Facing, for the fallback spot: local +Z of the built group.
+      const fyaw = p.group.rotation.y;
+      const fx = Math.sin(fyaw), fz = Math.cos(fyaw);
+      // Three candidates, first two unblocked win: the tangent pair first
+      // (the plaza gates' own framing), then directly BEHIND the dais — a
+      // portal whose tangent runs along its street (B on the z=66 cross)
+      // would otherwise lose both flanks to the carriageway, and one flag
+      // behind the oval still says "this is the purple gate" from the road.
+      let placed = 0;
+      const spots = [
+        { x: p.pos.x - tx * 6.8, z: p.pos.z - tz * 6.8 },
+        { x: p.pos.x + tx * 6.8, z: p.pos.z + tz * 6.8 },
+        { x: p.pos.x - fx * 6.8, z: p.pos.z - fz * 6.8 },
+      ];
+      for (const sp of spots) {
+        if (placed >= 2) break;
+        if (this._blockedForProp(sp.x, sp.z, 0.5)) continue;
+        placed++;
+        const top = pole(sp.x, sp.z, 4.6);
+        flags.push({
+          fly: true, x: sp.x, z: sp.z, topY: top - 0.12, w: 1.45, h: 0.85,
+          yaw: WIND, phase: rnd() * 6.283, color: p.color,
+        });
+      }
+      // A zero-flag district gate loses the rank signage the whole spread-
+      // gates wayfinding story leans on, and the screening makes that a
+      // silent outcome of any future width/trim/clearance edit (gate-c's
+      // one surviving spot clears its lane check by ~5 cm today — review
+      // finding). Warn loudly in dev; never throw — a flagless gate is
+      // degraded, not broken.
+      if (placed === 0) {
+        console.warn(`[city] district gate ${p.id} placed ZERO rank flags — all candidate spots blocked; widen the spot list or move the anchor`);
       }
     }
 
