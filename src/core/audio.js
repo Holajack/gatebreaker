@@ -71,6 +71,11 @@ export class Audio {
   // is exactly where the GitHub Pages web build runs). The .catch() is a
   // second line of defense in case a real device rejects the call too.
   _haptic(fn) {
+    // hapticsEnabled is the settings screen's dedicated switch (Wave G):
+    // sound-off players often still want the thump, and vice versa. Absent
+    // (older constructions) means on — `!== false` — so the flag needs no
+    // constructor edit and no migration.
+    if (this.hapticsEnabled === false) return;
     if (!this.enabled || !Capacitor.isNativePlatform()) return;
     try { fn()?.catch(() => {}); } catch { /* never let haptics break gameplay */ }
   }

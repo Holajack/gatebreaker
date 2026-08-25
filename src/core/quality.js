@@ -169,7 +169,7 @@ export function releaseSkinnedBodies(bodies = 0, shadows = 0) {
   _shadowBodies = Math.max(0, _shadowBodies - Math.max(0, shadows));
 }
 
-const ORDER = ['low', 'medium', 'high', 'ultra'];
+export const ORDER = ['low', 'medium', 'high', 'ultra'];
 
 const DOWN_FPS = 0.78;         // fraction of target that counts as "struggling"
 const UP_FPS = 0.96;           // fraction of target that counts as "comfortable"
