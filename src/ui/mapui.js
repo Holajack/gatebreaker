@@ -213,7 +213,14 @@ export class MapUI {
   _injectHudButton() {
     const bar = document.querySelector('#hud .hud-top');
     if (!bar || document.getElementById('btnMap')) return;
-    const btn = el('button', 'icon-btn', '◈'); // ◈ — a chart pip
+    // Sprite icon, not a font glyph (Wave G — see index.html's symbol defs).
+    const btn = el('button', 'icon-btn');
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'glyph');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', '#i-map');
+    svg.appendChild(use);
+    btn.appendChild(svg);
     btn.id = 'btnMap';
     btn.type = 'button';
     btn.setAttribute('aria-label', 'Map');

@@ -55,12 +55,29 @@
 <body>
   <canvas id="scene"></canvas>
 
+  <!-- Wave G icon sprite: the HUD's buttons used to render OEM-font Unicode
+       glyphs (tofu or weight drift on non-Latin Android fonts — audit). One
+       authored stroke set on currentColor; every button <use>s a symbol. -->
+  <svg style="display:none" aria-hidden="true"><defs>
+    <symbol id="i-sword" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5.5 18.5 L15 9 M13 4.5 L19.5 11 M15 9l3-6.5L21.5 6 15 9zM7 14l3 3M4.5 16.5l3 3"/></g></symbol>
+    <symbol id="i-bind" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v6M12 9c-3.5 0-6 2.2-6 6v6h12v-6c0-3.8-2.5-6-6-6z"/><path d="M9 15h6" opacity=".6"/></g></symbol>
+    <symbol id="i-nova" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1" opacity=".8"/></g></symbol>
+    <symbol id="i-jump" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 14l6-6 6 6M6 20l6-6 6 6" opacity=".9"/></g></symbol>
+    <symbol id="i-dash" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 3 L6 13h5l-2 8 9-12h-6l1-6z" stroke-linejoin="round"/></g></symbol>
+    <symbol id="i-ruin" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 5l14 14M19 5L5 19M12 3v4M12 17v4" opacity=".95"/></g></symbol>
+    <symbol id="i-bag" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M5 8h14l-1.2 12H6.2L5 8zM9 8V6a3 3 0 0 1 6 0v2"/></g></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M9 5v14M15 5v14"/></g></symbol>
+    <symbol id="i-map" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 6l5-2 6 2 5-2v14l-5 2-6-2-5 2V6zM9 4v14M15 6v14"/></g></symbol>
+    <symbol id="i-journal" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18H6a2 2 0 0 1 0-4h12"/><path d="M10 8h5M10 12h5" opacity=".7"/></g></symbol>
+    <symbol id="i-rotate" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.3-5.6M18 3v4h-4"/></g></symbol>
+  </defs></svg>
+
   <!-- Shown only if the device ends up in portrait despite everything below.
        The manifest asks for sensorLandscape, but that request is advisory: an
        OEM shell or a large-screen policy can overrule it, and this game's HUD
        assumes a wide viewport. Better an explicit prompt than a broken layout. -->
   <div id="rotate" class="rotate-gate hidden">
-    <div class="rotate-icon">⟳</div>
+    <div class="rotate-icon"><svg class="glyph" width="34" height="34"><use href="#i-rotate"/></svg></div>
     <p>ROTATE YOUR DEVICE</p>
     <small>Embergate is played in landscape.</small>
   </div>
@@ -178,8 +195,8 @@
       <!-- The owner asked for "an inventory button", and a button that only
            exists inside a menu is not that. It sits in the HUD in BOTH the
            city and a gate. -->
-      <button id="btnInventory" class="icon-btn" aria-label="Inventory">▤</button>
-      <button id="btnPause" class="icon-btn" aria-label="Pause">| |</button>
+      <button id="btnInventory" class="icon-btn" aria-label="Inventory"><svg class="glyph"><use href="#i-bag"/></svg></button>
+      <button id="btnPause" class="icon-btn" aria-label="Pause"><svg class="glyph"><use href="#i-pause"/></svg></button>
     </div>
 
     <!-- Anywhere in this zone starts a thumbstick under the finger; the ring
@@ -190,14 +207,14 @@
     <div class="hud-bottom">
       <div class="skills">
         <div class="skill-row">
-          <button class="skill-btn shadow" data-skill="summon"><span class="glyph">☗</span><i class="cd"></i><small>BIND</small></button>
-          <button class="skill-btn" data-skill="nova"><span class="glyph">◎</span><i class="cd"></i><small>NOVA</small></button>
+          <button class="skill-btn shadow" data-skill="summon"><svg class="glyph"><use href="#i-bind"/></svg><i class="cd"></i><small>BIND</small></button>
+          <button class="skill-btn" data-skill="nova"><svg class="glyph"><use href="#i-nova"/></svg><i class="cd"></i><small>NOVA</small></button>
         </div>
         <div class="skill-row">
-          <button class="skill-btn jump" data-skill="jump"><span class="glyph">⇧</span><i class="cd"></i><small>JUMP</small></button>
-          <button class="skill-btn" data-skill="dash"><span class="glyph">↯</span><i class="cd"></i><small>DASH</small></button>
-          <button class="skill-btn" data-skill="slash"><span class="glyph">✕</span><i class="cd"></i><small>RUIN</small></button>
-          <button class="skill-btn big" data-skill="attack"><span class="glyph">⚔</span><i class="cd"></i></button>
+          <button class="skill-btn jump" data-skill="jump"><svg class="glyph"><use href="#i-jump"/></svg><i class="cd"></i><small>JUMP</small></button>
+          <button class="skill-btn" data-skill="dash"><svg class="glyph"><use href="#i-dash"/></svg><i class="cd"></i><small>DASH</small></button>
+          <button class="skill-btn" data-skill="slash"><svg class="glyph"><use href="#i-ruin"/></svg><i class="cd"></i><small>RUIN</small></button>
+          <button class="skill-btn big" data-skill="attack"><svg class="glyph"><use href="#i-sword"/></svg><i class="cd"></i></button>
         </div>
       </div>
     </div>

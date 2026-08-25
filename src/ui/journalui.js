@@ -92,9 +92,15 @@ export class JournalUI {
   injectHudButton() {
     const bar = document.querySelector('#hud .hud-top');
     if (!bar || document.getElementById('btnJournal')) return;
+    // Sprite icon, not a font glyph (Wave G — see index.html's symbol defs).
     const btn = document.createElement('button');
     btn.className = 'icon-btn';
-    btn.textContent = '▤';
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'glyph');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', '#i-journal');
+    svg.appendChild(use);
+    btn.appendChild(svg);
     btn.id = 'btnJournal';
     btn.type = 'button';
     btn.setAttribute('aria-label', 'Contracts');

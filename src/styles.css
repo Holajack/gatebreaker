@@ -301,6 +301,14 @@ kbd{
 }
 .skill-btn:active{transform:scale(.9)}
 .skill-btn .glyph{font-size:22px;line-height:1}
+/* Wave G icon sprite: the glyphs are authored stroke SVGs on currentColor
+   now (see index.html's symbol defs) — same box the font glyphs occupied,
+   so button layout is untouched. icon-btn glyphs center via flex because
+   those buttons are not grid-placed like the skill ring. */
+svg.glyph{width:22px;height:22px;display:block}
+.skill-btn.big svg.glyph{width:30px;height:30px}
+.icon-btn{display:flex;align-items:center;justify-content:center}
+.icon-btn svg.glyph{width:19px;height:19px}
 .skill-btn small{position:absolute;bottom:5px;font-size:7.5px;letter-spacing:.1em;color:var(--dim)}
 .skill-btn.big{
   width:86px;height:86px;
