@@ -301,6 +301,11 @@ try {
     + `  |  shadow rimmed=${a.shadowRimmed} plain=${a.shadowPlain}`);
   console.log(`                         ${a.livingRimmed === 0 ? 'OK' : 'FAIL'}`
     + ' — no living character may carry a rim');
+  // The rim law GATES now (review finding: this line printed FAIL and still
+  // exited 0, so nothing enforced the owner's no-glow-on-living rule or the
+  // grade shader's defaults-identity claim). Luma metrics stay print-only —
+  // they drift legitimately with content; the rim policy never does.
+  if (a.livingRimmed !== 0) process.exitCode = 1;
 
   console.log(`\n  characters on screen : ${regions.counts.sampled} `
     + `(${regions.counts.enemies} enemies, ${regions.counts.shadows} shadows, 1 player)`);

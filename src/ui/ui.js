@@ -155,7 +155,13 @@ export class UI {
 
   refreshTitle() {
     if (!this.save) return;
-    $('titleName').textContent = `${rankOf(this.save.level)}-GRADE BREAKER`;
+    // A story-driven game addresses its hunter BY NAME from the front door
+    // (Wave G; save.hunterName has persisted since the paperdoll wave but the
+    // title never used it — the rename flow was buried in the inventory).
+    const name = (this.save.hunterName || '').trim();
+    $('titleName').textContent = name
+      ? `${name} · ${rankOf(this.save.level)}-GRADE`
+      : `${rankOf(this.save.level)}-GRADE BREAKER`;
     $('titleLevel').textContent = `LV ${this.save.level}`;
     this._refreshBodySelect();
   }
