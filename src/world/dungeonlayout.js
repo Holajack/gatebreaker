@@ -46,6 +46,12 @@
 // corridor (-1 for the entry tunnel's junction, which leads outside).
 
 import { mulberry32 } from '../core/rng.js';
+// THREE-free, Node-importable (see obstacles.js's own header) — buildCover's
+// connectivity guarantee below builds the same kind of real collision field
+// dungeon.js registers at render time, so "is this room still walkable" is
+// answered against what the player actually collides with, not against the
+// placer's own bookkeeping.
+import { ObstacleField } from './obstacles.js';
 // The ONE physical constant this generator shares with the sim: the height
 // every projectile flies at. config.js is THREE-free and DOM-free (its header
 // says so, and it imports only rng.js), so pulling it in keeps the plain-Node
@@ -558,8 +564,11 @@ function tryGenerate(rank, params, enemies, seed) {
   const decor = buildDecor(outRooms, outDoors, wallRuns, params, decorRnd);
   // --- step 11: interior cover (coverRnd only) ------------------------------
   // Runs after spawn points exist (step 9) because the placer has to keep them
-  // clear, and on its own stream so cover tuning cannot move a torch.
-  decor.cover = buildCover(outRooms, outDoors, params, coverRnd, boss);
+  // clear, and on its own stream so cover tuning cannot move a torch. Takes
+  // wallRuns and decor (columns/props/alcove furniture) so its connectivity
+  // guarantee (see CONNECTIVITY GUARANTEE above buildCover) can check cover
+  // against the REAL combined obstacle picture, not just itself.
+  decor.cover = buildCover(outRooms, outDoors, wallRuns, decor, params, coverRnd, boss);
 
   return {
     kind: 'crawl',
@@ -1019,6 +1028,15 @@ function assignBudgets(rooms, criticalPath, enemies) {
 const FACE_YAW = { s: 0, n: Math.PI, e: Math.PI / 2, w: -Math.PI / 2 };
 const PROP_KINDS = ['pot', 'crate', 'barrel'];
 
+// How many alcove candidates get dressed at all (wall niche + furniture), and
+// how many of those may carry a bookcase instead of a second pot. Exported
+// and consumed by dungeon.js's own DRESS_LIMITS (its per-role draw-call
+// backstop table) instead of duplicated there: this file already computes
+// furniture in exactly this index window (see buildDecor's alcove block), so
+// a drifted copy in dungeon.js could truncate the render at a DIFFERENT
+// alcove than the one furniture was actually computed for.
+export const ALCOVE_LIMITS = { count: 6, shelves: 3 };
+
 function buildDecor(rooms, doors, wallRuns, params, rnd) {
   const torches = [];
   const columns = [];
@@ -1112,7 +1130,16 @@ function buildDecor(rooms, doors, wallRuns, params, rnd) {
     }
   }
 
-  // Alcoves (D+): midpoints of long room walls.
+  // Alcoves (D+): midpoints of long room walls, each dressed with furniture
+  // whose kind, position AND collision footprint are decided HERE — this used
+  // to be computed a second time at RENDER time (dungeon.js's old
+  // _buildDressing, off its OWN rnd stream), which is exactly the
+  // "two computation sites" trap COVER_KINDS/bossAnchor/exitAnchor exist to
+  // avoid elsewhere in this file: a hand-duplicated copy of the offset math
+  // is how a wall-mounted bookcase's REAL 2.1 x 0.72 m collision box could
+  // exist without buildCover ever knowing to route cover around it (the
+  // reported pillar+bookcase softlock). dungeon.js now only CONSUMES
+  // `alcove.furniture` — see its _buildDressing alcove loop.
   if (params.alcoves) {
     for (const r of rooms) {
       if (r.kind === 'entry') continue;
@@ -1122,6 +1149,67 @@ function buildDecor(rooms, doors, wallRuns, params, rnd) {
       if (r.d >= 10 && rnd() < 0.6) {
         alcoves.push({ x: r.x, z: r.centre.z, yaw: -Math.PI / 2 });
       }
+    }
+    // Only the first ALCOVE_LIMITS.count candidates are ever dressed at all —
+    // dungeon.js truncates layout.decor.alcoves to the same number before it
+    // even draws the wall-niche piece, a draw-call backstop (DRESS_LIMITS),
+    // so furniture computed past it would never be seen. Furniture is decided
+    // in that same index space so the two can never disagree about which
+    // alcove is "alcove #0" — the shared constant IS the agreement.
+    // Every OTHER alcove in that window (i % 2 === 0) gets a wall-mounted
+    // bookcase — deterministic by index, not a roll — up to
+    // ALCOVE_LIMITS.shelves; the rest get a second pot instead. Both branches
+    // still burn rnd() calls (pot kind + yaw) so decorRnd's draw count from
+    // this loop matches what the old render-time version consumed, seed for
+    // seed within this file's own determinism contract.
+    let shelves = 0;
+    const dressCount = Math.min(alcoves.length, ALCOVE_LIMITS.count);
+    for (let i = 0; i < dressCount; i++) {
+      const a = alcoves[i];
+      const fx = -Math.sin(a.yaw);
+      const fz = -Math.cos(a.yaw);
+      const rx = Math.cos(a.yaw);     // local +X after rotation.y = yaw
+      const rz = -Math.sin(a.yaw);
+      const furniture = [];
+      // Anchor sits on the room boundary; pots flank it at +-2.5 m along the
+      // wall, 0.62 m proud of the wall's inner face (matches the niche's own
+      // 0.34 m nudge plus the pot's own radius).
+      const potSide = (s) => {
+        const px = a.x + rx * s * 2.5 + fx * 0.62;
+        const pz = a.z + rz * s * 2.5 + fz * 0.62;
+        furniture.push({
+          kind: rnd() < 0.5 ? 'potA' : 'potB',
+          x: px,
+          z: pz,
+          yaw: rnd() * Math.PI * 2,
+          collision: { shape: 'circle', r: 0.3, top: 0.4 },
+        });
+      };
+      potSide(-1);
+      if (i % 2 === 0 && shelves < ALCOVE_LIMITS.shelves) {
+        shelves++;
+        const bx = a.x + rx * 3.1 + fx * 0.68;
+        const bz = a.z + rz * 3.1 + fz * 0.68;
+        // Axis-aligned by construction (alcove yaws are cardinal): span
+        // along the wall, honest top so bodies bump and bolts clear. This IS
+        // the box buildCover's connectivity guarantee now sees.
+        const alongX = Math.abs(rx) > 0.5;
+        furniture.push({
+          kind: 'bookcase',
+          x: bx,
+          z: bz,
+          yaw: a.yaw,
+          collision: {
+            shape: 'box',
+            w: alongX ? 2.1 : 0.72,
+            d: alongX ? 0.72 : 2.1,
+            top: 2.63,
+          },
+        });
+      } else {
+        potSide(1);
+      }
+      a.furniture = furniture;
     }
   }
 
@@ -1254,12 +1342,252 @@ export function exitAnchor(room, door) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// CONNECTIVITY GUARANTEE — the pillar+bookcase softlock fix.
+// ---------------------------------------------------------------------------
+// buildCover's clearance rules (wallInset/doorClear/lane/keepOut, above) only
+// ever look at OTHER COVER. They have no idea buildDecor also put a column at
+// every room corner, prop clusters near them, and — on D — a wall-mounted
+// bookcase whose REAL collision box (dungeon.js _buildDressing) is 2.1 m wide
+// and sticks 0.72 m off the wall. A pillar placed in good faith 3.0 m (the
+// dash lane) from where a bookcase would later land can still, TOGETHER with
+// that bookcase, narrow a corridor-to-room passage below body width — that is
+// the exact softlock a player reported: no single system did anything wrong,
+// and no single system could see the joint effect.
+//
+// So this is the one place that CAN see it: after a room's cover is placed,
+// verify the REAL combined obstacle picture — walls, doors, every decor
+// column/prop/alcove furniture piece, and the room's own just-placed cover —
+// against the one invariant that actually matters here (every door in the
+// room stays reachable from its open floor), and prune the newest non-anchor
+// piece nearest any door the field cuts off until it is fixed. Same idiom as
+// the spawn-point prune a few lines below: place first, then prune to restore
+// the invariant, rather than trying to predict every joint interaction up
+// front.
+//
+// The flood-fill and the field it runs over are deliberately the SAME shape
+// tools/dungeon-gen-test.mjs's own regression check uses (floodFillRoom /
+// doorReachableFrom are exported and imported there, not reimplemented) —
+// two copies of a reachability algorithm is how a soak test quietly stops
+// meaning what it claims to.
+
+/** Player/enemy collision radius the connectivity guarantee is sized to —
+ * shared with its regression test so the two can never disagree about what
+ * "fits through a gap" means. Matches the body radius physics.js resolves. */
+export const NAV_BODY_RADIUS = 0.45;
+/** Flood-fill lattice pitch, metres — ditto. */
+export const NAV_FILL_STEP = 0.5;
+
+const FLOOD_NEIGHBOURS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+/**
+ * Open-cell flood fill of `room` from its centre-most open cell, over a REAL
+ * ObstacleField (or anything duck-typed to its `.blocked(x,z,r,stepOver,feetY)`
+ * — buildCover's per-room check below composes two fields without paying to
+ * rebuild the static one every room, so it hands in a plain object here, not
+ * always a true ObstacleField instance).
+ *
+ * feetY 0 / stepOver 0.4: what a BODY can stand in, matching physics.js — kerb
+ * -height rubble is walkable, a cover piece or a bookcase is not.
+ * @returns {{nx:number,nz:number,open:Uint8Array,seen:Uint8Array,reached:number,total:number}}
+ */
+export function floodFillRoom(field, room, { bodyRadius = NAV_BODY_RADIUS, fillStep = NAV_FILL_STEP } = {}) {
+  const nx = Math.round(room.w / fillStep);
+  const nz = Math.round(room.d / fillStep);
+  const open = new Uint8Array(nx * nz);
+  let total = 0;
+  let seed = -1;
+  let seedD = Infinity;
+  for (let j = 0; j < nz; j++) {
+    for (let i = 0; i < nx; i++) {
+      const x = room.x + (i + 0.5) * fillStep;
+      const z = room.z + (j + 0.5) * fillStep;
+      if (field.blocked(x, z, bodyRadius, 0.4, 0)) continue;
+      open[i + j * nx] = 1;
+      total++;
+      const d = Math.hypot(x - room.centre.x, z - room.centre.z);
+      if (d < seedD) { seedD = d; seed = i + j * nx; }
+    }
+  }
+  const seen = new Uint8Array(nx * nz);
+  if (seed < 0) return { nx, nz, open, seen, reached: 0, total };
+  seen[seed] = 1;
+  const q = [seed];
+  for (let qi = 0; qi < q.length; qi++) {
+    const ci = q[qi] % nx;
+    const cj = (q[qi] / nx) | 0;
+    for (const [dx, dz] of FLOOD_NEIGHBOURS) {
+      const ni = ci + dx;
+      const nj = cj + dz;
+      if (ni < 0 || nj < 0 || ni >= nx || nj >= nz) continue;
+      const k = ni + nj * nx;
+      if (!open[k] || seen[k]) continue;
+      seen[k] = 1;
+      q.push(k);
+    }
+  }
+  return { nx, nz, open, seen, reached: q.length, total };
+}
+
+// A door sits ON the room's boundary — outside floodFillRoom's cell-centre
+// lattice — so reachability is sampled a little way into the room along the
+// door->centre direction, at a few insets rather than one: a single sample
+// can straddle the lattice cell a wall corner's rounding shades into `open`.
+const DOOR_REACH_INSETS = [0.8, 1.3, 2.0, 3.0];
+
+/** True if `door` is reachable from a floodFillRoom() result for `room`. */
+export function doorReachableFrom(fill, room, door, fillStep = NAV_FILL_STEP) {
+  const dx0 = room.centre.x - door.x;
+  const dz0 = room.centre.z - door.z;
+  const len = Math.hypot(dx0, dz0) || 1;
+  const ux = dx0 / len;
+  const uz = dz0 / len;
+  for (const inset of DOOR_REACH_INSETS) {
+    const x = door.x + ux * inset;
+    const z = door.z + uz * inset;
+    const i = Math.floor((x - room.x) / fillStep);
+    const j = Math.floor((z - room.z) / fillStep);
+    if (i < 0 || j < 0 || i >= fill.nx || j >= fill.nz) continue;
+    if (fill.seen[i + j * fill.nx]) return true;
+  }
+  return false;
+}
+
+/**
+ * The static half of the connectivity field — everything buildCover does NOT
+ * control and that does not change while it places one room's cover: walls,
+ * every door registered OPEN (a sealed door is not what "can I walk this
+ * room" is asking), and every decor column/prop/alcove-furniture piece.
+ * Built ONCE per buildCover() call and reused across every room and every
+ * prune retry, so the per-room check cost is the small cover-only field
+ * below, not a walk of the whole layout's decor every time.
+ */
+function buildStaticConnectivityField(wallRuns, doors, decor) {
+  const f = new ObstacleField({ stepOver: 0.4 });
+  for (const run of wallRuns) f.addBox(run.x, run.z, run.w, run.d, run.rot, { tag: 'wall', nav: false });
+  for (const d of doors) f.addBox(d.x, d.z, d.w, d.d, d.rot, { top: 0, nav: false, tag: 'membrane' });
+  for (const c of decor.columns) f.addCircle(c.x, c.z, 0.34, { nav: false, tag: 'column' });
+  for (const p of decor.props) {
+    // Matches dungeon.js _buildDressing's registration exactly. statue/candles
+    // carry no collision there either (the shrine's real position also
+    // depends on its room's door, computed only at render time — approximating
+    // it here would be a second, divergence-prone copy of _placeShrine's
+    // math for a piece that already sits inside its OWN wide centreClear
+    // keep-out, so it cannot be the thing that pinches a doorway).
+    if (p.kind === 'crate') f.addCircle(p.x, p.z, 0.4, { top: 0.4, nav: false, tag: 'prop' });
+    else if (p.kind === 'barrel') f.addCircle(p.x, p.z, 0.4, { top: 1.05, nav: false, tag: 'prop' });
+    else if (p.kind === 'pot') f.addCircle(p.x, p.z, 0.3, { top: 0.4, nav: false, tag: 'prop' });
+  }
+  for (const a of decor.alcoves) {
+    for (const item of a.furniture || []) {
+      if (item.collision.shape === 'circle') {
+        f.addCircle(item.x, item.z, item.collision.r, { top: item.collision.top, nav: false, tag: 'prop' });
+      } else {
+        f.addBox(item.x, item.z, item.collision.w, item.collision.d, 0, { top: item.collision.top, nav: false, tag: 'prop' });
+      }
+    }
+  }
+  return f.build();
+}
+
+/** The small, cheap-to-rebuild half: one room's OWN cover candidates. */
+function buildRoomCoverField(roomCover) {
+  const f = new ObstacleField({ stepOver: 0.4 });
+  for (const c of roomCover) {
+    const k = COVER_KINDS[c.kind];
+    if (k.shape === 'circle') f.addCircle(c.x, c.z, k.r, { nav: false, tag: 'cover' });
+    else f.addBox(c.x, c.z, k.hx * 2, k.hz * 2, c.yaw, { top: k.top, nav: false, tag: 'cover' });
+  }
+  return f.build();
+}
+
+const CONN_PRUNE_CAP = 16;
+
+/**
+ * Verify every one of `room`'s doors is reachable from its open floor over
+ * the REAL combined obstacle picture, and prune `placed`/`out` (in place, by
+ * reference) until it holds or the iteration cap is hit. Bounded, not
+ * recursive, and never throws: the safety margins buildCover's clearance
+ * rules already enforce (wallInset, doorClear, lane) make an actual failure
+ * here exceedingly rare, and a dungeon that ships with one door slightly
+ * over-cautiously stripped of cover is a far better failure mode than a
+ * generator that can hang or crash.
+ */
+function enforceRoomDoorReachability(room, roomDoors, staticField, placed, out) {
+  // A door blocked by the STATIC field (walls, columns, decor props, alcove
+  // furniture — none of which this function can touch) can never be fixed by
+  // pruning this room's own cover: cover only ADDS obstacles, so removing all
+  // of it is a strict upper bound on what pruning can reach. Check that
+  // cover-free baseline once, up front, so the loop below never burns its
+  // budget stripping every non-anchor piece for a door pruning was never
+  // going to unblock (see prune-loop docstring below).
+  const staticFill = floodFillRoom(staticField, room);
+  const unfixable = roomDoors.filter((d) => !doorReachableFrom(staticFill, room, d));
+  if (unfixable.length) {
+    // eslint-disable-next-line no-console
+    console.warn(`buildCover: room ${room.id} door(s) ${unfixable.map((d) => d.id).join(',')} `
+      + 'unreachable from the static field alone (walls/decor, not this room\'s '
+      + 'cover) — pruning cover cannot fix this, leaving cover as-is');
+  }
+  const fixableDoors = unfixable.length ? roomDoors.filter((d) => !unfixable.includes(d)) : roomDoors;
+  if (!fixableDoors.length) return;   // nothing pruning could possibly help
+
+  for (let iter = 0; iter <= CONN_PRUNE_CAP; iter++) {
+    const coverField = buildRoomCoverField(placed);
+    const combined = {
+      blocked: (x, z, r, stepOver, feetY) => (
+        staticField.blocked(x, z, r, stepOver, feetY) || coverField.blocked(x, z, r, stepOver, feetY)
+      ),
+    };
+    const fill = floodFillRoom(combined, room);
+    const blockedDoor = fixableDoors.find((d) => !doorReachableFrom(fill, room, d));
+    if (!blockedDoor) return;   // every fixable door reachable — the common case
+
+    if (iter === CONN_PRUNE_CAP) {
+      // Never infinite-loop: log and leave the room as-is. See the docstring
+      // above for why this should not be reachable in practice.
+      // eslint-disable-next-line no-console
+      console.warn(`buildCover: room ${room.id} door ${blockedDoor.id} still `
+        + `unreachable after ${CONN_PRUNE_CAP} prunes — leaving it as-is`);
+      return;
+    }
+
+    // `anchor` pieces (the boss colonnade + debris arc) are never pruned —
+    // they are the guaranteed heavy cover the kite loop is built from (see
+    // the rubble-cap downgrade note above, same rule). Among the rest, drop
+    // whichever sits nearest the blocked door; ties favour the most recently
+    // placed (later in `placed`), since it is the newer piece that broke an
+    // invariant an earlier one already satisfied.
+    const candidates = placed.filter((p) => !p.anchor);
+    if (!candidates.length) {
+      // eslint-disable-next-line no-console
+      console.warn(`buildCover: room ${room.id} door ${blockedDoor.id} unreachable `
+        + 'but every remaining piece is an anchor — leaving it as-is');
+      return;
+    }
+    let victim = candidates[0];
+    let victimD = Math.hypot(victim.x - blockedDoor.x, victim.z - blockedDoor.z);
+    for (let i = 1; i < candidates.length; i++) {
+      const c = candidates[i];
+      const d = Math.hypot(c.x - blockedDoor.x, c.z - blockedDoor.z);
+      if (d <= victimD) { victim = c; victimD = d; }
+    }
+    const pi = placed.indexOf(victim);
+    if (pi >= 0) placed.splice(pi, 1);
+    const oi = out.indexOf(victim);
+    if (oi >= 0) out.splice(oi, 1);
+  }
+}
+
 /**
  * Build the interior cover field. coverRnd ONLY.
+ * @param {Array} wallRuns layout.wallRuns — the connectivity guarantee's walls
+ * @param {object} decor buildDecor's full output — columns/props/alcoves feed
+ *   the same guarantee (see CONNECTIVITY GUARANTEE above)
  * @returns {Array<{x,z,yaw,kind,room,ex,ez}>} world metres; ex/ez are the
  *   world-aligned footprint half-extents dungeon.js registers collision from.
  */
-function buildCover(rooms, doors, params, rnd, bossRoomId) {
+function buildCover(rooms, doors, wallRuns, decor, params, rnd, bossRoomId) {
   const cfg = params.cover;
   const out = [];
   if (!cfg) return out;
@@ -1274,6 +1602,11 @@ function buildCover(rooms, doors, params, rnd, bossRoomId) {
     const s = Math.abs(Math.sin(yaw));
     return { ex: k.hx * c + k.hz * s, ez: k.hx * s + k.hz * c };
   };
+
+  // See CONNECTIVITY GUARANTEE above. Built once, off walls/doors/decor —
+  // none of which change while this function places cover — and reused by
+  // every room's check below.
+  const staticField = buildStaticConnectivityField(wallRuns, doors, decor);
 
   for (const r of rooms) {
     // The entry room is a deploy pad, not a fight room — the escort spawns
@@ -1446,6 +1779,25 @@ function buildCover(rooms, doors, params, rnd, bossRoomId) {
     // thin if geometry (not luck) says so. The branch is a pure function of
     // the first sweep's outcome, so determinism holds.
     if (placed.length < cfg.minPieces) sweep(true);
+
+    // --- connectivity guarantee (see CONNECTIVITY GUARANTEE above) ---------
+    // Verify every door THIS ROOM'S OWN WALL carries is still reachable over
+    // the REAL combined obstacle picture, and prune the newest non-anchor
+    // piece nearest any door the field cuts off. `myDoors` is filtered to
+    // d.roomA === r.id (not used as-is): per the WALL-RUN/DOOR header comment
+    // at the top of this file, a room's `.doors` list carries BOTH ends of
+    // every corridor touching it — its OWN wall opening (roomA) and the FAR
+    // room's opening at the corridor's other end (roomB) — and that far
+    // opening can sit metres outside this room's own footprint entirely, so
+    // testing it against THIS room's flood fill would fail for every room,
+    // every seed, regardless of cover.
+    //
+    // Runs BEFORE the spawn-point prune below so that pass sees the FINAL
+    // cover set, not one a later prune here would still shrink.
+    const ownDoors = myDoors.filter((d) => d.roomA === r.id);
+    if (placed.length && ownDoors.length) {
+      enforceRoomDoorReachability(r, ownDoors, staticField, placed, out);
+    }
 
     // --- prune the spawn menu ---------------------------------------------
     // Drop every spawn point the new field would rise an enemy inside of (or

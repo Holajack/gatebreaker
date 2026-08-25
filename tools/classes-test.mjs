@@ -535,13 +535,16 @@ section('SAVE MIGRATION  (three generations in, sane defaults out; the token gra
     'sigils and affinity counters survive');
 
   // Additive-only proof for the rollback direction: every key the shipped
-  // build wrote still exists, and the new footprint is exactly four keys.
+  // build wrote still exists, and the new footprint is exactly the additive
+  // fields since — the four from this wave (className/archon/archonState/
+  // respecTokens) plus hunterName, added later the same way (null-default,
+  // not a schema bump — see save.js's own comment on that field).
   const fresh = freshSave();
   const shippedKeys = ['version', 'level', 'xp', 'points', 'stats', 'autoStats', 'playerBody', 'cleared', 'shadows', 'ash', 'daily', 'classTier', 'unlockedAnomaly', 'totalKills', 'deaths', 'weapon', 'stash', 'equipment', 'shop', 'worldTime'];
   ok(shippedKeys.every((k) => k in fresh), 'every shipped save key survives in freshSave');
   const newKeys = Object.keys(fresh).filter((k) => !shippedKeys.includes(k));
-  ok(newKeys.sort().join(',') === 'archon,archonState,className,respecTokens',
-    'the new footprint is exactly the four additive fields', newKeys.join(','));
+  ok(newKeys.sort().join(',') === 'archon,archonState,className,hunterName,respecTokens',
+    'the new footprint is exactly the five additive fields', newKeys.join(','));
 }
 
 // -------------------------------------------------------------- sanitisers

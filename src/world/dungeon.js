@@ -6,7 +6,7 @@ import { GLOW_LAYER } from '../render/glow.js';
 import { ObstacleField } from './obstacles.js';
 import { buildNavGrid } from './navgrid.js';
 import {
-  generateLayout, LAYOUT_PARAMS, COVER_KINDS, bossAnchor, exitAnchor,
+  generateLayout, LAYOUT_PARAMS, COVER_KINDS, bossAnchor, exitAnchor, ALCOVE_LIMITS,
 } from './dungeonlayout.js';
 import {
   cityKitLoaded, dungeonKitLoaded, cityMaterials, pieceBounds,
@@ -129,8 +129,24 @@ const DRESS_TINT = { E: 0xaab3d8, D: 0xdcc9a8, C: 0xbfe6f5 };  // C: deepglass c
 // D's measured mix (pillar 21.5 / rubble 18.8 / stub 3.2 scaled to 60):
 // 30*136 + 26*788 + 4*784 = 27.7k — the number to watch against the 130k
 // budget, and the reason `pillar` is the majority kind.
+// alcoves: ALCOVE_LIMITS.count, not a literal 6 — dungeonlayout.js's buildDecor
+// computes each alcove's furniture (bookcase-vs-pot, exact collision box) in
+// that SAME index window, so this truncation and that computation can never
+// disagree about which alcove is "alcove #0" (see ALCOVE_LIMITS's own
+// comment). The old local `shelves: 3` is gone: the shelf count that used to
+// gate the bookcase roll HERE, at render time, now lives with the rest of
+// that decision in buildDecor.
+// NOT exported: dungeon.js pulls in three.js and the kit loaders, and
+// tools/dungeon-gen-test.mjs is deliberately THREE-free so it can hammer
+// hundreds of layouts a second (see that file's own header) — importing this
+// table would cost it that. tools/dungeon-gen-test.mjs's coverField()
+// mirrors `columns` and `clutter` as local constants instead, the same
+// deliberate-duplication-with-a-comment this file already uses for
+// LAYOUT_PARAMS.*.enemies (dungeonlayout.js) and torchCap: move a number
+// here, move its mirror in the same edit, or the soak starts testing a
+// smaller obstacle set than a busy gate can actually place.
 const DRESS_LIMITS = {
-  archways: 12, columns: 20, torches: 40, clutter: 16, alcoves: 6, shelves: 3,
+  archways: 12, columns: 20, torches: 40, clutter: 16, alcoves: ALCOVE_LIMITS.count,
   cover: 60,
 };
 
@@ -1403,37 +1419,32 @@ export class Dungeon {
     // Alcoves (D+, layout gates them): the arched wall niche recessed into
     // long room walls — the ossuary's bone-alcove read, flanked per canon
     // with pots and, on alternating alcoves, an empty rack.
-    let shelves = 0;
+    //
+    // Furniture kind/position/collision (bookcase-vs-pot, the exact offset
+    // math) is no longer decided HERE — it is buildDecor's, computed once
+    // off decorRnd and carried on `a.furniture` (see dungeonlayout.js's
+    // buildDecor alcove block and its CONNECTIVITY GUARANTEE comment above
+    // buildCover: this used to be a second, independent computation off this
+    // function's OWN rnd stream, invisible to the cover placer, which is how
+    // a pillar and a bookcase could jointly narrow a passage below body
+    // width). This loop only CONSUMES it.
     const alcs = layout.decor.alcoves.slice(0, DRESS_LIMITS.alcoves);
-    for (let i = 0; i < alcs.length; i++) {
-      const a = alcs[i];
+    for (const a of alcs) {
       const fx = -Math.sin(a.yaw);
       const fz = -Math.cos(a.yaw);
-      const rx = Math.cos(a.yaw);     // local +X after rotation.y = yaw
-      const rz = -Math.sin(a.yaw);
       // Anchor sits on the room boundary; the wall box is 0.6 m thick centred
       // on it, so 0.34 m of forward nudge parks the niche face just proud of
       // the wall's inner face.
       put('alcove', a.x + fx * 0.34, 0, a.z + fz * 0.34, a.yaw);
-      const potSide = (s) => {
-        const px = a.x + rx * s * 2.5 + fx * 0.62;
-        const pz = a.z + rz * s * 2.5 + fz * 0.62;
-        put(rnd() < 0.5 ? 'potA' : 'potB', px, 0, pz, rnd() * Math.PI * 2);
-        field.addCircle(px, pz, 0.3, { top: 0.4, nav: false, tag: 'prop' });
-      };
-      potSide(-1);
-      if (i % 2 === 0 && shelves < DRESS_LIMITS.shelves) {
-        shelves++;
-        const bx = a.x + rx * 3.1 + fx * 0.68;
-        const bz = a.z + rz * 3.1 + fz * 0.68;
-        put('bookcase', bx, 0, bz, a.yaw);
-        // Axis-aligned by construction (alcove yaws are cardinal): span along
-        // the wall, honest top so bodies bump and bolts clear.
-        const alongX = Math.abs(rx) > 0.5;
-        field.addBox(bx, bz, alongX ? 2.1 : 0.72, alongX ? 0.72 : 2.1, 0,
-          { top: 2.63, nav: false, tag: 'prop' });
-      } else {
-        potSide(1);
+      for (const item of a.furniture || []) {
+        put(item.kind, item.x, 0, item.z, item.yaw);
+        if (item.collision.shape === 'circle') {
+          field.addCircle(item.x, item.z, item.collision.r,
+            { top: item.collision.top, nav: false, tag: 'prop' });
+        } else {
+          field.addBox(item.x, item.z, item.collision.w, item.collision.d, 0,
+            { top: item.collision.top, nav: false, tag: 'prop' });
+        }
       }
     }
 

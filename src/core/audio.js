@@ -1,6 +1,9 @@
 // Fully procedural WebAudio SFX + drone. No audio files ship with the build,
 // which keeps the APK small and avoids any third-party sample licensing.
 
+import { Capacitor } from '@capacitor/core';
+import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
+
 export class Audio {
   constructor() {
     this.ctx = null;
@@ -62,13 +65,27 @@ export class Audio {
     src.start();
   }
 
+  // Native-only haptic pulse. Guarded by isNativePlatform() rather than
+  // relying on @capacitor/haptics' web fallback, which throws when
+  // navigator.vibrate is unsupported (true on most desktop browsers, which
+  // is exactly where the GitHub Pages web build runs). The .catch() is a
+  // second line of defense in case a real device rejects the call too.
+  _haptic(fn) {
+    if (!this.enabled || !Capacitor.isNativePlatform()) return;
+    try { fn()?.catch(() => {}); } catch { /* never let haptics break gameplay */ }
+  }
+
   swing()      { this.noise({ gain: 0.13, decay: 0.13, filter: 2600, type: 'highpass' }); }
   hit(crit)    {
     this.tone({ freq: crit ? 320 : 220, type: 'square', gain: 0.16, decay: 0.1, sweep: crit ? 110 : 80 });
     this.noise({ gain: 0.14, decay: 0.09, filter: 1800 });
+    this._haptic(() => Haptics.impact({ style: crit ? ImpactStyle.Heavy : ImpactStyle.Medium }));
   }
   hurt()       { this.tone({ freq: 180, type: 'sawtooth', gain: 0.2, decay: 0.28, sweep: 60 }); }
-  dash()       { this.noise({ gain: 0.16, decay: 0.22, filter: 900, type: 'bandpass' }); }
+  dash()       {
+    this.noise({ gain: 0.16, decay: 0.22, filter: 900, type: 'bandpass' });
+    this._haptic(() => Haptics.impact({ style: ImpactStyle.Light }));
+  }
   skill()      { this.tone({ freq: 520, type: 'triangle', gain: 0.18, decay: 0.34, sweep: 1400 }); }
   nova()       {
     this.tone({ freq: 90, type: 'sine', gain: 0.3, decay: 0.7, sweep: 40 });
@@ -81,6 +98,7 @@ export class Audio {
   levelUp()    {
     [523, 659, 784, 1047].forEach((f, i) =>
       setTimeout(() => this.tone({ freq: f, type: 'triangle', gain: 0.2, decay: 0.35 }), i * 95));
+    this._haptic(() => Haptics.notification({ type: NotificationType.Success }));
   }
   gateClear()  {
     [392, 523, 659, 784, 1047].forEach((f, i) =>

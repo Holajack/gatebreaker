@@ -156,10 +156,17 @@ export const ARCHETYPES = {
   },
   greataxe: {
     // Two-handed, so it hangs closer to the body's centre line and pitches
-    // less: a haft angled hard forward reads as "carrying a shovel".
+    // less: a haft angled hard forward reads as "carrying a shovel". rz was
+    // 0.06 (matched to the greatsword) until an owner pass on the shipped
+    // build: a haft this close to dead vertical reads as a flagpole rather
+    // than a held weapon, even two-handed. 0.14 — a bit over double —
+    // measured against grip-check's bladeDir gives it clearly more lateral
+    // lean than the greatsword's 0.06 while staying well short of the
+    // one-handed axe's own bump below, which is the "two hands, still
+    // canted" read a held greataxe should have.
     name: 'Greataxe', feel: 'Slow, enormous, wide. You are committed the moment you press.',
     build: buildGreatweapon,
-    grip: { y: -0.02, z: 0.08, rx: 0.26, rz: 0.06 },
+    grip: { y: -0.02, z: 0.08, rx: 0.26, rz: 0.14 },
     anim: { lo: -2.30, hi: 2.40, twist: 0.42, twoHand: true, thrust: false, alternate: false },
     mass: 4.8,
   },
@@ -190,11 +197,19 @@ export const ARCHETYPES = {
   axe: {
     // RPG_SPEC weaponFamilies.axe: grip lifted from HELD_MODELS.axe — grunts
     // have carried Axe_small on this rig since the pack landed, so y/z/rx are
-    // measured numbers. One-handed, so it takes a small outboard rz like the
-    // sword's rather than hugging the centre line.
+    // measured numbers. rz was 0.08 — SMALLER than the sword's 0.10 despite
+    // the axe being the weapon whose head is heaviest and most off-axis, the
+    // one that should hang the LEAST like a flagpole of the one-handers. An
+    // owner pass on the shipped build called it out directly: "it shouldn't
+    // just be up and down, it should actually be somewhat sideways... that
+    // way it looks natural the way you're holding it." 0.22 (measured with
+    // grip-check's bladeDir against the packed Axe_small + its 0.14 forearm
+    // tilt) puts the blade's lateral offset clearly past the sword's, which
+    // is the point — a hand axe should read as more canted than a sword,
+    // not less.
     name: 'Hand Axe', feel: 'Mid speed, mid reach, and a hook — nothing it touches gets to leave.',
     build: buildHandAxe,
-    grip: { y: -0.02, z: 0.06, rx: 0.34, rz: 0.08 },
+    grip: { y: -0.02, z: 0.06, rx: 0.34, rz: 0.22 },
     anim: { lo: -1.80, hi: 2.05, twist: 0.30, twoHand: false, thrust: false, alternate: false },
     mass: 2.1,
   },
@@ -1478,8 +1493,15 @@ export const HELD_MODELS = {
   // and -0.28 has begun to bury the guard again. Measure the render, not the
   // pivot, when the two disagree.
   bigsword: { item: 'Sword_big', scale: 0.52, tilt: 0.12, lift: -0.22, grip: { y: -0.02, z: 0.07, rx: 0.30 } },
-  axe: { item: 'Axe_small', scale: 0.62, tilt: 0.14, lift: 0.12, grip: { y: -0.02, z: 0.06, rx: 0.34 } },
-  greataxe: { item: 'Axe_Double', scale: 0.62, tilt: 0.10, lift: 0.22, grip: { y: -0.02, z: 0.08, rx: 0.26 } },
+  // grip.rz on axe/greataxe is new: every other entry in this table leans on
+  // `tilt` alone (forearm clearance, not a grip choice) and stayed at rz 0,
+  // which is exactly what read as "up and down" on the shipped build's axe.
+  // ARCHETYPES.axe/greataxe picked up the same rz bump for the player's held
+  // weapon — matching it here keeps a grunt's or the tribal creature's axe
+  // (both go through buildHeldWeapon, not equipWeapon) canted the same way
+  // instead of looking correct in one hand and vertical in the other.
+  axe: { item: 'Axe_small', scale: 0.62, tilt: 0.14, lift: 0.12, grip: { y: -0.02, z: 0.06, rx: 0.34, rz: 0.22 } },
+  greataxe: { item: 'Axe_Double', scale: 0.62, tilt: 0.10, lift: 0.22, grip: { y: -0.02, z: 0.08, rx: 0.26, rz: 0.14 } },
   hammer: { item: 'Hammer_Double', scale: 0.60, tilt: 0.10, lift: 0.22, grip: { y: -0.03, z: 0.08, rx: 0.26 } },
   dagger: { item: 'Dagger', scale: 0.55, tilt: 0.14, lift: -0.09, grip: { y: 0.02, z: 0.07, rx: 0.50 } },
   // A bow is carried ACROSS the body, not raised, so it keeps the shallowest

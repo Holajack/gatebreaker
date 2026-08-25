@@ -18,7 +18,8 @@
 
 import {
   generateLayout, layoutStats, LAYOUT_PARAMS, COVER_KINDS, COVER_MIN_TOP,
-  bossAnchor, exitAnchor,
+  bossAnchor, exitAnchor, floodFillRoom, doorReachableFrom,
+  NAV_BODY_RADIUS, NAV_FILL_STEP,
 } from '../src/world/dungeonlayout.js';
 import { ObstacleField } from '../src/world/obstacles.js';
 import { mulberry32 } from '../src/core/rng.js';
@@ -301,14 +302,60 @@ function checkLayout(rank, seed, layout, params) {
 // obstacles.js is deliberately THREE-free (same discipline as dungeonlayout),
 // so this all runs in plain Node at soak speed.
 
-const BODY_RADIUS = 0.45;      // player/enemy collision radius, metres
-const FILL_STEP = 0.5;         // flood-fill lattice pitch, metres
+// Player/enemy collision radius and flood-fill lattice pitch are imported
+// (NAV_BODY_RADIUS / NAV_FILL_STEP) rather than redefined here — buildCover's
+// OWN runtime connectivity guarantee (dungeonlayout.js, see the CONNECTIVITY
+// GUARANTEE block above its buildCover) uses the exact same two numbers via
+// the exact same floodFillRoom(), so this regression test and the code it is
+// regression-testing can never quietly drift apart on what "fits through a
+// gap" means.
+//
 // LOS floor: measured over 8 seeds x 2 ranks the boss chambers block 30.7-45.3%
 // of random sightlines (mean E 37.0 / D 39.2) against 0.0% before this wave.
 // 15% is a regression tripwire well under the observed floor, not a target.
 const LOS_FLOOR_BOSS = 0.15;
 
-/** The collision field a Dungeon build registers, minus the THREE half. */
+// buildCover's connectivity guarantee keeps 100% of the floor its OWN cover
+// pieces could plausibly cut off reachable — that is the actual bug this
+// wave fixes, and it is asserted with zero tolerance below (per-door
+// reachability) and via this same ratio for the room as a whole. This small
+// allowance covers a SEPARATE, pre-existing, much smaller effect that
+// including decor.props in the field (this wave, see coverField() above) now
+// makes newly visible: buildDecor's prop clusters (crate/barrel/pot, corner-
+// anchored — see buildDecor's "Prop clusters" comment) carry no clearance
+// rule against nearby doors at all (unlike buildCover's own cover, which
+// keeps doorClear/wallInset/lane), so a cluster can occasionally pinch a
+// sliver of an otherwise-open corner into its own tiny, doorless pocket.
+// buildCover cannot prune what it never placed, so this is NOT the bug this
+// wave fixes and is out of this fix's scope — but it is real, so it is
+// bounded and regression-guarded here rather than silently swallowed.
+// Measured over 400 seeds (200/rank, E+D): 66 of ~1,600 room checks hit this,
+// worst case 4 of 5,193 cells. A genuine chokepoint (a corridor, a scripted
+// arena feature) cuts off HUNDREDS of cells at minimum, so this tolerance
+// cannot mask one — and the per-door assertion right below has NO tolerance
+// at all, because a door is the invariant that actually matters.
+const STRAY_POCKET_TOLERANCE = 8;   // cells at FILL_STEP 0.5 (~2 m^2)
+
+// Mirrors dungeon.js's own (unexported, THREE-adjacent — see this file's own
+// "plain Node" header) DRESS_LIMITS.columns / .clutter: the per-role
+// draw-call truncation that decides which columns/props actually DRAW and so
+// actually carry collision. This test's job is what a Dungeon build really
+// registers (its own docstring, below), not a conservative superset, so it
+// has to mirror the truncation exactly rather than skip it. Move either
+// number in dungeon.js, move its mirror here in the same edit.
+const RENDER_COLUMNS_CAP = 20;
+const RENDER_CLUTTER_CAP = 16;
+
+/**
+ * The collision field a Dungeon build registers, minus the THREE half —
+ * walls, doors, and EVERY decor piece that carries real collision at render
+ * time (dungeon.js _buildDressing): columns, crate/barrel/pot props, alcove
+ * furniture (bookcase or pot, whichever buildDecor decided — see its alcove
+ * block), and the placed cover. Props/alcoves joined the field in the same
+ * wave that gave buildCover its own connectivity guarantee against them
+ * (the reported pillar+bookcase softlock): before that, this test could not
+ * have seen the bug it now regression-tests.
+ */
 function coverField(layout) {
   const f = new ObstacleField({ stepOver: 0.4 });
   for (const run of layout.wallRuns) {
@@ -319,8 +366,37 @@ function coverField(layout) {
   for (const d of layout.doors) {
     f.addBox(d.x, d.z, d.w, d.d, d.rot, { top: 0, nav: false, tag: 'membrane' });
   }
-  for (const c of layout.decor.columns.slice(0, 20)) {
+  for (const c of layout.decor.columns.slice(0, RENDER_COLUMNS_CAP)) {
     f.addCircle(c.x, c.z, 0.34, { nav: false, tag: 'column' });
+  }
+  // crate/barrel/pot match dungeon.js's registration exactly, including its
+  // clutter counter: statue/candles bypass that counter entirely (always
+  // drawn, never collided — the shrine's real position is computed at render
+  // time off its room's door, which is why it is not modelled here either;
+  // see dungeonlayout.js's buildStaticConnectivityField for the same call),
+  // so only crate/barrel/pot count toward the cap, in array order.
+  let clutter = 0;
+  for (const p of layout.decor.props) {
+    if (p.kind === 'statue' || p.kind === 'candles') continue;
+    if (clutter >= RENDER_CLUTTER_CAP) continue;
+    clutter++;
+    if (p.kind === 'crate') f.addCircle(p.x, p.z, 0.4, { top: 0.4, nav: false, tag: 'prop' });
+    else if (p.kind === 'barrel') f.addCircle(p.x, p.z, 0.4, { top: 1.05, nav: false, tag: 'prop' });
+    else if (p.kind === 'pot') f.addCircle(p.x, p.z, 0.3, { top: 0.4, nav: false, tag: 'prop' });
+  }
+  // Alcove furniture is NOT capped again here: buildDecor already truncates
+  // which alcoves carry `furniture` to ALCOVE_LIMITS.count (dungeonlayout.js)
+  // — the exact same number dungeon.js's DRESS_LIMITS.alcoves is defined
+  // from — so `a.furniture` is already empty past that window.
+  for (const a of layout.decor.alcoves) {
+    for (const item of a.furniture || []) {
+      if (item.collision.shape === 'circle') {
+        f.addCircle(item.x, item.z, item.collision.r, { top: item.collision.top, nav: false, tag: 'prop' });
+      } else {
+        f.addBox(item.x, item.z, item.collision.w, item.collision.d, 0,
+          { top: item.collision.top, nav: false, tag: 'prop' });
+      }
+    }
   }
   for (const c of layout.decor.cover) {
     const k = COVER_KINDS[c.kind];
@@ -365,46 +441,11 @@ function losBlocked(field, room, rnd, n) {
   return drawn ? blocked / drawn : 0;
 }
 
-/** Open cells reachable from the room's centre-most open cell / open cells. */
-function connectivity(field, room) {
-  const nx = Math.round(room.w / FILL_STEP);
-  const nz = Math.round(room.d / FILL_STEP);
-  const open = new Uint8Array(nx * nz);
-  let total = 0;
-  let seed = -1;
-  let seedD = Infinity;
-  for (let j = 0; j < nz; j++) {
-    for (let i = 0; i < nx; i++) {
-      const x = room.x + (i + 0.5) * FILL_STEP;
-      const z = room.z + (j + 0.5) * FILL_STEP;
-      // feetY 0 + stepOver 0.4: what a BODY can stand in, so kerb-height
-      // rubble correctly counts as walkable and cover correctly does not.
-      if (field.blocked(x, z, BODY_RADIUS, 0.4, 0)) continue;
-      open[i + j * nx] = 1;
-      total++;
-      const d = Math.hypot(x - room.centre.x, z - room.centre.z);
-      if (d < seedD) { seedD = d; seed = i + j * nx; }
-    }
-  }
-  if (seed < 0) return { reached: 0, total: 0 };
-  const seen = new Uint8Array(nx * nz);
-  seen[seed] = 1;
-  const q = [seed];
-  for (let qi = 0; qi < q.length; qi++) {
-    const ci = q[qi] % nx;
-    const cj = (q[qi] / nx) | 0;
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const ni = ci + dx;
-      const nj = cj + dz;
-      if (ni < 0 || nj < 0 || ni >= nx || nj >= nz) continue;
-      const k = ni + nj * nx;
-      if (!open[k] || seen[k]) continue;
-      seen[k] = 1;
-      q.push(k);
-    }
-  }
-  return { reached: q.length, total };
-}
+// Open-cell flood fill from the room's centre-most open cell is
+// floodFillRoom() (dungeonlayout.js) — imported, not reimplemented, so this
+// test and buildCover's own runtime connectivity guarantee can never
+// silently drift onto two different definitions of "reachable". See that
+// function's docstring for the feetY/stepOver rationale.
 
 function checkCover(rank, seed, layout, params, deep) {
   const cfg = params.cover;
@@ -497,16 +538,38 @@ function checkCover(rank, seed, layout, params, deep) {
   ok(los >= LOS_FLOOR_BOSS,
     `${tag}: boss chamber blocks only ${(los * 100).toFixed(1)}% of sightlines (floor ${LOS_FLOOR_BOSS * 100}%)`);
 
-  // --- traversability (rule (b)) -------------------------------------------
-  // The expensive one, so it is strided: `deep` seeds fill every room, the
-  // rest fill the boss chamber (the densest room and the only one with a
-  // scripted composition).
-  const fillRooms = deep ? layout.rooms : [boss];
-  for (const r of fillRooms) {
+  // --- traversability (rule (b)) + the pillar+bookcase softlock -----------
+  // Every room, every seed — this USED to be strided (deep seeds only, 1 in
+  // 5) because a full flood fill over every room was ~4x the soak's runtime.
+  // It no longer can be: buildCover's own runtime connectivity guarantee
+  // (dungeonlayout.js) now does this exact check on every generated layout in
+  // production, on the same collision picture (walls + doors + decor columns/
+  // props/alcove furniture + cover) coverField() builds here — a strided soak
+  // is not testing what actually ships. The failure mode this specifically
+  // regression-tests (a pillar and a wall-mounted bookcase, each placed by a
+  // system with no idea the other exists, jointly narrowing a passage below
+  // body width) is a corridor-to-door pinch, not a room-wide floor collapse —
+  // which is exactly what per-door reachability catches and the coarser
+  // reached/total ratio below does not, since one pinched door can leave the
+  // rest of a big room's ratio looking fine.
+  for (const r of layout.rooms) {
     if (r.kind === 'entry') continue;
-    const conn = connectivity(field, r);
-    ok(conn.total > 0 && conn.reached === conn.total,
-      `${tag}: room ${r.id} (${r.kind}) walkable floor is ${conn.total - conn.reached} of ${conn.total} cells cut off by cover`);
+    const fill = floodFillRoom(field, r);
+    const cutOff = fill.total - fill.reached;
+    ok(fill.total > 0 && cutOff <= STRAY_POCKET_TOLERANCE,
+      `${tag}: room ${r.id} (${r.kind}) walkable floor is ${cutOff} of ${fill.total} cells cut off `
+      + `by cover (tolerance ${STRAY_POCKET_TOLERANCE} — see STRAY_POCKET_TOLERANCE)`);
+    // d.roomA === r.id only: r.doors carries BOTH ends of every corridor
+    // touching this room (its own wall opening AND the far room's, per the
+    // WALL-RUN/DOOR header comment in dungeonlayout.js), and the far one can
+    // sit outside this room's own footprint entirely — see buildCover's
+    // `ownDoors` for the same filter, for the same reason.
+    const ownDoors = r.doors.map((id) => layout.doors[id]).filter((d) => d && d.roomA === r.id);
+    for (const d of ownDoors) {
+      ok(doorReachableFrom(fill, r, d),
+        `${tag}: room ${r.id} (${r.kind}) door ${d.id} is cut off from the room's open floor `
+        + '(THE pillar+bookcase softlock class — buildCover should have pruned this)');
+    }
   }
 
   // --- is the boss chamber the BEST-dressed room, or just the biggest? -----
@@ -809,7 +872,6 @@ for (const rank of RANKS) {
       bossLos: { min: Infinity, max: -Infinity, sum: 0 },
       bossTotalCells: 0,
       samples: 0,
-      deepFills: 0,
       // boss-vs-ordinary-room dressing, deep seeds only (see checkCover)
       cmp: { n: 0, bossD: 0, peerD: 0, bossL: 0, peerL: 0 },
     },
@@ -820,16 +882,17 @@ for (const rank of RANKS) {
     const seed = ((i * 2654435761) ^ 0x1234abcd) >>> 0;
     const layout = generateLayout({ rank, seed });
     checkLayout(rank, seed, layout, params);
-    // Every-room flood fill on every 5th seed; boss chamber on all of them.
-    // Full stride costs ~4x the soak's runtime for a check whose failure mode
-    // is structural, not seed-rare.
+    // `deep` now only gates the boss-vs-ordinary-room density/sightline
+    // COMPARISON below (another N room-fills of random chords) — the
+    // room-wide flood fill + per-door reachability check runs on every seed
+    // regardless (see checkCover's traversability block for why it had to
+    // stop being strided).
     const deep = i % 5 === 0;
     const cover = layout.kind === 'crawl'
       ? checkCover(rank, seed, layout, params, deep) : null;
     if (cover) {
       const cs = agg.cover;
       cs.samples++;
-      if (deep) cs.deepFills++;
       cs.bossTotalCells = cover.bossTotalCells;
       for (const key of ['pieces', 'bossPieces', 'bossBlockedCells', 'bossLos']) {
         cs[key].min = Math.min(cs[key].min, cover[key]);
@@ -927,7 +990,7 @@ for (const rank of RANKS) {
       + `boss blocked cells ${c.bossBlockedCells.min}-${c.bossBlockedCells.max}/${c.bossTotalCells} `
       + `(mean ${c.bossBlockedCells.mean})  `
       + `boss sightlines blocked ${c.bossLos.min}-${c.bossLos.max}% (mean ${c.bossLos.mean}%)  `
-      + `[${c.deepFills} all-room flood fills]`);
+      + `[${c.samples} seeds x every room flood-filled + every door reachability-checked]`);
     if (c.cmp?.n) {
       console.log(`     boss vs ordinary room, per unit area: cells blocked `
         + `${c.cmp.bossDensityPct}% vs ${c.cmp.peerDensityPct}%, sightlines stopped `

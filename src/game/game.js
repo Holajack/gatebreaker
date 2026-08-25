@@ -5468,20 +5468,28 @@ export class Game {
   }
 
   /**
-   * Auto-equip on upgrade, stash otherwise. `score` is rollWeapon's single
-   * comparable number, so this never needs to know what an affix is.
+   * Auto-equip ONLY when unarmed (this.weapon is null/falsy) — the one case
+   * where a drop must fill the hand, because a player can't fight barehanded.
+   * Every other pickup goes STRAIGHT to the stash, same policy as _takeArmor
+   * right below and for the same reason: `score` is rollWeapon's single
+   * comparable DPS number, but it has no idea whether the player is running
+   * an agi build or a str/vit build, so a "better DPS" heavy weapon can be an
+   * actual downgrade for the build the player chose. Silently swapping it
+   * into their hand mid-run changes combat numbers they never agreed to.
+   * Equipping stays a deliberate act through the inventory panel's
+   * compare/equip flow, which shows the delta strip before committing.
    */
   _takeWeapon(w) {
     if (!w) return;
     const held = this.weapon;
-    if (!held || w.score > held.score) {
+    if (!held) {
       this.equip(w);
       this.ui.toast(`${w.name.toUpperCase()}  ·  ${w.rarityName}`, 'gold');
     } else {
       this.stash.unshift(w);
       if (this.stash.length > STASH_LIMIT) this.stash.length = STASH_LIMIT;
       this._persistLoadout();
-      this.ui.toast(`STASHED  ${w.name.toUpperCase()}`);
+      this.ui.toast(`STASHED  ${w.name.toUpperCase()}  ·  ${w.rarityName}`, w.rarity === 'legendary' || w.rarity === 'epic' ? 'gold' : undefined);
     }
   }
 
