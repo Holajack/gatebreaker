@@ -305,7 +305,10 @@ export class StatusTable {
 // biome/fx palette (config.js BIOMES accents) so a tinted enemy still sits in
 // the scene: flame = emberfall's 0xff6b2b, frost = deepglass's 0x66e0ff,
 // storm = the dash/nova 0x9dd8ff.
-const TINT_TARGETS = {
+// Exported: THE canonical per-element palette. game.js's conjured arrows (and
+// anything else needing an element's colour) read this instead of minting the
+// two-home hardcodes this file's header forbids.
+export const TINT_TARGETS = {
   pyre: 0xff6b2b,
   flame: 0xff6b2b,
   rime: 0x66e0ff,

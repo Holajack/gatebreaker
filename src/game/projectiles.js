@@ -98,6 +98,7 @@ export class ProjectilePool {
         knock: 0, stagger: 0,
         kind: 'bolt',
         stuck: false, stuckT: 0,
+        element: null,
         born: 0,
       });
     }
@@ -179,7 +180,7 @@ export class ProjectilePool {
    */
   spawn({
     from, dir, vy = 0, g = 0, speed = 16, damage = 0, color = 0xffffff,
-    life = 4, kind = 'bolt', knock = 0, stagger = 0,
+    life = 4, kind = 'bolt', knock = 0, stagger = 0, element = null,
   }) {
     let rec = this._free.pop();
     if (!rec) {
@@ -200,13 +201,22 @@ export class ProjectilePool {
     rec.stagger = stagger;
     rec.stuck = false;
     rec.stuckT = 0;
+    // Records are REUSED — stamp element on every spawn or a plain arrow
+    // inherits a previous life's magic (same trap rec.staff already guards).
+    rec.element = element;
     rec.born = this._births++;
 
     const mesh = rec.mesh;
     if (kind === 'arrow') {
       const { geo, mat } = this._arrowAssets();
       mesh.geometry = geo;
-      mesh.material = mat;
+      // A CONJURED arrow (element stamped) keeps the arrow silhouette but
+      // swaps the wooden pack material for the per-colour solid the bolts
+      // already cache (_boltMat) — every pool mesh sits on the glow layer
+      // (constructor), so the tint blooms and the shaft reads as made of
+      // light, not wood. No new material system, no new programs: MeshBasic
+      // per colour, bounded by the same Map the bolts bound.
+      mesh.material = element ? this._boltMat(color) : mat;
       // Pack metre mismatch, same 0.62 the held Bow_Wooden uses.
       mesh.scale.setScalar(0.62);
       this._orientArrow(rec);
@@ -291,8 +301,18 @@ export class ProjectilePool {
       const gone = pr.life <= 0 || Math.hypot(pr.pos.x, pr.pos.z) > ctx.worldRadius + 2;
       const solid = !gone && ctx.obstacleField?.blocked(pr.pos.x, pr.pos.z, 0.25, 0, pr.pos.y);
       if (pr.kind === 'arrow') {
-        // Arrows STICK where they land — half a step back along the flight so
-        // the head reads as embedded rather than the whole shaft swallowed.
+        // A conjured arrow DISSOLVES where a wooden one sticks: magic made of
+        // light has no shaft to leave in the floor, and stuck wooden scenery
+        // was exactly the fiction-breaker the magic-bow rework removes. The
+        // release funnels through onRemove ('dissolve'), where game.js pops
+        // the element-coloured burst. Backward loop — releaseAt(i) is safe.
+        if (pr.element && (solid || pr.pos.y <= 0.02)) {
+          this.releaseAt(i, 'dissolve');
+          continue;
+        }
+        // Wooden arrows STICK where they land — half a step back along the
+        // flight so the head reads as embedded rather than the whole shaft
+        // swallowed.
         if (solid || pr.pos.y <= 0.02) {
           if (pr.pos.y < 0.02) pr.pos.y = 0.02;
           pr.pos.addScaledVector(pr.dir, -pr.speed * dt * 0.5);

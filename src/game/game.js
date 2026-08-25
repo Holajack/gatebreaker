@@ -92,6 +92,7 @@ import {
 // live in archon.js so step 10's STORM cannot drift from them.
 import {
   StatusTable, ArchonPool, ResourceMeter, tintForStacks, ARCHON_PATHS,
+  TINT_TARGETS,
 } from './archon.js';
 // Ground telegraphy for the masteries (CLASSES_SPEC step 4): RESIDUE fields
 // and READING arcs share one pooled channel, allocated lazily on first use so
@@ -492,6 +493,12 @@ export class Game {
       onRemove: (rec, reason) => {
         if (rec.kind === 'bolt' && reason !== 'clear') {
           this.fx.burst(rec.pos, 10, rec.color, { speed: 5, up: 2, life: 0.35 });
+        }
+        // Conjured arrows dissolve wherever they end — wall, floor, flesh, or
+        // a pool cycle — as a small pop of their element. Wooden arrows still
+        // stick silently; 'clear' (gate transition) stays a non-event.
+        if (rec.kind === 'arrow' && rec.element && reason !== 'clear') {
+          this.fx.burst(rec.pos, 8, rec.color, { speed: 4, up: 1.5, life: 0.3 });
         }
         // Staff bolts ride the pool's ARROW branch (it owns the enemy torso
         // test and the vy/g arc) but a magic bolt BURSTS where an arrow
@@ -2630,8 +2637,7 @@ export class Game {
           b.t = drawFull;
           b.heldT = drawFull;
           b.fullCued = true;
-          this.fx.ring(p.pos, 0xffe2a8, 1.5, 0.22);
-          this.audio.tone({ freq: 1500, type: 'sine', gain: 0.05, decay: 0.08 });
+          this._bowCue(p);
         }
         // Any attack input draws the weapon — same policy as _tryAttack.
         if (weaponStance(p.mesh) === 'sheathed') { this._stanceHold = 0; this.setStance('drawn'); }
@@ -2648,10 +2654,9 @@ export class Game {
     if (held) b.heldT = b.t;
     if (!b.fullCued && b.heldT >= drawFull) {
       // Full-draw cue: the one non-numeric signal that the hold has bought
-      // everything it can. Ring + tick, no new VFX asset.
+      // everything it can.
       b.fullCued = true;
-      this.fx.ring(p.pos, 0xffe2a8, 1.5, 0.22);
-      this.audio.tone({ freq: 1500, type: 'sine', gain: 0.05, decay: 0.08 });
+      this._bowCue(p);
     }
     if (!held && b.t >= BOW.drawMin) {
       b.drawing = false;
@@ -2706,6 +2711,36 @@ export class Game {
     return best;
   }
 
+  /**
+   * The full-draw / refund cue. Used to be fx.ring at the player's FEET —
+   * which read as a ground shockwave, not a bow-side signal (audit). Now the
+   * atlas cast rune at arrow launch height, tinted the conjured element's
+   * colour, plus the same tick. _bowFrom is fire-time scratch; the fire that
+   * follows re-sets it before reading.
+   */
+  _bowCue(p) {
+    const element = this._arrowElement();
+    _bowFrom.set(p.pos.x, BOW.launchY, p.pos.z);
+    this.fx.flash(_bowFrom, 'magic_01', {
+      size: 0.6, life: 0.2, color: element ? TINT_TARGETS[element] : 0xffe2a8,
+    });
+    this.audio.tone({ freq: 1500, type: 'sine', gain: 0.05, decay: 0.08 });
+  }
+
+  /**
+   * THE CONJURED ARROW's element. A bow never carries ammo — every arrow is
+   * conjured — and an Archon's arrows are conjured OF their element: the
+   * status already flows (every arrow hit passes _damageEnemy's archon
+   * funnel), this makes it VISIBLE. Only paths with a TINT_TARGETS entry get
+   * a colour (flame/frost/storm); beast/shadow/sovereign arrow identity is a
+   * deferred design decision (audit), and the unascended conjure is the
+   * neutral arcane gold the bow has always spoken in.
+   */
+  _arrowElement() {
+    const k = this._archonPath?.key;
+    return (k && TINT_TARGETS[k] !== undefined) ? k : null;
+  }
+
   /** Loose one arrow at draw fraction `f` (0 = min draw, 1 = full). */
   _fireBow(w, p, f) {
     const speed = BOW.speedMin + f * (BOW.speedFull - BOW.speedMin);
@@ -2753,15 +2788,23 @@ export class Game {
       BOW.launchY,
       p.pos.z + _bowDir.z * 0.45,
     );
+    const element = this._arrowElement();
+    const arrowColor = element ? TINT_TARGETS[element] : 0xffe2a8;
     const rec = this.pool.spawn({
       from: _bowFrom, dir: _bowDir, vy, g: BOW.gravity, speed,
-      damage: dmg, life: BOW.life, kind: 'arrow', color: 0xffe2a8,
+      damage: dmg, life: BOW.life, kind: 'arrow', color: arrowColor,
       knock: BOW.knock * (w.knockMul || 1), stagger: BOW.stagger,
+      element,
     });
     // Records are reused: clear the staff stamps a previous life may carry,
     // or a plain arrow would inherit homing and an arcane impact. fullDraw
     // marks the shot for GALESTING ASCENDANT's refund-on-kill.
     if (rec) { rec.staff = false; rec.staffTarget = null; rec.fullDraw = f >= 1 - 1e-6; }
+    // THE CONJURE MOMENT: the arrow materializes at the launch point as the
+    // string lets go — the atlas cast rune, element-tinted, at arrow height.
+    // (The nocked-arrow-in-hand during the draw is Wave D's animation stage;
+    // it needs the two-rig socket work and a draw pose.)
+    this.fx.flash(_bowFrom, 'magic_01', { size: 0.85, life: 0.22, color: arrowColor });
 
     // Recovery: the machine's cd is the shared gate the HUD already reads.
     p.attack.cd = w.cd;
