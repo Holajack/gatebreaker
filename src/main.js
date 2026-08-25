@@ -18,6 +18,7 @@ import { MapUI } from './ui/mapui.js';
 import { SETTLEMENTS } from './world/settlements.js';
 import { DialogUI } from './ui/dialogui.js';
 import { JournalUI } from './ui/journalui.js';
+import { SettingsUI } from './ui/settingsui.js';
 import * as Weapons from './game/weapons.js';
 
 const canvas = document.getElementById('scene');
@@ -165,6 +166,35 @@ game.dialog = new DialogUI();
 game.journalUI = new JournalUI({ game });
 game.journalUI.injectHudButton();
 
+// Settings (Wave G): constructed EARLY-EFFECTIVE — the constructor applies
+// stored device settings (sound, haptics, pinned tier) before any panel
+// opens. Open paths: a SETTINGS button injected into the pause panel and the
+// title screen (both exist in index.html already; injecting from here keeps
+// the markup untouched, the map/journal button pattern).
+game.settingsUI = new SettingsUI({ game, ui });
+for (const [hostId, beforeId] of [['pause', 'btnQuit'], ['title', null]]) {
+  const host = document.getElementById(hostId)?.querySelector('.panel') || document.getElementById(hostId);
+  if (!host || host.querySelector('.btn-settings')) continue;
+  const b = document.createElement('button');
+  b.className = 'btn ghost btn-settings';
+  b.type = 'button';
+  b.textContent = 'SETTINGS';
+  b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    audio.ui();
+    // From pause: hide the panel and put it back on close, the inventory's
+    // documented return-path pattern (a hidden pause with no way back is the
+    // soft-lock class main.js's own comments name).
+    const fromPause = hostId === 'pause' && !document.getElementById('pause')?.classList.contains('hidden');
+    if (fromPause) ui.hide('pause');
+    game.settingsUI.show();
+    if (fromPause) game.settingsUI.onHide = () => { game.settingsUI.onHide = null; ui.showPause(); };
+  });
+  const before = beforeId ? document.getElementById(beforeId) : null;
+  if (before && before.parentElement === host) host.insertBefore(b, before);
+  else host.appendChild(b);
+}
+
 // Three ways in, one of them a thumb: the HUD button, the pause panel and
 // desktop's I key. Delegated from document so the HUD button works in the city
 // and in a gate without ui.js needing to know the panel exists.
@@ -256,6 +286,7 @@ function handleBack() {
   // losing the line is the one thing a story surface must never do.
   if (game.dialog?.open) { game.dialog.advance(); return; }
   if (game.journalUI?.open) { game.journalUI.hide(); return; }
+  if (game.settingsUI?.open) { game.settingsUI.hide(); return; }
   // THE REACH's offer (CLASSES_SPEC step 7) rides above the results panel;
   // back means NOT YET — decline, consume nothing, the offer returns on the
   // next eligible S clear.

@@ -41,6 +41,11 @@ import {
   tickDaily, claimDaily, dailyState, DAILY_TARGET,
 } from './progression.js';
 import { DAILY_CONTRACT_POINTS } from './config.js';
+// The quest ledger (Wave C): events ride the game's existing single funnels
+// — gate clear, boss kill, Bind commit, level crossing — through ONE
+// dispatcher (_questEvent below). No quest logic ever lives at a call site.
+import { onEvent as onQuestEvent, questXp } from './quests.js';
+import { t } from './strings.js';
 // The ONE canonical rank-colour table (audit: colour drift comes from second
 // homes). city.js does not import game.js, so this adds no cycle.
 import { PORTAL_COLORS } from '../world/city.js';
@@ -2077,6 +2082,10 @@ export class Game {
     // drops it — six bosses, six families, no ambiguity about where to go.
     if (e.isBoss && this.gate?.boss && SIGIL_LABEL[this.gate.boss]) {
       grantSigil(this.save, this.gate.boss);
+      // The six named bosses are the campaign's chapter markers (Wave C):
+      // the ledger hears about every named kill at the one site that names
+      // them.
+      this._questEvent({ type: 'bossKilled', boss: this.gate.boss });
       this.ui.toast(`${SIGIL_LABEL[this.gate.boss]} CLAIMED`, 'gold');
     }
 
@@ -2498,6 +2507,7 @@ export class Game {
       // own moment ON TOP of the level-up: a second, longer dilation, a
       // distinct toast, and a big ring in the NEW grade's portal colour. The
       // full ceremony screen is Wave G's; this makes the beat exist at all.
+      this._questEvent({ type: 'levelReached', level: this.save.level });
       const fromRank = rankOf(fromLevel);
       const toRank = rankOf(this.save.level);
       if (fromRank !== toRank) {
@@ -3632,7 +3642,12 @@ export class Game {
     // SHADOW affinity (resonanceReading: +1 per SUCCESSFUL Bind extraction).
     // Failures teach nothing about the player's development — the counter
     // reads commitment to the army, and a resisted corpse is not an army.
-    if (raised > 0) bumpAffinity(this.save, 'shadow', raised);
+    if (raised > 0) {
+      bumpAffinity(this.save, 'shadow', raised);
+      // One event per shadow raised (Wave C): 'THINGS THAT DO NOT STAY
+      // DOWN' counts Binds, and a triple Bind is three of them.
+      for (let q = 0; q < raised; q++) this._questEvent({ type: 'bound', creature: 'shadow' });
+    }
 
     this.audio.bind();
     this.fx.ring(p.pos, 0x35e6ff, 14, 0.7);
@@ -6634,6 +6649,41 @@ export class Game {
   }
 
   // --------------------------------------------------------- end states
+  /**
+   * ONE dispatcher for quest events (Wave C). Completions pay curve-sized XP
+   * through gainXp (ash parity — the one grant path) and fire their story
+   * beat: the dialogue overlay when the fight is over, the toast tier while
+   * one is live (a line you cannot stop to read is a line lost).
+   * _questDepth caps chain reactions (a completion's XP crossing a level
+   * fires levelReached, which may complete another quest) — Act I has no
+   * such chain, but the cap makes the recursion structurally finite.
+   */
+  _questEvent(evt) {
+    this._questDepth = (this._questDepth || 0) + 1;
+    if (this._questDepth > 4) { this._questDepth--; return; }
+    const changes = onQuestEvent(this.save, evt);
+    for (const ch of changes) {
+      if (ch.completed) {
+        this.ui.toast(t('quest.complete', { title: ch.quest.title }), 'gold');
+        this.gainXp(questXp(ch.quest));
+        if (ch.quest.beat) {
+          const line = t(ch.quest.beat);
+          if (this.state !== 'playing' && this.dialog) {
+            this.dialog.show({ speaker: 'THE FIRST VOICE', lines: [line] });
+          } else {
+            this.ui.toast(line, 'gold');
+          }
+        }
+      } else if (ch.quest.objective.count > 1) {
+        this.ui.toast(t('quest.advanced', {
+          title: ch.quest.title, progress: ch.progress, count: ch.quest.objective.count,
+        }));
+      }
+    }
+    if (changes.length) this.onSave();
+    this._questDepth--;
+  }
+
   _clearGate() {
     this.state = 'over';
     this.audio.music(false);
@@ -6656,6 +6706,7 @@ export class Game {
     // nothing from a claim button except a tap between the player and their
     // reward. dailyKey is local-device-date; clock-rolling mints +3/day and
     // that is an accepted cost of full offline (flagged in the audit).
+    this._questEvent({ type: 'gateCleared', rank, wild: Boolean(this._wildRun) });
     const ledgerDone = tickDaily(this.save);
     let ledgerRow;
     if (ledgerDone && claimDaily(this.save)) {

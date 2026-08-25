@@ -188,5 +188,8 @@ export class SettingsUI {
   hide() {
     this._root?.classList.add('hidden');
     document.body.classList.remove('gb-settings');
+    // Return-path hook (main.js sets it when opening FROM the pause panel,
+    // clears it inside the callback — the inventory's onClose pattern).
+    this.onHide?.();
   }
 }
