@@ -15,7 +15,12 @@ import {
 import {
   grantXp, shadowFieldCapacity, extractionChance,
   MAX_EXTRACT_ATTEMPTS, CORPSE_WINDOW,
+  tickDaily, claimDaily, dailyState, DAILY_TARGET,
 } from './progression.js';
+import { DAILY_CONTRACT_POINTS } from './config.js';
+// The ONE canonical rank-colour table (audit: colour drift comes from second
+// homes). city.js does not import game.js, so this adds no cycle.
+import { PORTAL_COLORS } from '../world/city.js';
 import { ashForXp, grantAsh } from './shop.js';
 import { ensureEquipment } from '../core/save.js';
 import {
@@ -2323,6 +2328,20 @@ export class Game {
       // Brief time dilation so a level-up registers as an event rather than a
       // toast you were too busy fighting to read.
       this.levelUpDilation = 0.5;
+      // RANK-UP CEREMONY (Wave F): rankOf transitions used to be silent label
+      // changes — the audit's "meaningful level-ups" gap. A grade crossing is
+      // the game's biggest progression beat short of ascension, so it gets its
+      // own moment ON TOP of the level-up: a second, longer dilation, a
+      // distinct toast, and a big ring in the NEW grade's portal colour. The
+      // full ceremony screen is Wave G's; this makes the beat exist at all.
+      const fromRank = rankOf(fromLevel);
+      const toRank = rankOf(this.save.level);
+      if (fromRank !== toRank) {
+        const rankColor = PORTAL_COLORS?.[toRank] ?? 0xffc24b;
+        this.fx.ring(this.player.pos, rankColor, 16, 1.4);
+        this.ui.toast(`YOU ASSAY AS ${toRank}-GRADE NOW`, 'gold');
+        this.levelUpDilation = 0.9;
+      }
     }
     // Persist XP as it is earned, not only on level-up: Android kills
     // backgrounded apps and everything since the last level was being lost.
@@ -5774,6 +5793,25 @@ export class Game {
     // roster object with a number and wiped the army on every clear.
     this._commitShadowKills();
     const roster = rosterSummary(this.save);
+    // THE GUILD LEDGER — the daily contract, finally wired. The whole backend
+    // (dailyKey/tickDaily/claimDaily, DAILY_TARGET 3, +3 points) shipped in
+    // progression.js and sat with ZERO callers; this is its one tick site.
+    // A contract unit is a GATE CLEAR — kills would fill 3 in seconds. The
+    // claim is automatic at the completing clear: an offline solo game gains
+    // nothing from a claim button except a tap between the player and their
+    // reward. dailyKey is local-device-date; clock-rolling mints +3/day and
+    // that is an accepted cost of full offline (flagged in the audit).
+    const ledgerDone = tickDaily(this.save);
+    let ledgerRow;
+    if (ledgerDone && claimDaily(this.save)) {
+      ledgerRow = ['Guild ledger', `CONTRACT FULFILLED  ·  +${DAILY_CONTRACT_POINTS} POINTS`];
+      this.ui.toast(`GUILD LEDGER FULFILLED  ·  +${DAILY_CONTRACT_POINTS} STAT POINTS`, 'gold');
+    } else {
+      const d = dailyState(this.save);
+      ledgerRow = ['Guild ledger', d.claimed
+        ? 'CONTRACT FULFILLED TODAY'
+        : `${d.progress} / ${DAILY_TARGET} GATES TODAY`];
+    }
     this.onSave();
     this.ui.showHud(false);
     // replace(), not go(): the finished run must not sit on the back stack, or
@@ -5793,6 +5831,7 @@ export class Game {
         ['Stat points earned', this.pointsGained ? `+${this.pointsGained}` : 'none'],
         ['Breaker level', `${this.save.level}  (${rankOf(this.save.level)}-grade)`],
         ['Company', `${roster.count} / ${roster.capacity} bound`],
+        ledgerRow,
       ],
     });
   }
