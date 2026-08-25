@@ -958,7 +958,15 @@ export function animateRig(root, opts = {}) {
   if (character) { character.animate(opts); return; }
 
   const {
-    moving, speed, t, attackPhase = 0, hurt = 0, airborne = false, riseRate = 0,
+    // `flinch` (Wave D stage 3) is a signed lateral: which way the body should
+    // recoil, -1..1, computed by the caller from the blow's bearing relative
+    // to facing (positive = blow came from the LEFT, so the lean goes right).
+    // 0 — every caller that does not pass it — keeps the shipped symmetric
+    // wobble byte-identical, so citizens, shadows and enemies are untouched.
+    // Skinned characters route through CharacterInstance.animate above, which
+    // plays its HitRecieve clip and ignores unknown keys; this directional
+    // lean is the procedural box-man's twin of that clip.
+    moving, speed, t, attackPhase = 0, hurt = 0, flinch = 0, airborne = false, riseRate = 0,
     // Swing shaping, supplied by weapons.js attackAnim for the player. The
     // defaults are EXACTLY the numbers this branch used to hardcode (wind to
     // -1.5 over the first 30%, chop through to +1.9, torso twist 0.22), so
@@ -1034,8 +1042,22 @@ export function animateRig(root, opts = {}) {
   }
 
   if (hurt > 0) {
-    body.rotation.z = Math.sin(hurt * 40) * 0.14 * hurt;
-    head.rotation.z = -Math.sin(hurt * 40) * 0.1 * hurt;
+    if (flinch) {
+      // DIRECTIONAL FLINCH (Wave D stage 3): the body leans AWAY from the
+      // blow and the head snaps INTO it — the two-part recoil every stunt
+      // reel teaches — instead of the direction-blind shimmy below. The lean
+      // is a decaying bias (hurt runs 0.35 -> 0) with the old wobble riding
+      // on top at reduced amplitude, so the silhouette still shakes but the
+      // shake now points somewhere. bias + wobble EQUALS the legacy ceilings
+      // (0.09+0.05 = body 0.14, 0.06+0.04 = head 0.10) so a flinched pose
+      // can never bend further than the shipped one — the review caught the
+      // first cut exceeding its own stated envelope by 14%.
+      body.rotation.z = flinch * (0.09 * hurt + Math.sin(hurt * 40) * 0.05 * hurt);
+      head.rotation.z = -flinch * (0.06 * hurt + Math.sin(hurt * 40) * 0.04 * hurt);
+    } else {
+      body.rotation.z = Math.sin(hurt * 40) * 0.14 * hurt;
+      head.rotation.z = -Math.sin(hurt * 40) * 0.1 * hurt;
+    }
   } else {
     head.rotation.z *= 0.8;
   }

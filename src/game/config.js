@@ -226,13 +226,27 @@ BIOMES.ember = BIOMES.emberfall;
 BIOMES.void = BIOMES.rivenwaste;
 
 // --- Enemy archetypes. `s` values are multipliers scaled by enemy level. ---
+//
+// attackCd (Wave D stage 2): still the archetype's mean attack CYCLE, but the
+// cycle is now COMPOSED rather than counted down blind — game.js charges
+// `pattern windup + pattern recovery + attacks.js ENEMY_RHYTHM.gcd roll`, and
+// the gcd bands are derived from THESE numbers (the derivation is written out
+// at ENEMY_RHYTHM). So this column remains the one designers tune — it is
+// also still read directly by the shadow-aggro bite and the PUNISH-cancel
+// penalty — but retuning it now means moving the paired gcd band too, and
+// weapons.js's combo-recovery note ("a whiffed greataxe finisher costs one
+// free enemy attack") keys off it as before.
 export const ENEMY_TYPES = {
   grunt: {
     name: 'Rift Grunt', hp: 34, atk: 5, speed: 3.4, range: 1.9, attackCd: 1.5,
     xp: 12, scale: 1, color: 0x4d5a80, glow: 0x9db4ff, ai: 'chase',
   },
   stalker: {
-    name: 'Stalker', hp: 26, atk: 6.5, speed: 5.3, range: 1.8, attackCd: 1.2,
+    // attackCd 1.2 → 1.55 (stage 2): the flurry pattern lands 3 folded
+    // applications (1.26x atk per cycle) where the old single swing landed
+    // 1.0x — the cycle stretches so the archetype's ~0.71 atk/s pressure
+    // holds. The ENEMY_RHYTHM.stalker.gcd band carries the other half.
+    name: 'Stalker', hp: 26, atk: 6.5, speed: 5.3, range: 1.8, attackCd: 1.55,
     xp: 16, scale: 0.88, color: 0x8b3fa8, glow: 0xe07aff, ai: 'lunge',
   },
   brute: {
@@ -253,6 +267,15 @@ export const ENEMY_TYPES = {
   howler: {
     name: 'Howler', hp: 64, atk: 7, speed: 3.0, range: 12, attackCd: 4.0,
     xp: 40, scale: 1.15, color: 0x6a2f5a, glow: 0xff7ad0, ai: 'support',
+    // Hit-reaction profile (Wave D stage 3): attacks.js POISE is keyed by the
+    // four core silhouettes plus boss; rows whose key has no profile of its
+    // own name the silhouette they react as. The howler is a light leaping
+    // body — it takes knockback like a stalker (mass 0.62: player blows
+    // genuinely move it), not like the default grunt. The lancer deliberately
+    // carries NO row: poiseProfile's grunt fallback (mass 1.00) is right for
+    // an armoured mid-weight, and an absent field meaning "grunt" is the same
+    // absent-means-default rule the save format uses.
+    poise: 'stalker',
   },
 };
 
@@ -264,6 +287,23 @@ export const BOSSES = {
   weaver:     { name: 'THE VOIDWEAVER',  hp: 5200,  atk: 74, speed: 3.8, scale: 3.0, color: 0x5a2a8c, glow: 0xd08aff, xp: 3200 },
   archon:     { name: 'THE RIFT ARCHON', hp: 9800,  atk: 104, speed: 4.0, scale: 3.4, color: 0x8c1440, glow: 0xff5c8a, xp: 6800 },
 };
+
+// THE TELL PALETTE (Wave D stage 1: attacks.js's danger-colour vocabulary
+// adopted as the game's ONE fairness language). Exactly two colours, named
+// here and nowhere else, so every telegraph in the game answers the same
+// question at a glance:
+//   TELL_DANGER_COLOR (red)  — unavoidable-if-you-stand-there: the shape IS
+//     the damage and it commits (the boss slam's radial ring, the charge
+//     lane). The only answer is to not be inside it at contact.
+//   TELL_WARN_COLOR (amber)  — dodgeable pressure: melee swing cones, caster
+//     bolts, the spread fan. One step out of the shape is a full answer.
+// The values are attacks.js's DANGER_COLOR / WARN_COLOR verbatim, so when the
+// staged adoption reaches its per-archetype pattern rosters (heavy => red)
+// the palette is already the shipped one. Consumers import these names —
+// an inline 0xff4d6d anywhere else is palette drift, the exact disease the
+// rank-colour table above exists to cure.
+export const TELL_DANGER_COLOR = 0xff4d6d;
+export const TELL_WARN_COLOR = 0xffc24b;
 
 // THE BOLT PLANE. Every projectile in the game — trash caster bolts and boss
 // spread shots alike — flies in ONE horizontal plane at this height, and this

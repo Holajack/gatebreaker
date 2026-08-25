@@ -326,10 +326,21 @@ try {
         boss.patternCd = 0;
         g.player.hp = g.derived.maxHp;
         resetDamage();
-        // 0.4 lands _bossBrain's pattern roll on 1 — the spread shot — every
-        // time, so this measures the pattern rather than the dice.
-        const r0 = Math.random;
-        Math.random = () => 0.4;
+        // Pin the dice so this measures the pattern, not the roll. RETARGET
+        // (Wave D stage 2): the old pin was 0.4 — Math.floor(0.4 * 3) = 1,
+        // the spread shot, under the dead shared 3-way roll. The per-boss
+        // brains select by cumulative weight over an ordered pool whose HEAD
+        // is always the fan (attacks.js BOSS_BRAINS documents why), so a
+        // pinned 0 lands the pattern roll on the fan for EVERY boss at EVERY
+        // trial distance — including ranges where the slam's <12 m gate
+        // reshuffles the eligible weights, which is exactly what made any
+        // mid-range pin value fragile. The cadence roll reading 0 just pins
+        // patternCd at the pacing band's floor (>= 3 s, far past the 20-frame
+        // one-volley window below). Still g._combatRnd, per the stage-1
+        // retarget: pinning the global Math.random would leave the roll on
+        // live seeded dice.
+        const r0 = g._combatRnd;
+        g._combatRnd = () => 0;
         // The true aim: boss -> player, in game.js's own atan2(x, z) convention.
         const aimTrue = Math.atan2(px - bx, pz - bz);
         // Every bolt is recorded ONCE, the frame it appears, by identity rather
@@ -367,7 +378,7 @@ try {
           }
           if (i === 20) boss.patternCd = 9e9;  // exactly one volley
         }
-        Math.random = r0;
+        g._combatRnd = r0;
         return {
           rangeM: dist,
           enraged,
@@ -580,6 +591,24 @@ try {
           const tx = cx + cf.x * 15;
           const tz = cz + cf.z * 15;
           if (field.lineBlocked(cx, cz, tx, tz, { feetY: 1.4 })) continue;
+          // WAVE D STAGE 3 RETARGET (trial validity, not the assertion): the
+          // scan used to accept a lane on the single probe above alone
+          // (feetY 1.4 = BOW.launchY, zero width — the old sole check). But
+          // the shot this trial fires is a BALLISTIC ARROW with a 0.25 m
+          // collision disc: it sags from 1.40 toward the 1.20 chest solve
+          // across the flight, and it can be eaten by a prop just OFF the
+          // centreline that a zero-width line passes clean. The old check
+          // green-lit exactly such a lane — measured: the arrow stuck at
+          // y 1.30, 13.5 m out, slightly off-line, on every one of ten
+          // cycles — which no bow shot can cross and no assertion about
+          // hitting should be graded on. So the lane must also be clear at
+          // the arrow's own width along the whole line, and at sag height
+          // over the far stretch where the drop has bitten. Same lesson as
+          // _fireBow's own release-time lineBlocked ({radius: 0.2}): probe
+          // where — and how wide — the arrow actually flies. The original
+          // flat probe above stays byte-identical.
+          if (field.lineBlocked(cx, cz, tx, tz, { radius: 0.3, feetY: 1.4 })) continue;
+          if (field.lineBlocked(cx + cf.x * 9, cz + cf.z * 9, tx, tz, { radius: 0.3, feetY: 1.24 })) continue;
           if (field.blocked(tx, tz, 0.45, 0, 0.2)) continue;
           camF = cf;
           ex = tx;

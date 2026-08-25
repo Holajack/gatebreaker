@@ -342,10 +342,13 @@ export class GroundFxPool {
   }
 
   /** A full-circle ground field (RESIDUE, the boss slam's READING disc). */
-  pushDisc(x, z, radius, color, brightness = 1) {
+  pushDisc(x, z, radius, color, brightness = 1, groundY = 0) {
     if (this.liveDiscs >= this.discCap) return;
     const i = this.liveDiscs++;
-    _m.compose(_p.set(x, FX_DISC_Y, z), _q.identity(), _s.set(radius, 1, radius));
+    // groundY (tower wiring): the caller's floor. Default 0 keeps every flat
+    // caller byte-identical; the enemy tell channel passes e.pos.y so a
+    // terrace fight's telegraphs stop rendering invisibly under the tower.
+    _m.compose(_p.set(x, groundY + FX_DISC_Y, z), _q.identity(), _s.set(radius, 1, radius));
     this.discMesh.setMatrixAt(i, _m);
     // Per-instance alpha is unavailable on a shared material — dim the colour
     // instead, the same trade acquireRing documents above.
@@ -353,13 +356,61 @@ export class GroundFxPool {
   }
 
   /** A swing-cone sector: `yaw` is the striker's facing, `radius` its reach. */
-  pushArc(x, z, yaw, radius, color) {
+  pushArc(x, z, yaw, radius, color, brightness = 1, groundY = 0) {
     if (this.liveArcs >= this.arcCap) return;
     const i = this.liveArcs++;
     _q.setFromAxisAngle(UP, yaw);
-    _m.compose(_p.set(x, FX_ARC_Y, z), _q, _s.set(radius, 1, radius));
+    _m.compose(_p.set(x, groundY + FX_ARC_Y, z), _q, _s.set(radius, 1, radius));
     this.arcMesh.setMatrixAt(i, _m);
-    this.arcMesh.setColorAt(i, _c.setHex(color));
+    // brightness matches pushDisc/pushLane's fill-as-timer channel: a fixed-
+    // size sector can still read its windup through intensity (the boss fan
+    // uses exactly this — see game.js's fan tell rationale). Default 1 keeps
+    // every existing caller byte-identical.
+    this.arcMesh.setColorAt(i, _c.setHex(color).multiplyScalar(Math.min(1, brightness)));
+  }
+
+  /**
+   * A charge-lane telegraph (Wave D stage 1, the TELL table's 'capsule'
+   * marker): the disc geometry stretched into an ellipse laid along `yaw`,
+   * its near end AT (x, z) and its far edge `length` ahead — the strip of
+   * floor a straight rush is about to cover. The centre sits half the length
+   * down the facing on purpose: ground BEHIND a charger is safe, and a lane
+   * straddling the attacker would mark it dangerous, teaching false dodges.
+   *
+   * Rides the DISC channel deliberately rather than adding a third
+   * InstancedMesh: a dedicated lane mesh would be a third always-resident
+   * buffer for a mark that is live a fraction of a percent of frames, would
+   * grow the pool's dispose ledger (the classes suite pins dispose() at
+   * exactly -2 renderer geometries), and would buy only fidelity a
+   * 28-segment ellipse already delivers — the capsule read at telegraph
+   * scale. Same discipline as everything here: module scratch only, zero
+   * per-frame allocation, zero new geometry/materials/programs, and an idle
+   * frame still submits nothing.
+   */
+  pushLane(x, z, yaw, length, width, color, brightness = 1, groundY = 0) {
+    if (this.liveDiscs >= this.discCap) return;
+    const i = this.liveDiscs++;
+    _q.setFromAxisAngle(UP, yaw);
+    // CIRCUMSCRIBE THE CAPSULE (review important): the hit test
+    // (attacks.js sweptCapsule) keeps FULL width all the way to range plus a
+    // rounded end cap, but a raw width x length ellipse tapers to ~0 at the
+    // tip — at 87% down the howler's pounce lane the tell showed half the
+    // real width, danger on visually unmarked floor: the forbidden direction
+    // of lying. So the ellipse is sized to CONTAIN the whole stadium: length
+    // extended by width (the end cap), both semi-axes x sqrt(2) (an ellipse
+    // through the inscribed rectangle's corners). The modest over-claim at
+    // the corners is the sanctioned sin — the tell law ranks a wasted dodge
+    // far above an unmarked hit.
+    const effL = length + width;
+    const halfL = effL * 0.5 * Math.SQRT2;
+    const halfW = width * 0.5 * Math.SQRT2;
+    // yaw -> forward is (sin, 0, cos) everywhere in game.js (_forward), and
+    // the disc's local +Z is what that quaternion turns onto it — same
+    // convention pushArc documents on the arc geometry above.
+    _p.set(x + Math.sin(yaw) * effL * 0.5, groundY + FX_DISC_Y, z + Math.cos(yaw) * effL * 0.5);
+    _m.compose(_p, _q, _s.set(halfW, 1, halfL));
+    this.discMesh.setMatrixAt(i, _m);
+    this.discMesh.setColorAt(i, _c.setHex(color).multiplyScalar(Math.min(1, brightness)));
   }
 
   /** Close the frame: set the live counts and upload what was pushed. */

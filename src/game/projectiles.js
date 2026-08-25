@@ -306,15 +306,19 @@ export class ProjectilePool {
         // was exactly the fiction-breaker the magic-bow rework removes. The
         // release funnels through onRemove ('dissolve'), where game.js pops
         // the element-coloured burst. Backward loop — releaseAt(i) is safe.
-        if (pr.element && (solid || pr.pos.y <= 0.02)) {
+        // Local floor for both landing tests (tower wiring): ctx.heightAt
+        // is 0 in flat kinds (byte-identical) and the terrace height in the
+        // tower, where the absolute 0.02 let arrows sail through floors.
+        const gy = ctx.heightAt ? ctx.heightAt(pr.pos.x, pr.pos.z) : 0;
+        if (pr.element && (solid || pr.pos.y <= gy + 0.02)) {
           this.releaseAt(i, 'dissolve');
           continue;
         }
         // Wooden arrows STICK where they land — half a step back along the
         // flight so the head reads as embedded rather than the whole shaft
         // swallowed.
-        if (solid || pr.pos.y <= 0.02) {
-          if (pr.pos.y < 0.02) pr.pos.y = 0.02;
+        if (solid || pr.pos.y <= gy + 0.02) {
+          if (pr.pos.y < gy + 0.02) pr.pos.y = gy + 0.02;
           pr.pos.addScaledVector(pr.dir, -pr.speed * dt * 0.5);
           pr.mesh.position.copy(pr.pos);
           pr.stuck = true;
@@ -350,7 +354,10 @@ export class ProjectilePool {
         continue;
       }
       if (ctx.playerPos
-          && pr.pos.distanceTo(_v.copy(ctx.playerPos).setY(1.2)) < 1.1) {
+          // Chest above the player's OWN y (tower wiring): playerPos.y is the
+          // feet; the old absolute 1.2 made bolts unhittable/unavoidable off
+          // floor 0. Flat kinds: feet y is 0, byte-identical.
+          && pr.pos.distanceTo(_v.copy(ctx.playerPos).setY(ctx.playerPos.y + 1.2)) < 1.1) {
         if (ctx.onHitPlayer) ctx.onHitPlayer(pr);
         this.releaseAt(i, 'hitPlayer');
       }

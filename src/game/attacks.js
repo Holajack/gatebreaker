@@ -48,9 +48,24 @@ function applyEase(id, k) {
   return k;
 }
 
-/** Roll a value from a `[lo, hi]` table entry with a caller-supplied rng. */
-export function range2(band, rnd = Math.random) {
-  return band[0] + (band[1] - band[0]) * rnd();
+// THE DICE CONTRACT (Wave D stage 2). Every roll in this module is a combat
+// DECISION, and combat decisions are SIM: a replayed gate seed must pick the
+// same jab on the same frame. The original draft defaulted these rngs to
+// Math.random; that default is deliberately GONE rather than kept as a quiet
+// fallback, because a fallback is exactly how an unseeded roll would sneak
+// back in through a new call site and split replays silently. A caller that
+// forgets its stream fails loudly at dev time instead. game.js hands in its
+// _combatRnd fork (mulberry32 off the gate seed, 0x94d049bb).
+function requireRnd(rnd) {
+  if (typeof rnd !== 'function') {
+    throw new Error('attacks.js: seeded rng required — combat decisions are SIM, never Math.random');
+  }
+  return rnd;
+}
+
+/** Roll a value from a `[lo, hi]` table entry with a caller-supplied SEEDED rng. */
+export function range2(band, rnd) {
+  return band[0] + (band[1] - band[0]) * requireRnd(rnd)();
 }
 
 // ===========================================================================
@@ -554,8 +569,15 @@ export const TELL = {
   flicker: { kind: 'flicker', eye: 1.4, marker: null,     shake: 0,    sound: 'swing' },
 };
 
-export const DANGER_COLOR = 0xff4d6d;   // heavy / undodgeable-if-you-stand-there
-export const WARN_COLOR = 0xffc24b;     // heavy but escapable by stepping out
+// ONE home for the danger palette (review nit: these literals and config's
+// TELL_* were two unlinked declarations of one law — a retune of either file
+// silently split the vocabulary). config.js owns the values; these names
+// stay for this file's own tellColorFor and every existing importer. The
+// import is hoisted (legal at any top-level position); config imports
+// nothing from this file, so no cycle.
+import { TELL_DANGER_COLOR, TELL_WARN_COLOR } from './config.js';
+export const DANGER_COLOR = TELL_DANGER_COLOR;
+export const WARN_COLOR = TELL_WARN_COLOR;
 
 export function tellSpec(pattern) { return TELL[pattern.tell] || TELL.pose; }
 
@@ -603,13 +625,38 @@ export function tellPulse(pattern, k, t = 0) {
 //   anchor     'self' | 'target' | 'lead' — where the shape is placed
 //   heavy      true = red tell, and it staggers through poise
 //   follow     id of a pattern this one chains into
+//   retreat    backward impulse applied at the resolve — the hop-back that
+//              makes a committed thrust a spacing statement, not a trade
+//
+// --- WAVE D STAGE 2: THE SHIPPING TRIM -------------------------------------
+// This table is now LIVE — game.js selects every trash attack from it. It is
+// trimmed to what stage 2's resolution can honestly deliver, and honesty is
+// the trim rule: a pattern may only ship if its tell shape and its hit test
+// agree. Two whole classes of entry are held back, not deleted from the
+// design:
+//
+//   * APPROACH-CLOSING moves (the old grunt 'shove', stalker 'pounce', brute
+//     'charge'). enemyai.js already owns the closing game — lungeImpulse and
+//     siegeImpulse throw the body across exactly the bands those rows
+//     covered, and steerAgent only raises wantAttack INSIDE melee reach
+//     (range + 0.4), so a min-6m pattern in a melee roster is a row that can
+//     never be drawn. They return when stage 3's swept hitboxes widen the ask
+//     gate and the sweep can travel with the body.
+//   * ANCHORED ground AoEs (the caster 'hexpool'). anchor:'lead' needs the
+//     stage machine's windup-fraction snapshot (tickPattern's anchor event);
+//     stage 2 keeps the shipped telegraph countdown as the clock, so a lead
+//     anchor would either lie on the floor or hit off-tell. Returns with the
+//     machine in stage 3.
 //
 // Rhythm, in one line each:
 //   grunt   — honest mid-tempo pressure. Short jab, telegraphed overhead.
-//   stalker — silence, then a burst. Long recoveries, one feint to punish
-//             players who learned to dodge on the first frame of a tell.
+//   stalker — silence, then a burst, and one feint to punish players who
+//             learned to dodge on the first frame of a tell.
 //   brute   — rare, enormous, always announced on the floor. You have time.
 //   caster  — never wants to be near you, and punishes you for arriving.
+//   lancer  — one committed line. Thrust down the lane, hop back out.
+//   howler  — punishes ignoring it: a room-crossing pounce, and a burst for
+//             whoever comes to shut it up.
 
 export const ENEMY_PATTERNS = {
   grunt: [
@@ -625,12 +672,7 @@ export const ENEMY_PATTERNS = {
       hits: 1, dmg: 1.55, knock: 9, poise: 26, anchor: 'self',
       shape: { shape: SHAPE.CONE, range: 3.2, arc: Math.PI * 0.42, sweepArc: Math.PI * 0.5, ease: 'in', duration: 0.12 },
     },
-    {
-      id: 'shove', name: 'Shoulder', weight: 1, min: 2.4, max: 5.2,
-      tell: 'pose', windup: 0.42, active: 0.22, recovery: 0.44, cooldown: 4.2,
-      hits: 1, dmg: 0.55, knock: 13, poise: 18, lunge: 9,
-      shape: { shape: SHAPE.CAPSULE, inner: 0.4, range: 2.6, thickness: 0.95, ease: 'out', duration: 0.22 },
-    },
+    // 'shove' (min 2.4) held back — see the stage-2 trim note above.
   ],
 
   stalker: [
@@ -640,12 +682,8 @@ export const ENEMY_PATTERNS = {
       hits: 3, dmg: 0.42, knock: 1.6, poise: 7,
       shape: { shape: SHAPE.CONE, range: 2.4, arc: Math.PI * 0.55, sweepArc: Math.PI * 0.6, duration: 0.13 },
     },
-    {
-      id: 'pounce', name: 'Pounce', weight: 2, min: 3.6, max: 9.5, heavy: true,
-      tell: 'lane', windup: 0.52, active: 0.30, recovery: 0.86, cooldown: 5.0,
-      hits: 1, dmg: 1.25, knock: 8, poise: 24, lunge: 20,
-      shape: { shape: SHAPE.CAPSULE, inner: 0.3, range: 4.4, thickness: 1.1, ease: 'out', duration: 0.30 },
-    },
+    // 'pounce' (min 3.6) held back — see the stage-2 trim note above; the
+    // stalker's closing burst lives in enemyai.js's lungeImpulse today.
     {
       id: 'feint', name: 'Feint Slash', weight: 1.2, min: 0, max: 3.0, feint: 0.55,
       // The windup is long enough to bait a dodge, then the strike itself is
@@ -669,18 +707,22 @@ export const ENEMY_PATTERNS = {
       hits: 1, dmg: 1.05, knock: 11, poise: 28,
       shape: { shape: SHAPE.CONE, range: 4.2, arc: Math.PI * 0.55, sweepArc: Math.PI * 1.3, duration: 0.30 },
     },
-    {
-      id: 'charge', name: 'Charge', weight: 1.5, min: 6, max: 17, heavy: true,
-      tell: 'lane', windup: 0.82, active: 0.62, recovery: 1.15, cooldown: 7.5,
-      hits: 1, dmg: 1.35, knock: 16, poise: 36, lunge: 28, shake: 0.4,
-      shape: { shape: SHAPE.CAPSULE, inner: 0.4, range: 3.0, thickness: 1.4, duration: 0.62 },
-      follow: 'backhand', followChance: 0.5,
-    },
+    // 'charge' (min 6) held back — see the stage-2 trim note above; the
+    // brute's room-crossing rush is enemyai.js siegeImpulse territory.
   ],
 
   caster: [
     {
-      id: 'bolt', name: 'Hexbolt', weight: 3, min: 4.5, max: 15,
+      // min 0, not the draft's 4.5 standoff floor, for two reasons found the
+      // hard way: (a) a floor above wardpulse's 4.2 ceiling leaves a mute
+      // 4.2-4.5 band the caster's own backpedal walks it through, and (b) a
+      // cornered caster whose ONLY close option is the pulse goes silent for
+      // the pulse's entire 5.2 s cooldown after throwing it once — the
+      // dungeon suite's LOS positive control (a pinned caster at 3.5 m that
+      // must fire within ~4 s) measures exactly that silence. Point-blank
+      // the pulse still leads by weight; the bolt is the fallback that keeps
+      // a crowded caster dangerous, not the preference.
+      id: 'bolt', name: 'Hexbolt', weight: 3, min: 0, max: 15,
       tell: 'glow', windup: 0.55, active: 0.06, recovery: 0.34, cooldown: 2.2,
       hits: 1, dmg: 1.0, poise: 14,
       projectile: { speed: 14, spread: 0, radius: 0.5 },
@@ -691,35 +733,135 @@ export const ENEMY_PATTERNS = {
       hits: 3, dmg: 0.6, poise: 10,
       projectile: { speed: 12, spread: 0.20, radius: 0.5 },
     },
+    // 'hexpool' (anchor 'lead') held back — see the stage-2 trim note above.
     {
-      id: 'hexpool', name: 'Hex Pool', weight: 1.4, min: 4, max: 14, heavy: true,
-      // Anchored where you were standing when it started, so it punishes
-      // staying still rather than being unavoidable.
-      tell: 'ground', windup: 0.92, active: 0.20, recovery: 0.46, cooldown: 6.5,
-      hits: 1, dmg: 1.15, knock: 4, poise: 22, anchor: 'lead', lead: 0.35,
-      shape: { shape: SHAPE.CIRCLE, range: 3.2, thickness: 0.6, expand: true, follow: false, duration: 0.20 },
-    },
-    {
-      id: 'wardpulse', name: 'Ward Pulse', weight: 2.2, min: 0, max: 4.2,
+      // Weight 3.5 (draft 2.2): with the bolt now reaching to 0 m, the pulse
+      // needs the majority share inside its own band or "panic melee when
+      // crowded" reads as "occasionally". 3.5 vs 3 puts the pulse first
+      // ~54/46 up close while the bolt covers the pulse's cooldown.
+      id: 'wardpulse', name: 'Ward Pulse', weight: 3.5, min: 0, max: 4.2,
       // Closing on a caster should cost something, or every caster is free.
       tell: 'glow', windup: 0.48, active: 0.14, recovery: 0.60, cooldown: 5.2,
       hits: 1, dmg: 0.7, knock: 15, poise: 24, anchor: 'self',
       shape: { shape: SHAPE.CIRCLE, range: 4.6, thickness: 0.8, expand: true, ease: 'out', follow: false, duration: 0.14 },
     },
   ],
+
+  // --- SHIPPING ARCHETYPES the draft table never had (Wave D stage 2). Both
+  // are B+ bodies from config.ENEMY_TYPES; their rows speak the same
+  // vocabulary as everything above, and their numbers are cut against the
+  // per-rank skew below — they only appear where the skew already favours
+  // heavy, honest-but-brutal rosters.
+
+  lancer: [
+    {
+      // The identity move the ask named: thrust down a drawn lane, then HOP
+      // BACK OUT — `retreat` is the spacing statement that stops the lancer
+      // trading like a grunt with a longer stick. Capsule range 4.4 = the
+      // 3.2 m weapon reach plus the ~1.2 m the lunge impulse (10, under the
+      // shared 7/s velocity damping) carries the body during the strike.
+      id: 'skewer', name: 'Skewer', weight: 2.4, min: 0, max: 3.8, heavy: true,
+      tell: 'lane', windup: 0.60, active: 0.16, recovery: 0.90, cooldown: 4.4,
+      hits: 1, dmg: 1.45, knock: 11, poise: 30, lunge: 10, retreat: 13,
+      shape: { shape: SHAPE.CAPSULE, inner: 0.3, range: 4.4, thickness: 1.0, ease: 'out', duration: 0.16 },
+    },
+    {
+      // The keep-honest filler: without a light option the skewer's own
+      // cooldown would leave the lancer mute in your face for seconds.
+      id: 'lash', name: 'Haft Lash', weight: 2, min: 0, max: 3.4,
+      tell: 'pose', windup: 0.38, active: 0.10, recovery: 0.40, cooldown: 1.6,
+      hits: 1, dmg: 0.70, knock: 5, poise: 12,
+      shape: { shape: SHAPE.CONE, range: 3.2, arc: Math.PI * 0.5, sweepArc: Math.PI * 0.4, duration: 0.10 },
+    },
+  ],
+
+  howler: [
+    {
+      // The leap the ask named. Eligibility runs to 9 m because the howler
+      // ORBITS at 9 m (flank band = range 12 x 0.75) — a leap it cannot throw
+      // from its own preferred distance would never be seen. The lane is long
+      // for the same reason: capsule range 8.8 = ~7.4 m of travel from the 52
+      // impulse under 7/s damping plus body reach, so the red strip on the
+      // floor is the strip the pounce actually crosses.
+      id: 'leap', name: 'Riftpounce', weight: 2.4, min: 4.0, max: 9.0, heavy: true,
+      tell: 'lane', windup: 0.72, active: 0.20, recovery: 1.00, cooldown: 5.6,
+      hits: 1, dmg: 1.15, knock: 12, poise: 26, lunge: 52,
+      shape: { shape: SHAPE.CAPSULE, inner: 0.4, range: 8.8, thickness: 1.15, ease: 'out', duration: 0.20 },
+    },
+    {
+      // The AoE half: whoever closed to shut the howler up eats a radial
+      // burst. Max 4.6 = the shape's own radius, so the tell disc never
+      // claims floor the hit cannot touch and the pair covers 0-9 m with the
+      // leap taking over exactly where the burst gives out.
+      id: 'howlburst', name: 'Howlburst', weight: 2, min: 0, max: 4.6, heavy: true,
+      tell: 'ground', windup: 0.80, active: 0.14, recovery: 0.85, cooldown: 5.0,
+      hits: 1, dmg: 0.95, knock: 14, poise: 24, anchor: 'self',
+      shape: { shape: SHAPE.CIRCLE, range: 4.4, thickness: 0.8, expand: true, ease: 'out', follow: false, duration: 0.14 },
+    },
+  ],
 };
+
+// --- PER-RANK ROSTER SKEW (Wave D stage 2) ---------------------------------
+// The dungeon's difficulty curve, applied to attack SELECTION rather than to
+// numbers: higher gates draw heavier, feintier rosters out of the SAME tables.
+// Which archetypes are present at a rank is already data (creatures.json
+// presence and ENEMY_TYPES.ai decide who spawns); this table is the second
+// data hook — given who showed up, what do they reach for. Multipliers apply
+// to a pattern's selection weight: `heavy` scales entries flagged heavy:true,
+// `feint` scales entries with a feint fraction. E's feint 0 is deliberate and
+// load-bearing: a feint teaches players to DISTRUST tells, and rank E is where
+// they are still learning to trust them — the mixup only enters once the
+// lesson it subverts has been learned. Kept here with the pattern tables (not
+// in config.js) because the weights it scales live ten lines up; a designer
+// retuning one will be looking at the other.
+export const RANK_PATTERN_SKEW = {
+  E: { heavy: 0.7, feint: 0.0 },
+  D: { heavy: 0.85, feint: 0.5 },
+  C: { heavy: 1.0, feint: 0.8 },
+  B: { heavy: 1.15, feint: 1.0 },
+  A: { heavy: 1.3, feint: 1.3 },
+  S: { heavy: 1.5, feint: 1.6 },
+};
+
+export function rankSkew(rank) { return RANK_PATTERN_SKEW[rank] || RANK_PATTERN_SKEW.C; }
 
 /**
  * Spacing behaviour between attacks, which is most of what separates these
  * archetypes on screen. `gcd` is the pause after a pattern ends before another
  * may start; `ideal` is the distance band the AI tries to hold; `strafe` is how
  * much of its speed goes sideways rather than straight at you.
+ *
+ * THE gcd BANDS ARE THE attackCd PAIRING (Wave D stage 2 balance guard).
+ * game.js paces an enemy as `attackCd = windup + recovery + range2(gcd)`, so
+ * each band below is DERIVED, not chosen: it is the archetype's target mean
+ * attack cycle (config.ENEMY_TYPES.attackCd plus the old +0.2s mean jitter —
+ * the number weapons.js's combo-recovery table is explicitly tuned against,
+ * "a whiffed greataxe finisher costs 1.23s, almost exactly one free enemy
+ * attack") minus the commit time (windup + recovery) of the archetype's
+ * BREAD-AND-BUTTER pattern. Worked per row:
+ *   grunt   1.5 + 0.2 = 1.7  − jab 0.62     → mean 1.08 → [0.75, 1.40]
+ *   stalker 1.55 + 0.2 = 1.75 − flurry 0.82 → mean 0.95 → [0.70, 1.20]
+ *           (stalker's attackCd row moved 1.2 → 1.55 in the same change —
+ *            flurry's folded 3 x 0.42 = 1.26 dmg per cycle needed the cycle
+ *            lengthened to hold the archetype's old ~0.71 atk/s pressure)
+ *   brute   2.2 + 0.2 = 2.4  − backhand 1.28 → mean 1.35 (heavied slightly:
+ *            [1.00, 1.70] — the slam pays its own extra 0.65 s of commit)
+ *   caster  2.6 + 0.3 = 2.9  − bolt 0.89    → mean 2.0, shipped [1.50, 2.30]
+ *           (hi shaved 2.5 → 2.3: the dungeon suite's LOS positive control
+ *            gives a pinned caster ~4.3 s to pulse, cool down and STILL get a
+ *            bolt in the air — the worst-case roll must land inside it)
+ *   lancer  3.0 + 0.2 = 3.2  − skewer 1.50  → mean 1.70 → [1.20, 2.20]
+ *   howler  4.0 + 0.3 = 4.3  − leap 1.72    → mean 2.60 → [2.10, 3.10]
+ * Retune a pattern's windup/recovery or an attackCd row and the band on this
+ * side must move with it, or the fight suite's pressure probes will drift.
  */
 export const ENEMY_RHYTHM = {
-  grunt:   { gcd: [0.55, 1.10], ideal: [1.6, 2.6],  strafe: 0.22, retreat: 0,    commit: 0.75, patience: 0.15 },
-  stalker: { gcd: [0.70, 1.60], ideal: [2.6, 6.0],  strafe: 0.75, retreat: 0.55, commit: 0.95, patience: 0.55 },
-  brute:   { gcd: [1.20, 2.40], ideal: [2.0, 3.2],  strafe: 0.05, retreat: 0,    commit: 1.00, patience: 0.05 },
-  caster:  { gcd: [0.80, 1.70], ideal: [8.0, 13.0], strafe: 0.45, retreat: 0.85, commit: 0.60, patience: 0.35 },
+  grunt:   { gcd: [0.75, 1.40], ideal: [1.6, 2.6],  strafe: 0.22, retreat: 0,    commit: 0.75, patience: 0.15 },
+  stalker: { gcd: [0.70, 1.20], ideal: [2.6, 6.0],  strafe: 0.75, retreat: 0.55, commit: 0.95, patience: 0.55 },
+  brute:   { gcd: [1.00, 1.70], ideal: [2.0, 3.2],  strafe: 0.05, retreat: 0,    commit: 1.00, patience: 0.05 },
+  caster:  { gcd: [1.50, 2.30], ideal: [8.0, 13.0], strafe: 0.45, retreat: 0.85, commit: 0.60, patience: 0.35 },
+  lancer:  { gcd: [1.20, 2.20], ideal: [2.4, 3.4],  strafe: 0.15, retreat: 0.20, commit: 0.90, patience: 0.20 },
+  howler:  { gcd: [2.10, 3.10], ideal: [7.0, 10.0], strafe: 0.60, retreat: 0.70, commit: 0.50, patience: 0.50 },
 };
 
 export function rhythmFor(key) { return ENEMY_RHYTHM[key] || ENEMY_RHYTHM.grunt; }
@@ -821,6 +963,157 @@ export function bossPhaseIndex(hpFrac) {
 export function bossPhase(hpFrac) { return BOSS_PHASES[bossPhaseIndex(hpFrac)]; }
 
 // ===========================================================================
+// 6b. PER-BOSS BRAINS (Wave D stage 2 — the shipping trim of the phase system)
+// ===========================================================================
+//
+// The full BOSS_PATTERNS/BOSS_PHASES machine above is the stage-3+ design.
+// What ships in stage 2 is this table: six named brains, one per config GATES
+// boss, sequencing the THREE pattern implementations game.js already has —
+// 'slam' (radial shockwave, r 11), 'fan' (7/9-bolt spread), 'charge' (lane
+// rush, impulse 34) — plus the close-range bite _bossBrain keeps on its own
+// attackCd clock. The win the ask names is per-boss SEQUENCING and tells, not
+// new mechanics, so every knob here is a sequencing knob:
+//
+//   opener        the pattern the boss ALWAYS throws first — its signature
+//                 hello, thrown from the seeded stream's first roll so a
+//                 replayed gate opens the fight identically
+//   openerFollow  optional forced second beat, for a 1-2 signature
+//   pool          weighted roster with per-entry distance gates (min/max),
+//                 drawn by ONE cumulative-weight roll. THE FAN LEADS EVERY
+//                 POOL, deliberately: it is the only pattern that threatens
+//                 at every range the arena allows (slam needs < 12 m, charge
+//                 wants > ~6), so the pool's head is the entry that can never
+//                 leave a roll mute — and the fight suite's pinned-dice probe
+//                 (rnd forced to 0) reads exactly that head, at every trial
+//                 distance, which is what lets it measure the fan pattern in
+//                 isolation without caring which boss it drew.
+//   pacing        [lo, hi] seconds between rolls; enragedPacing takes over at
+//                 the shipped 40% enrage. The warden's bands are byte-for-byte
+//                 the old shared brain's (4.4 + 1.6 roll / 3.0 + 1.6 roll) —
+//                 rank E IS the shipped cadence; the ladder tightens above it.
+//   escalate      the under-30%-hp turn: pacingMul compresses the roll gap,
+//                 tellMul shortens the windups (same attacks read harder to
+//                 react to — BOSS_PHASES' tellMul idea, one number), and
+//                 `follow` chains a named resolve into a forced next pattern
+//                 (rolled at chance, off the same seeded stream) — the moment
+//                 a dying boss starts stringing 1-2s is the escalation a
+//                 player actually FEELS, and it costs zero new mechanics.
+//
+// Distance gates echo BOSS_PATTERNS: slam max 12 is the "roll a slam out of
+// range and it degrades to a charge" rule the dead 3-way roll had implicitly
+// (its pattern-0-at-range fell through to the charge else), kept explicit.
+export const BOSS_BRAINS = {
+  warden: {
+    // E — THE TUTORIAL BOSS. One lesson per pattern, near-even pool, the
+    // shipped cadence, and it opens on the slam: the game's first red disc,
+    // thrown in the first arena, at the shipped 0.75 s tell.
+    opener: 'slam',
+    pool: [
+      { id: 'fan', w: 3 },
+      { id: 'slam', w: 3, max: 12 },
+      { id: 'charge', w: 2, min: 7 },
+    ],
+    pacing: [4.4, 6.0], enragedPacing: [3.0, 4.6],
+    escalate: { below: 0.3, pacingMul: 0.85, tellMul: 0.92 },
+  },
+  gravelord: {
+    // D — WEIGHT. Slam-forward pool; dying, its slams chain into charges:
+    // the grave does not let you circle it and heal.
+    opener: 'charge',
+    pool: [
+      { id: 'fan', w: 3 },
+      { id: 'slam', w: 4, max: 12 },
+      { id: 'charge', w: 2, min: 6 },
+    ],
+    pacing: [4.2, 5.7], enragedPacing: [2.9, 4.3],
+    escalate: { below: 0.3, pacingMul: 0.8, tellMul: 0.9, follow: { after: 'slam', then: 'charge', chance: 0.6 } },
+  },
+  frostcaller: {
+    // C — THE CASTER KING. Fan-dominant, opens on a fan, and its dying turn
+    // is double volleys — the answer stays "move", it just stops pausing.
+    opener: 'fan',
+    pool: [
+      { id: 'fan', w: 5 },
+      { id: 'slam', w: 2, max: 11 },
+      { id: 'charge', w: 2, min: 8 },
+    ],
+    pacing: [4.0, 5.4], enragedPacing: [2.8, 4.1],
+    escalate: { below: 0.3, pacingMul: 0.75, tellMul: 0.9, follow: { after: 'fan', then: 'fan', chance: 0.5 } },
+  },
+  infernus: {
+    // B — MOMENTUM. Charge-forward; dying, a charge that connects with the
+    // wall becomes a slam on arrival.
+    opener: 'slam',
+    pool: [
+      { id: 'fan', w: 2 },
+      { id: 'charge', w: 4, min: 6 },
+      { id: 'slam', w: 3, max: 12 },
+    ],
+    pacing: [3.7, 5.1], enragedPacing: [2.6, 3.9],
+    escalate: { below: 0.3, pacingMul: 0.75, tellMul: 0.88, follow: { after: 'charge', then: 'slam', chance: 0.65 } },
+  },
+  weaver: {
+    // A — MISDIRECTION. Even pool, the shortest tells before S, and dying
+    // slams that hide a fan behind the dust.
+    opener: 'fan',
+    pool: [
+      { id: 'fan', w: 3 },
+      { id: 'slam', w: 3, max: 12 },
+      { id: 'charge', w: 3, min: 6 },
+    ],
+    pacing: [3.4, 4.8], enragedPacing: [2.4, 3.6],
+    escalate: { below: 0.3, pacingMul: 0.7, tellMul: 0.85, follow: { after: 'slam', then: 'fan', chance: 0.6 } },
+  },
+  archon: {
+    // S — EVERYTHING, FASTEST. Signature 1-2 opener (charge into fan: rush
+    // you, then punish the dodge lane), tightest pacing, hardest dying turn.
+    opener: 'charge',
+    openerFollow: 'fan',
+    pool: [
+      { id: 'fan', w: 3 },
+      { id: 'slam', w: 3, max: 12 },
+      { id: 'charge', w: 3, min: 6 },
+    ],
+    pacing: [3.0, 4.4], enragedPacing: [2.1, 3.2],
+    escalate: { below: 0.3, pacingMul: 0.65, tellMul: 0.82, follow: { after: 'charge', then: 'fan', chance: 0.7 } },
+  },
+};
+
+/** The brain for a GATES boss key. Warden fallback, mirroring patternsFor's
+ *  grunt fallback: an unknown key fights like rank E, never crashes. */
+export function bossBrainFor(key) { return BOSS_BRAINS[key] || BOSS_BRAINS.warden; }
+
+/**
+ * One cumulative-weight pick over a brain's pool. `roll` is a pre-drawn
+ * [0,1) value rather than an rng — _bossBrain draws its EXACT two numbers per
+ * decision (pattern, cadence) before branching, so the fork's draw order
+ * stays a flat contract no matter which branch runs (opener, forced, pool).
+ * Entries outside their distance gate are skipped in BOTH passes; if the
+ * distance gates empty the pool entirely, the head entry is returned rather
+ * than null — a boss turn is never silent (the head is the fan, the one
+ * pattern with no gate, so in practice this is the fan answering "nothing
+ * else reaches").
+ */
+export function selectBrainPattern(brain, roll, dist) {
+  const pool = brain.pool;
+  let total = 0;
+  for (let i = 0; i < pool.length; i++) {
+    const p = pool[i];
+    if (dist < (p.min ?? 0) || dist > (p.max ?? Infinity)) continue;
+    total += p.w;
+  }
+  if (total <= 0) return pool[0].id;
+  let r = roll * total;
+  for (let i = 0; i < pool.length; i++) {
+    const p = pool[i];
+    if (dist < (p.min ?? 0) || dist > (p.max ?? Infinity)) continue;
+    r -= p.w;
+    if (r <= 0) return p.id;
+  }
+  return pool[pool.length - 1].id;
+}
+
+// ===========================================================================
 // 7. THE PATTERN STATE MACHINE
 // ===========================================================================
 
@@ -869,12 +1162,32 @@ function usable(plan, pattern, dist) {
 }
 
 /**
+ * Selection weight of one pattern under the caller's context: the table
+ * weight, times the no-repeat penalty, times the per-rank skew (ctx.heavyMul
+ * / ctx.feintMul — see RANK_PATTERN_SKEW). One function used by BOTH passes
+ * of selectPattern so the total and the roll can never disagree about a
+ * weight — the classic cumulative-pick bug this shape exists to prevent.
+ */
+function patternWeight(plan, p, ctx) {
+  let w = p.weight || 1;
+  // Never the same pattern twice running, unless it is the only thing that
+  // reaches — repetition is what made every archetype read as one attack.
+  if (p.id === plan.last) w *= 0.15;
+  if (p.heavy && ctx.heavyMul !== undefined) w *= ctx.heavyMul;
+  if (p.feint !== undefined && ctx.feintMul !== undefined) w *= ctx.feintMul;
+  return w;
+}
+
+/**
  * Choose a pattern for a normal enemy.
- * ctx: { dist, rnd, hpFrac }
+ * ctx: { dist, rnd (REQUIRED, seeded), hpFrac, heavyMul, feintMul }
  * Returns the pattern (shared table data — read only) or null to keep moving.
+ * The rnd is drawn AT MOST ONCE, and only after at least one pattern proved
+ * eligible — a null return consumes nothing, so an enemy re-asking every
+ * frame across a dead distance band cannot spin the combat stream.
  */
 export function selectPattern(plan, ctx) {
-  const rnd = ctx.rnd || Math.random;
+  const rnd = requireRnd(ctx.rnd);
   const list = patternsFor(plan.key);
 
   if (plan.forced) {
@@ -888,9 +1201,7 @@ export function selectPattern(plan, ctx) {
   for (let i = 0; i < list.length; i++) {
     const p = list[i];
     if (!usable(plan, p, ctx.dist)) continue;
-    // Never the same pattern twice running, unless it is the only thing that
-    // reaches — repetition is what made every archetype read as one attack.
-    total += (p.id === plan.last ? (p.weight || 1) * 0.15 : (p.weight || 1));
+    total += patternWeight(plan, p, ctx);
   }
   if (total <= 0) return null;
 
@@ -898,7 +1209,7 @@ export function selectPattern(plan, ctx) {
   for (let i = 0; i < list.length; i++) {
     const p = list[i];
     if (!usable(plan, p, ctx.dist)) continue;
-    roll -= (p.id === plan.last ? (p.weight || 1) * 0.15 : (p.weight || 1));
+    roll -= patternWeight(plan, p, ctx);
     if (roll <= 0) return p;
   }
   return null;
@@ -910,7 +1221,7 @@ export function selectPattern(plan, ctx) {
  * ctx: { dist, rnd, hpFrac }
  */
 export function selectBossPattern(plan, ctx) {
-  const rnd = ctx.rnd || Math.random;
+  const rnd = requireRnd(ctx.rnd);
   const phase = BOSS_PHASES[plan.phaseIndex < 0 ? bossPhaseIndex(ctx.hpFrac ?? 1) : plan.phaseIndex];
 
   // A scripted string finishes before anything else takes the slot — a chain
@@ -1087,7 +1398,8 @@ export function tickPattern(plan, dt) {
  * `chain > 0` lets a boss string attacks together with a much shorter gap,
  * which is most of what "pacing" means on screen.
  */
-export function endPattern(plan, pattern = plan.finished, rnd = Math.random) {
+export function endPattern(plan, pattern = plan.finished, rnd) {
+  requireRnd(rnd);
   const phase = plan.isBoss ? BOSS_PHASES[Math.max(0, plan.phaseIndex)] : null;
   if (pattern && pattern.follow && rnd() < (pattern.followChance ?? 0.5)) {
     plan.forced = pattern.follow;

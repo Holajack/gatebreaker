@@ -136,9 +136,13 @@ export function makeAgent(entity, behavior) {
     detourEpisode: 0,
     sinceDetour: Infinity,
     backoff: 0,
-    // Randomised so two enemies jammed against the same wall peel off opposite
-    // ways instead of shuffling along it in convoy.
-    detourSide: Math.random() < 0.5 ? 1 : -1,
+    // 0 = UNPICKED. Chosen lazily at first use from ctx.rnd (see the flank
+    // branch and the fresh-episode pick) so construction draws NOTHING —
+    // review blocker: a Math.random here fed 'flank' orbit sides (the howler
+    // ships on that behavior) and silently diverged replayed seeds. Two
+    // enemies on one wall still peel opposite ways: their lazy picks are
+    // separate draws.
+    detourSide: 0,
     detours: 0,
     // ranged commitment
     standoff: 0,
@@ -349,7 +353,11 @@ export function steerAgent(agent, ctx, dt) {
     case 'lunge': {
       if (dist > agent.range) desired = speed;
       if (dist < T.lungeMax && dist > T.lungeMin && agent.lungeCd <= 0) {
-        agent.lungeCd = T.lungeCdMin + Math.random() * T.lungeCdRand;
+        // Wave D stage 2: the lunge timer is combat cadence, so it draws the
+        // caller's seeded stream (game.js hands its combat fork in via
+        // ctx.rnd) and only falls back to Math.random for headless callers
+        // that steer without a sim contract.
+        agent.lungeCd = T.lungeCdMin + (ctx.rnd || Math.random)() * T.lungeCdRand;
         out.impulseX = sx * T.lungeImpulse;
         out.impulseZ = sz * T.lungeImpulse;
       }
@@ -386,7 +394,13 @@ export function steerAgent(agent, ctx, dt) {
         if (dist > T.commitRange) desired = speed;
       } else if (dist > band + 2) desired = speed * 0.9;
       else if (dist < band - 3) desired = -speed * 0.6;
-      else strafe = T.flankStrafe * agent.detourSide;
+      else {
+        // Lazy side pick (see makeAgent's detourSide note): seeded when the
+        // caller steers under a sim contract, Math.random only for headless
+        // tools that pass no ctx.rnd (nav-test).
+        if (!agent.detourSide) agent.detourSide = (ctx.rnd || Math.random)() < 0.5 ? 1 : -1;
+        strafe = T.flankStrafe * agent.detourSide;
+      }
       out.attackKind = 'ranged';
       // Same wall-LOS rule as 'ranged' (game.js samples both behaviors).
       if (ctx.losBlocked) desired = speed;
@@ -417,8 +431,9 @@ export function steerAgent(agent, ctx, dt) {
   if (agent.detour <= 0 && wantsToClose && agent.blockedWindows >= needWindows) {
     if (agent.detourEpisode === 0) {
       // Fresh episode: pick a side at random so a crowd jammed on the same
-      // corner does not queue up behind one another.
-      agent.detourSide = Math.random() < 0.5 ? 1 : -1;
+      // corner does not queue up behind one another. Seeded when the caller
+      // steers under a sim contract (ctx.rnd — same note as the lunge timer).
+      agent.detourSide = (ctx.rnd || Math.random)() < 0.5 ? 1 : -1;
     } else if ((agent.detourEpisode % T.detourFlipAfter) === 0) {
       // This side has failed detourFlipAfter times running. Try the other way.
       agent.detourSide = -agent.detourSide;

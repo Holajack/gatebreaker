@@ -9,8 +9,31 @@ import {
 // update it AND rebuild the hero, or the choice only applies next boot.
 import { setPlayerBody as setPlayerBodyLook } from '../render/characters.js';
 import { makeAgent, steerAgent, separate, noteAttack } from './enemyai.js';
+// Wave D stage 2 — attacks.js is now the ENEMY ATTACK BRAIN. Its pattern
+// tables (per-archetype rosters with windup/recovery/tell shapes) and its
+// per-boss brains decide WHAT gets thrown; the shipped strike machinery below
+// (the weapons.js swing machine for armed humanoids, the telegraph countdown
+// for casts, _bossBrain's slam/fan/charge resolves) stays the CLOCK and the
+// LIMBS. Selection rolls always draw this._combatRnd — attacks.js itself
+// throws on an unseeded call, by design.
+import {
+  makeAttackPlan, selectPattern, beginPattern, tickPattern, STAGE as PATTERN_STAGE,
+  rhythmFor, range2, rankSkew, SHAPE as PATTERN_SHAPE,
+  bossBrainFor, selectBrainPattern,
+  // Wave D stage 3 — SWEPT HITBOXES + THE MASS LAW. makeSweep/armSweep/
+  // advanceSweep/collectSweep turn both sides' strikes from instant tests
+  // into shapes that TRAVEL across their active window (stepSweepSpec is the
+  // authored bridge from a weapons.js combo step to a sweep spec);
+  // sweepHitsPoint is the single-target flavour the player-as-target uses.
+  // makeReaction/tickReaction/hitAwayFrom carry the knockback mass law: a
+  // blow pushes away from the ATTACKER, divided by the target archetype's
+  // mass, replacing the flat radial shove (and the boss's bespoke /6).
+  makeSweep, armSweep, advanceSweep, collectSweep, sweepHitsPoint, liveTarget,
+  stepSweepSpec, stepKind, makeReaction, tickReaction, hitAwayFrom, swingHit,
+} from './attacks.js';
 import {
   GATES, ENEMY_TYPES, BOSSES, SKILLS, derive, scaleEnemy, rankOf, PROJECTILE_Y,
+  TELL_DANGER_COLOR, TELL_WARN_COLOR,
 } from './config.js';
 import {
   grantXp, shadowFieldCapacity, extractionChance,
@@ -354,11 +377,52 @@ const _combustQ = [];
 // mid-chain kill cannot skip a link (the bleed pass's snapshot reasoning).
 const _arcTargets = [];
 
-// Reused steering context; steerAgent never retains it.
+// Reused steering context; steerAgent never retains it. `rnd` (Wave D
+// stage 2) is the seeded combat fork: steerAgent's own cadence dice (the
+// stalker's lunge timer, a fresh detour's side pick) draw it when present,
+// so steering noise replays with the gate seed instead of splitting on
+// Math.random.
 const _steerCtx = {
   navGrid: null, targetPos: null, selfPos: null,
-  distance: 0, losBlocked: false, aggression: 1, dt: 0,
+  distance: 0, losBlocked: false, aggression: 1, dt: 0, rnd: null,
 };
+
+// Reused pattern-selection context; selectPattern never retains it. One
+// module-scope object, refilled per ask — the same zero-allocation discipline
+// as _steerCtx above.
+const _patCtx = {
+  dist: 0, rnd: null, hpFrac: 1, heavyMul: 1, feintMul: 1,
+};
+
+// Reused per-frame output list for the player sweep's collectSweep — cleared
+// by the collector itself, never retained. Same zero-allocation discipline as
+// _patCtx/_steerCtx above.
+const _sweepOut = [];
+
+// One reusable swing context: everything a damage application computed at its
+// fire frame that the sweep's later frames still need to apply to targets the
+// travelling shape reaches after the fire frame. Refilled per application —
+// the machine never runs two applications' windows at once (the next fire
+// re-arms the one player sweep), so one object is enough.
+const _pSwing = {
+  step: null, w: null, dmg: 0, stagger: 0, knock: 0, kind: 'light',
+  arc: 0, radial: false, finisher: false, connected: false, fresh: false,
+};
+
+// The honest ceiling of the pooled arc tell: decalpool's baked acos(0.2)
+// sector. An enemy cone SWEEP may never claim more total angle (arc + travel)
+// than this sector shows, or the tell teaches players to stand inside a hit
+// (ARC_HALF's law — wider than truth is the only safe direction to lie in).
+const TELL_ARC_TOTAL = 2 * Math.acos(0.2);
+// Above this total coverage a "cone" is really a spin — the backhand's
+// 0.55pi arc + 1.3pi travel — and the honest tell is the disc, not a sector.
+const TELL_ARC_DISC = Math.PI * 1.5;
+
+// Per-event ceiling on the freeze frames the PLAYER'S OWN wounds may buy
+// (Wave D stage 3). fx.addHitStop is max()-latched, not additive, so this cap
+// is the whole anti-hitch guarantee: a boss combo landing three blows in a
+// second can never freeze the game longer than one blow's cap.
+const STRUCK_STOP_MAX = 0.075;
 
 export class Game {
   constructor({ canvas, input, audio, ui, saveData, onSave, appState = null, frameClock = null }) {
@@ -528,6 +592,10 @@ export class Game {
       worldRadius: 0,
       playerPos: null,
       enemies: null,
+      // Bound ONCE (no per-frame closure); reads this.world dynamically so
+      // mode swaps need no rebind. Flat kinds return 0 — arrow ground tests
+      // stay byte-identical there (tower wiring).
+      heightAt: (x, z) => this.world.heightAt(x, z),
       onHitPlayer: (rec) => this._damagePlayer(rec.damage, rec.pos),
       onHitEnemy: (rec, e) => {
         this._damageEnemy(e, rec.damage, {
@@ -1159,7 +1227,7 @@ export class Game {
     // its own FORK off the gate seed — 0xcc9e2d51 is murmur3's c1, colliding
     // with none of the registered fork constants (0x9e3779b9 / 0x5f356495 /
     // 0x1f123bb5 / 0x85ebca6b / 0x27d4eb2f / 0x632be59b / 0xc2b2ae35 /
-    // 0x5ade0f / 0xb5297a4d / 0x2545f491) — so per-elite material rolls can
+    // 0x5ade0f / 0xb5297a4d / 0x2545f491 / 0x94d049bb) — so per-elite material rolls can
     // never perturb the main stream's enemy/loot draws, and a replayed seed
     // yields the same dust.
     this._emberRnd = mulberry32((this.seed ^ 0xcc9e2d51) >>> 0);
@@ -1212,6 +1280,17 @@ export class Game {
     // comment above — so a mastery roll can never perturb the main stream's
     // enemy/loot draws and a replayed seed cancels the same wind-ups.
     this._masteryRnd = mulberry32((this.seed ^ 0xb5297a4d) >>> 0);
+    // THE COMBAT DICE (Wave D stage 1). Every enemy ATTACK decision — the
+    // boss brain's pattern roll and cadence jitter, the trash attackCd
+    // jitter — now draws off its own fork of the gate seed instead of the
+    // Math.random calls that shipped. Enemy attacks are SIM: a replayed seed
+    // must roll the same slam on the same frame, and the fight suite pins
+    // the boss dice by stubbing THIS stream. 0x94d049bb is SplitMix64's
+    // second mixing constant, verified unused against the fork registry in
+    // the emberdust comment above; a dedicated fork rather than this.rnd so
+    // combat cadence can never perturb the main stream's enemy/loot draw
+    // order (that order is contract).
+    this._combatRnd = mulberry32((this.seed ^ 0x94d049bb) >>> 0);
     // THE REACH (CLASSES_SPEC layerC unlock.trial): the S gate with a flag —
     // not a new dungeon. Armed HERE, the one choke point every entry route
     // funnels through (portal confirm, fast-travel list, startGate), whenever
@@ -1384,7 +1463,7 @@ export class Game {
     mesh.add(makeGroundRing(base.glow, 0.85 * base.scale, 0.5));
     mesh.position.copy(pos);
     // Rise-from-the-floor spawn: cheap, and it reads as a rift materialization.
-    mesh.position.y = -3;
+    mesh.position.y = -3;   // corrected to floor - 3 on first rise tick
     this.scene.add(mesh);
 
     const bar = makeHealthBar(1.1 * base.scale, base.glow);
@@ -1443,7 +1522,7 @@ export class Game {
     });
     mesh.add(makeGroundRing(b.glow, 1.6, 0.6));
     mesh.position.copy(pos);
-    mesh.position.y = -6;
+    mesh.position.y = -6;   // corrected to floor - 6 on first rise tick
     this.scene.add(mesh);
 
     const bar = makeHealthBar(2.6, b.glow);
@@ -1645,7 +1724,17 @@ export class Game {
         if (e.attack?.active) cancelAttack(e.attack);
         e.telegraph = 0;
         e.swing = 0;
+        // All three pending boss patterns, not just the slam: a cancelled
+        // windup with _fan/_charge left set would fire from a zeroed
+        // telegraph next _bossBrain tick — damage with no tell, the exact
+        // thing stage 1 exists to forbid.
         e._slam = false;
+        e._fan = false;
+        e._charge = false;
+        // Stage 2: the committed roster pattern dies with its windup for the
+        // same reason — its cooldown was already stamped at commit, so the
+        // cancel genuinely costs the enemy the attack, not just the frame.
+        e._pat = null;
         // "Eats its own cooldown": the full base cadence, as if the blow had
         // been thrown — steerAgent will not re-ask before it.
         e.attackCd = Math.max(e.attackCd || 0, e.base?.attackCd || 1.2);
@@ -1684,7 +1773,16 @@ export class Game {
     // this, every melee blow that carries stagger would count its own kill
     // and the counter would just be a kill counter.
     const preHitStagger = e.stagger > 0;
-    if (opts.stagger) e.stagger = Math.max(e.stagger, opts.stagger);
+    if (opts.stagger) {
+      e.stagger = Math.max(e.stagger, opts.stagger);
+      // INTERRUPT KILLS THE LIVE SWEEP (review important): the sweep-advance
+      // block has no stagger gate and the PUNISH cancel only fires during
+      // windup — so a brute staggered at contact kept dealing full folded
+      // damage from an invisible band while its body played HitRecieve.
+      // Matches attacks.js interrupts() semantics: the window dies, and the
+      // retreat hop (a window-END effect) is skipped with it.
+      if (e.sweep?.live) { e.sweep.live = false; e._sweepPat = null; }
+    }
     // Armour-layer leech (Thirsting affix + ember_ring trinket): player-origin
     // hits only. 0 with nothing worn, so the shipped path is untouched.
     // Routed through _healPlayer (as is every incidental heal) so BERSERKER's
@@ -1711,25 +1809,55 @@ export class Game {
     this.fx.addHitStop(crit ? 0.055 : 0.03);
 
     if (opts.knockback) {
-      tmpV2.copy(e.pos).sub(opts.from || this.player.pos).setY(0);
-      const kbDist = tmpV2.length();
-      if (kbDist > 1e-4) tmpV2.divideScalar(kbDist);
-      let kb = opts.knockback / (e.isBoss ? 6 : 1);
-      if (kb < 0) {
+      if (opts.knockback < 0) {
         // NEGATIVE knockback is the hand axe's hook (RPG_SPEC familyTable's
         // -12 finisher): a pull TOWARD the attacker, not a value to clamp to
-        // zero. Enemy velocity damps at 7/s (see _updateEnemies), so an
-        // impulse v travels ~v/7 m — the table's 12 closes ~1.7 m. The cap
-        // keeps the pull from dragging a close target THROUGH the player:
-        // never pull more than would land it at arm's length (1.3 m).
+        // zero — and deliberately NOT routed through the mass law below: the
+        // hook's whole promise is "nothing it touches gets to leave", and a
+        // pull that a brute's mass could shrug off would break the verb the
+        // family is named for. Enemy velocity damps at 7/s (see
+        // _updateEnemies), so an impulse v travels ~v/7 m — the table's 12
+        // closes ~1.7 m. The cap keeps the pull from dragging a close target
+        // THROUGH the player: never pull more than would land it at arm's
+        // length (1.3 m).
+        tmpV2.copy(e.pos).sub(opts.from || this.player.pos).setY(0);
+        const kbDist = tmpV2.length();
+        if (kbDist > 1e-4) tmpV2.divideScalar(kbDist);
+        let kb = opts.knockback / (e.isBoss ? 6 : 1);
         kb = -Math.min(-kb, Math.max(0, (kbDist - 1.3) * 7));
         // HOOKFANG ASCENDANT (tempo verb): the pull also staggers what it
         // drags. Player-origin only — a bound shadow swinging an axe carries
         // no rule.
         const ps = opts.origin !== 'shadow' ? this.weapon?.rule?.fx.pullStagger : 0;
         if (ps) e.stagger = Math.max(e.stagger, ps);
+        e.vel.addScaledVector(tmpV2, kb);
+      } else {
+        // THE MASS LAW (Wave D stage 3): positive knockback resolves through
+        // attacks.js hitAwayFrom — push directly away from the ATTACKER,
+        // normalised, divided by the target archetype's poise mass. What
+        // changes on screen: a grunt (mass 1.00) moves byte-identically to
+        // the old flat shove, a stalker/howler (0.62) genuinely flies, a
+        // brute (2.30) barely yields, and the boss's bespoke /6 becomes the
+        // boss profile's mass 7 — one law, no special case. applyHit also
+        // banks poise damage per blow (keyed by hitKind — the player's
+        // stepKind, 'skill' for skill riders, 'shadow' for the army) and
+        // grants the 1.5x break shove when a pool empties: the stage-3
+        // preview of poise — "the break is the moment the knockback finally
+        // moves them" — while stagger/hitstun stay owned by the shipped
+        // e.stagger/e.hurt fields until the poise stage proper reads them.
+        // Deterministic: no dice anywhere in this path. The reaction is made
+        // lazily so only bodies that ever take a shove pay for one; its
+        // regen runs on tickReaction in the enemy loop.
+        const react = e.react
+          || (e.react = makeReaction(e.base?.poise || e.key, Boolean(e.isBoss)));
+        const kind = opts.hitKind
+          || (opts.origin === 'skill' ? 'skill' : (opts.origin === 'shadow' ? 'shadow' : 'light'));
+        const src = opts.from || this.player.pos;
+        const res = hitAwayFrom(react, swingHit(kind, opts.knockback, 0, 0),
+          src.x, src.z, e.pos.x, e.pos.z);
+        e.vel.x += res.knockX;
+        e.vel.z += res.knockZ;
       }
-      e.vel.addScaledVector(tmpV2, kb);
     }
 
     // FLAME + FROST hit hooks (step 9). "Every hit you land" is every
@@ -2229,8 +2357,37 @@ export class Game {
     this.flash.style.opacity = Math.min(0.42, dmg / this.derived.maxHp * 1.6);
     setTimeout(() => { this.flash.style.opacity = 0; }, 110);
 
+    // STRUCK FEEL (Wave D stage 3): the mass law's other half — the player's
+    // own wounds get the contact beat enemies always gave THEM. One branch on
+    // the existing hit-stop clock (update()'s fx.hitStop freeze), never a new
+    // clock: a brief stop scaled by how much of the health bar the blow took
+    // (a chip is one frozen frame, a boss slam approaches the cap), hard-
+    // capped at STRUCK_STOP_MAX per event so a pattern-dense A/S room reads
+    // as pressure, not as hitching — addHitStop's max() latch makes the cap
+    // structural rather than additive. Gated with the same `unstoppable`
+    // read as the shove below: a build that bought "trash cannot stagger
+    // you" (ossuary 5pc) bought freedom from trash freeze frames too.
+    if (!unstoppable) {
+      this.fx.addHitStop(Math.min(STRUCK_STOP_MAX, 0.03 + 0.045 * Math.min(1, (dmg / this.derived.maxHp) / 0.2)));
+    }
+
     if (from && !unstoppable) {
       tmpV2.copy(p.pos).sub(from).setY(0);
+      // DIRECTIONAL FLINCH (stage 3): remember which side the blow came from,
+      // in the player's own frame, for the rig — the body leans away from
+      // the hit instead of the old direction-blind shimmy (see animateRig's
+      // flinch param; p.hurt above is the clock that plays it out). The sign
+      // is the y-component of facing x blow-direction: positive = struck
+      // from the left, lean right. Magnitude saturates so a glancing rear
+      // hit still reads; a dead-frontal blow (cross ~0) keeps a residual
+      // lean from whichever side it barely favoured.
+      const fl = tmpV2.length();
+      if (fl > 1e-4) {
+        const bx = tmpV2.x / fl, bz = tmpV2.z / fl;
+        const lat = Math.sin(p.yaw) * bz - Math.cos(p.yaw) * bx;
+        p.flinchSide = Math.abs(lat) < 0.25 ? (lat < 0 ? -0.25 : 0.25)
+          : Math.max(-1, Math.min(1, lat * 1.4));
+      }
       // 1.6 m is the shipped shove; knockTakenMul (feet secondary clamped at
       // -50%, then ossuary 4pc x0.75) scales the DISTANCE the body solves for.
       applyKnockback(p.body, tmpV2, p.body.impulseForDistance(1.6 * d.knockTakenMul));
@@ -2394,8 +2551,12 @@ export class Game {
     if (!step.bolt && !step.beam) this._faceNearest(7);
     // The step's forward carry, in metres — the body solves the impulse that
     // travels it, exactly as the dash does. This is what walks the daggers
-    // into the target and leans the heavies into their arcs.
-    const lunge = consumeLunge(p.attack);
+    // into the target. momentumCarry (Wave D stage 3): heavy steps are tagged
+    // lungeCurve 'carry' and return ~0 HERE — their lunge is metered out
+    // per-frame by the hook after tickAttack instead, so the body leans into
+    // the swing across windup+active rather than popping at the press. Light
+    // steps still take the whole impulse on this call, byte-identically.
+    const lunge = consumeLunge(p.attack, w);
     if (lunge > 0 && p.body) {
       const f = this._forward(p.yaw, tmpV);
       const v0 = p.body.impulseForDistance(lunge);
@@ -2427,8 +2588,18 @@ export class Game {
     if (step.beam) return this._beginStaffBeam(w, step);
     const range = hitRange(w, step);
     const arc = hitArc(w, step);
-    // The maul pound is the one radial attack in the game: a ground slam has
-    // no front, so it takes everything in the circle instead of a cone.
+    // --- THE ARM-FRAME PASS (Wave D stage 3) -------------------------------
+    // The shipped instant test still runs, byte-identically, on the fire
+    // frame: radial filter for the maul pound, _coneTargets for everything
+    // else (the exact call, args and all, that tools/weapon-feel-test.mjs
+    // captures to prove the shipped constants reach _damageEnemy on the
+    // windup frame). The combo tables' arcs are authored as FULL-SWING
+    // sectors, so the arm-frame cone is the shipped claim — what stage 3 adds
+    // is the sweep armed alongside it: a travelling band that spends the rest
+    // of the active window catching what the instant test never could, the
+    // target that walks INTO the arc between two frames. Arm-frame targets
+    // are seeded into the sweep's already-hit list, so the two passes can
+    // never double-bill one swing.
     const hits = isRadial(step)
       ? this.enemies.filter((e) => tmpV2.copy(e.pos).sub(p.pos).setY(0).length() <= range + e.radius)
       : this._coneTargets(p.pos, p.yaw, range, arc);
@@ -2443,42 +2614,34 @@ export class Game {
     const charged = Boolean(step.charge) && cMul >= 1 + ((step.charge?.dmgMul || 1) - 1) * 0.9;
     let stagger = hitStagger(w, step);
     if (charged && w.rule?.fx.chargedStaggerMul) stagger *= w.rule.fx.chargedStaggerMul;
-    let crits = 0;
-    // FLAME affinity (+1 per enemy KILLED BY A COMBO FINISHER): a transient
-    // flag around exactly the finisher's own cone hits — _killEnemy reads it
-    // mid-_damageEnemy. The AFTERSHOCK shockwave and the emberfall detonate
-    // below deliberately do not count; they are riders, not the finisher.
-    // Cleared in the finally so an exception can never leave it stuck on.
-    this._finisherBlow = Boolean(step.finisher);
-    try {
-    hits.forEach((e) => {
-      if (this._damageEnemy(e, dmg, {
-        knockback: hitKnockback(w, step),
-        stagger,
-        from: p.pos,
-      })) crits++;
-      // The axe opens a wound on every CONNECTING hit; a killing blow has
-      // nothing left to bleed.
-      if (step.bleed && e.hp > 0) this._applyBleed(e, dmg);
-      // VOIDGLAIVE ASCENDANT (positioning verb): wide-arc steps pull every
-      // target toward the arc's centre — never past arm's length of it. The
-      // velocity damps at 7/s (see _updateEnemies), so an impulse of d*7
-      // travels ~d metres.
-      const pull = w.rule?.fx.sweepPull;
-      if (pull && step.arc >= Math.PI * 0.5 && !isRadial(step) && e.hp > 0) {
-        tmpV2.copy(p.pos).addScaledVector(this._forward(p.yaw, tmpV), range * 0.5).sub(e.pos).setY(0);
-        const d = tmpV2.length();
-        if (d > 0.3) e.vel.addScaledVector(tmpV2.divideScalar(d), Math.min(pull, d - 0.3) * 7);
-      }
-    });
-    } finally { this._finisherBlow = false; }
-    // WHISPERFANGS ASCENDANT (tempo verb): a crit refunds recovery time, at
-    // most critRefundMax per combo (counter reset when the opener starts).
-    const cr = w.rule?.fx.critRefund;
-    if (cr && crits > 0) {
-      const n = Math.min(crits, (w.rule.fx.critRefundMax || 3) - this._critRefunds);
-      if (n > 0) { p.attack.t += cr * n; this._critRefunds += n; }
-    }
+    // Stash this application's rolled numbers for the sweep's later frames —
+    // the travelling band must apply the SAME hit the fire frame computed
+    // (same charge multiplier, same stagger), not a recomputation from
+    // whatever state the world drifted into two frames later.
+    _pSwing.step = step;
+    _pSwing.w = w;
+    _pSwing.dmg = dmg;
+    _pSwing.stagger = stagger;
+    _pSwing.knock = hitKnockback(w, step);
+    _pSwing.kind = stepKind(step);
+    _pSwing.range = range;
+    _pSwing.arc = arc;
+    _pSwing.radial = isRadial(step);
+    _pSwing.finisher = Boolean(step.finisher);
+    _pSwing.connected = false;
+    _pSwing.fresh = true;
+    // Arm the sweep from the authored bridge (attacks.js stepSweepSpec reads
+    // only fields the step already carries). sweepDir alternates with the
+    // combo index so successive slashes travel opposite ways — which edge of
+    // a crowd gets clipped first alternates with the visible swing.
+    const sw = this._pSweep || (this._pSweep = makeSweep());
+    armSweep(sw, stepSweepSpec(step, w.reachMul, w.arcMul, (p.attack.index % 2) ? -1 : 1),
+      p.pos.x, p.pos.z, p.yaw);
+    for (let i = 0; i < hits.length; i++) sw.already.push(hits[i]);
+    // Per-target work — damage, bleed, pull, the landed-at-all riders and
+    // WHISPERFANGS' crit refund — all live in _swingConnect, shared verbatim
+    // with the sweep's later frames.
+    hits.forEach((e) => this._swingConnect(e));
     if (step.finisher) {
       // SUNDERAXE ASCENDANT (tempo verb): the finisher's stagger lands on
       // everything in the arc AT HALF AGAIN THE REACH, hit or miss — the wind
@@ -2488,11 +2651,9 @@ export class Game {
           if (!hits.includes(e) && e.hp > 0) e.stagger = Math.max(e.stagger, stagger);
         }
       }
-      // VIGIL ASCENDANT (tempo verb): LANDING the thrust finisher resets Dash.
-      if (w.rule?.fx.finisherDashReset && hits.length > 0) {
-        this.player.cds.dash = 0;
-        this.fx.ring(p.pos, 0x9dd8ff, 2.2, 0.25);
-      }
+      // (VIGIL ASCENDANT's dash reset moved into _swingConnect — it keys on
+      // LANDING, and with a travelling window "landing" can happen on any
+      // frame of the sweep, not only this one.)
       // GRAVEMAUL ASCENDANT (positioning verb): the radial pound leaves a
       // crater that slows everything inside. One zone at a time — a second
       // pound MOVES the crater rather than stacking a field of them.
@@ -2507,10 +2668,8 @@ export class Game {
       // combo's whole identity, so all three masteries hang off it.
       const mt = this._mastery;
       if (mt && mt.str >= 1) {
-        // T1 SUNDER: every connecting finisher opens ARMOUR BREAK — the
-        // target takes +18% from all sources (read in _damageEnemy, run down
-        // in _updateEnemies) for 5 s. Refreshes, never stacks.
-        hits.forEach((e) => { if (e.hp > 0) e.sunderT = MASTERY.sunder.seconds; });
+        // (T1 SUNDER's per-target mark moved into _swingConnect: every
+        // connecting finisher hit — arm-frame or swept — opens the break.)
         if (mt.str >= 2) {
           // T2 AFTERSHOCK: the finisher also detonates a 5 m shockwave for
           // 40% of atk, riding the existing finisher ring + shake — no new
@@ -2552,13 +2711,8 @@ export class Game {
     if (cMul > 1) this.fx.addShake(0.2 * (cMul - 1));
     if (step.finisher) this.fx.ring(p.pos, 0x9dd8ff, 4.5, 0.35);
     if (step.finisher) {
-      // emberfall 4pc: finishers leech 3% of damage DEALT — per connecting
-      // target, because dmg here is per-target. Through _healPlayer so the
-      // BERSERKER healing tax prices it like every other incidental heal.
-      const fl = this._armorBonus?.finisherLeech || 0;
-      if (fl > 0 && hits.length) {
-        this._healPlayer(dmg * fl * hits.length);
-      }
+      // (emberfall 4pc's finisher leech moved into _swingConnect — it is
+      // per-connecting-target, and connections now arrive across the window.)
       // emberfall 5pc: every THIRD combo finisher detonates for 60% weapon
       // damage in a 4 m ring. The counter is per-run (reset in _beginGate)
       // and counts finishers THROWN, not landed — a ground burst goes off
@@ -2581,12 +2735,149 @@ export class Game {
       }
     }
     // shake rides the step whether or not it connects (the air moves); the
-    // hit-stop only lands on contact — freezing time for a whiff reads as lag.
+    // hit-stop only lands on contact — freezing time for a whiff reads as lag
+    // — so it lives in _swingConnect now, on the FIRST connection wherever in
+    // the window it falls. The whiff burst stays on the fire frame even
+    // though the sweep may yet connect: the woosh is the blade moving air,
+    // not a verdict on the swing.
     if (step.shake) this.fx.addShake(step.shake);
-    if (hits.length > 0) {
-      if (step.hitStop) this.fx.addHitStop(step.hitStop);
-    } else {
+    if (hits.length === 0) {
       this.fx.burst(tmpV.copy(p.pos).addScaledVector(this._forward(p.yaw), 2).setY(1), 4, 0x9dd8ff, { speed: 3, up: 1, life: 0.25 });
+    }
+  }
+
+  /**
+   * One target connecting with the CURRENT player swing application (Wave D
+   * stage 3) — on the fire frame (the arm-frame pass) or on any later frame
+   * the travelling sweep first covers it. Everything per-target the old
+   * instant forEach did lives here, plus the riders that key on "landed at
+   * all" (dash reset, hit-stop), which fire on the FIRST connection of the
+   * application so a swing that only catches a late walker still registers
+   * in the hand. Reads the application's stashed numbers from _pSwing —
+   * never recomputes them — so a swept hit is the SAME hit the fire frame
+   * rolled. Returns whether the application crit on this target.
+   */
+  _swingConnect(e) {
+    const p = this.player;
+    const { step, w, dmg, stagger, knock, kind, range } = _pSwing;
+    const first = !_pSwing.connected;
+    _pSwing.connected = true;
+    // FLAME affinity (+1 per enemy KILLED BY A COMBO FINISHER): the transient
+    // flag wraps exactly the finisher's own connections — _killEnemy reads it
+    // mid-_damageEnemy. Cleared in the finally so an exception can never
+    // leave it stuck on. Riders (AFTERSHOCK, emberfall detonate) never enter.
+    this._finisherBlow = _pSwing.finisher;
+    let crit = false;
+    try {
+      // hitKind feeds the knockback mass law at the damage funnel — a
+      // finisher shoves through hitAwayFrom as a 'finisher', a thrust as a
+      // 'thrust' (attacks.js stepKind read the step once, at the fire frame).
+      crit = this._damageEnemy(e, dmg, { knockback: knock, stagger, from: p.pos, hitKind: kind });
+      // The axe opens a wound on every CONNECTING hit; a killing blow has
+      // nothing left to bleed.
+      if (step.bleed && e.hp > 0) this._applyBleed(e, dmg);
+      // VOIDGLAIVE ASCENDANT (positioning verb): wide-arc steps pull every
+      // target toward the arc's centre — never past arm's length of it. The
+      // velocity damps at 7/s (see _updateEnemies), so an impulse of d*7
+      // travels ~d metres.
+      const pull = w.rule?.fx.sweepPull;
+      if (pull && step.arc >= Math.PI * 0.5 && !isRadial(step) && e.hp > 0) {
+        tmpV2.copy(p.pos).addScaledVector(this._forward(p.yaw, tmpV), range * 0.5).sub(e.pos).setY(0);
+        const d = tmpV2.length();
+        if (d > 0.3) e.vel.addScaledVector(tmpV2.divideScalar(d), Math.min(pull, d - 0.3) * 7);
+      }
+      if (_pSwing.finisher) {
+        // T1 SUNDER (BREAKER): every connecting finisher opens ARMOUR BREAK —
+        // +18% from all sources (read in _damageEnemy, run down in
+        // _updateEnemies) for 5 s. Refreshes, never stacks.
+        if (this._mastery?.str >= 1 && e.hp > 0) e.sunderT = MASTERY.sunder.seconds;
+        // emberfall 4pc: finishers leech 3% of damage DEALT, per connecting
+        // target. Through _healPlayer so the BERSERKER healing tax prices it
+        // like every other incidental heal.
+        const fl = this._armorBonus?.finisherLeech || 0;
+        if (fl > 0) this._healPlayer(dmg * fl);
+        // VIGIL ASCENDANT (tempo verb): LANDING the thrust finisher resets
+        // Dash. First connection only — one reset (and one ring) per blow.
+        if (first && w.rule?.fx.finisherDashReset) {
+          p.cds.dash = 0;
+          this.fx.ring(p.pos, 0x9dd8ff, 2.2, 0.25);
+        }
+      }
+    } finally { this._finisherBlow = false; }
+    // WHISPERFANGS ASCENDANT (tempo verb): a crit refunds recovery time, at
+    // most critRefundMax per combo (counter reset when the opener starts).
+    // Incremental — one refund per crit as it lands — which sums to exactly
+    // the old post-loop arithmetic for the arm-frame batch and extends the
+    // same budget to swept crits.
+    const cr = w.rule?.fx.critRefund;
+    if (cr && crit && this._critRefunds < (w.rule.fx.critRefundMax || 3)) {
+      p.attack.t += cr;
+      this._critRefunds++;
+    }
+    // The mass law's contact beat: the step's authored freeze, once per
+    // application, on the frame the blade FIRST bites — light steps carry
+    // one-frame values now (weapons.js stage-3 table note), heavies keep
+    // their big stops. addHitStop is max()-latched, so a flurry of lights
+    // can never stack into a hitch.
+    if (first && step.hitStop) this.fx.addHitStop(step.hitStop);
+    return crit;
+  }
+
+  /**
+   * Advance the player's live sweep by `adv` seconds of MACHINE time (already
+   * rate-scaled by the caller) and connect whatever the travelling band newly
+   * covers. The arm frame itself is skipped — _applySwingHit's instant pass
+   * already owned that frame's coverage (and seeded its targets into
+   * `already`), so the first advance here is the window's second frame.
+   * A dead machine (cancel, weapon swap, death) kills the window: no blade,
+   * no band.
+   */
+  _tickPlayerSweep(adv) {
+    const sw = this._pSweep;
+    if (!sw || !sw.live) return;
+    const p = this.player;
+    if (!p.attack.active || _pSwing.w !== this.weapon) { sw.live = false; return; }
+    if (_pSwing.fresh) { _pSwing.fresh = false; return; }
+    advanceSweep(sw, adv, p.pos.x, p.pos.z, p.yaw);
+    // liveTarget (attacks.js) also skips still-spawning bodies — stricter
+    // than the arm pass's legacy filter, and the right strictness for a hit
+    // that arrives mid-window: a body still rising out of the floor on the
+    // fire frame is not "walking into the arc", it is not there yet.
+    if (collectSweep(sw, this.enemies, _sweepOut, liveTarget) > 0) {
+      // THE TABLE CONE BOUNDS, THE SWEEP TIMES (the player-side honesty
+      // law, mirror of the enemy side's tell clamp). stepSweepSpec's band
+      // plus its travel plus the body-width pad claims MORE total angle
+      // than the authored arc — and the authored arc x range is a byte
+      // CONTRACT (weapon-feel-test drives the shipped constants through
+      // this path and pins what they hit). So every continuation connect
+      // must also sit inside the instant cone the arm pass tested: same
+      // range + radius reach, same exact cos(arc/2) angle rule, no width
+      // pad — the sweep decides WHEN inside that sector a body is struck,
+      // never widens it. A body the band covered OUTSIDE the sector is
+      // unmarked again (spliced from `already`) so a walker that crosses
+      // into the sector while the window is still open is not silently
+      // spent by the rejection.
+      const fwdX = Math.sin(p.yaw);
+      const fwdZ = Math.cos(p.yaw);
+      const halfCos = _pSwing.radial ? -1 : Math.cos(_pSwing.arc / 2);
+      for (let i = 0; i < _sweepOut.length; i++) {
+        const e = _sweepOut[i];
+        const dx = e.pos.x - p.pos.x;
+        const dz = e.pos.z - p.pos.z;
+        const dist = Math.hypot(dx, dz);
+        const inside = dist <= _pSwing.range + (e.radius || 0)
+          && (dist < 0.001 || _pSwing.radial
+            || (dx * fwdX + dz * fwdZ) / dist > halfCos);
+        if (inside) {
+          // _sweepOut is a snapshot: _swingConnect can kill (splicing
+          // this.enemies), and the collector is not mid-iteration here.
+          this._swingConnect(e);
+        } else {
+          for (let j = sw.already.length - 1; j >= 0; j--) {
+            if (sw.already[j] === e) { sw.already.splice(j, 1); break; }
+          }
+        }
+      }
     }
   }
 
@@ -2720,7 +3011,7 @@ export class Game {
    */
   _bowCue(p) {
     const element = this._arrowElement();
-    _bowFrom.set(p.pos.x, BOW.launchY, p.pos.z);
+    _bowFrom.set(p.pos.x, p.pos.y + BOW.launchY, p.pos.z);
     this.fx.flash(_bowFrom, 'magic_01', {
       size: 0.6, life: 0.2, color: element ? TINT_TARGETS[element] : 0xffe2a8,
     });
@@ -2753,7 +3044,7 @@ export class Game {
     // already loosed and cover is the wall's argument to win, not the UI's.
     let target = this._bowTarget(w);
     if (target && this.world.obstacleField?.lineBlocked(
-      p.pos.x, p.pos.z, target.pos.x, target.pos.z, { radius: 0.2, feetY: BOW.launchY },
+      p.pos.x, p.pos.z, target.pos.x, target.pos.z, { radius: 0.2, feetY: p.pos.y + BOW.launchY },
     )) target = null;
 
     let vy;
@@ -2771,7 +3062,10 @@ export class Game {
       // point-blank lock divides by a tiny T and the hit sphere already
       // covers the chest there — an arrow leaving near-vertically reads as
       // a misfire, not an aim assist.
-      vy = Math.max(-8, Math.min(8, (chestY - BOW.launchY) / T + 0.5 * BOW.gravity * T));
+      // Absolute gap: target chest above ITS floor minus launch above OURS
+      // (tower wiring — cross-terrace shots arc for real; flat kinds see the
+      // identical chestY - launchY).
+      vy = Math.max(-8, Math.min(8, ((target.pos.y + chestY) - (p.pos.y + BOW.launchY)) / T + 0.5 * BOW.gravity * T));
     } else {
       // No lock: a gentle rise down the camera line. The drop numbers in
       // weapons.BOW's comment are exactly what the player learns from here.
@@ -2785,7 +3079,7 @@ export class Game {
     if (this.pool.countFlying('arrow') >= BOW.maxLive) this.pool.reclaimOldest('arrow');
     _bowFrom.set(
       p.pos.x + _bowDir.x * 0.45,
-      BOW.launchY,
+      p.pos.y + BOW.launchY,      // the player's floor, not the world's
       p.pos.z + _bowDir.z * 0.45,
     );
     const element = this._arrowElement();
@@ -2831,7 +3125,7 @@ export class Game {
     const boltCost = STAFF.boltMp * this._skillCostMul('attack');
     if (p.mp < boltCost) {
       this.ui.toast('NOT ENOUGH MANA');
-      this.fx.burst(_staffFrom.copy(p.pos).setY(STAFF.launchY), 4, 0x9db0ff, { speed: 2, up: 1, life: 0.25 });
+      this.fx.burst(_staffFrom.copy(p.pos).setY(p.pos.y + STAFF.launchY), 4, 0x9db0ff, { speed: 2, up: 1, life: 0.25 });
       return;
     }
     p.mp -= boltCost;
@@ -2842,7 +3136,7 @@ export class Game {
     // to a free shot down the camera line.
     let target = this._bowTarget(w, STAFF.reach, STAFF.coneCos);
     if (target && this.world.obstacleField?.lineBlocked(
-      p.pos.x, p.pos.z, target.pos.x, target.pos.z, { radius: 0.2, feetY: STAFF.launchY },
+      p.pos.x, p.pos.z, target.pos.x, target.pos.z, { radius: 0.2, feetY: p.pos.y + STAFF.launchY },
     )) target = null;
 
     const speed = STAFF.boltSpeed;
@@ -2858,7 +3152,7 @@ export class Game {
       const chestY = 1.2 * (target.base?.scale || 1);
       // Same clamp as the bow's: the solve is honest at range and silly at
       // point-blank, where the hit sphere already covers the chest.
-      vy = Math.max(-8, Math.min(8, (chestY - STAFF.launchY) / T + 0.5 * STAFF.gravity * T));
+      vy = Math.max(-8, Math.min(8, ((target.pos.y + chestY) - (p.pos.y + STAFF.launchY)) / T + 0.5 * STAFF.gravity * T));
     } else {
       this._camForward(_staffDir);
       vy = speed * STAFF.riseVy;
@@ -2871,7 +3165,7 @@ export class Game {
     if (this.pool.countFlying('arrow') >= STAFF.maxLive) this.pool.reclaimOldest('arrow');
     _staffFrom.set(
       p.pos.x + _staffDir.x * 0.5,
-      STAFF.launchY,
+      p.pos.y + STAFF.launchY,    // the player's floor, not the world's
       p.pos.z + _staffDir.z * 0.5,
     );
     const rec = this.pool.spawn({
@@ -3401,7 +3695,11 @@ export class Game {
     // per-shot dir.clone() the old code paid is gone too. Trajectory maths are
     // otherwise untouched: flat dir, g = 0, vy = 0, which the pool integrates
     // byte-identically to the loop this replaced.
-    _projFrom.copy(from).setY(PROJECTILE_Y);
+    // ABOVE THE SHOOTER'S FLOOR, not the world's (tower wiring): heightAt
+    // is 0 in every flat kind, so this is float-identical there and correct
+    // on a B-rank upper terrace, where the old absolute 1.6 put every bolt
+    // underground and ranged fire was dead in both directions.
+    _projFrom.copy(from).setY(this.world.heightAt(from.x, from.z) + PROJECTILE_Y);
     _projDir.copy(target).sub(_projFrom).setY(0).normalize();
     const rec = this.pool.spawn({
       from: _projFrom, dir: _projDir, speed, damage, color, life: 4, kind: 'bolt',
@@ -3692,6 +3990,29 @@ export class Game {
       atkDt *= 1 + this._killStacks * this._classFlags.killStackAtkSpeedPct;
     }
     if (w) tickAttack(p.attack, w, atkDt, this._onSwingHit);
+    // THE PLAYER SWEEP (Wave D stage 3). _applySwingHit armed a travelling
+    // hitbox at its fire frame; this advances it on the SAME clock the
+    // machine runs (atkDt x rate — a Quick affix speeds the travel exactly as
+    // it speeds the swing, and hit-stop freezes both together) and applies
+    // the stashed application to whatever the moving band newly covers.
+    if (w) this._tickPlayerSweep(atkDt * w.rate);
+    // momentumCarry (stage 3): a 'carry' step's lunge arrives here, one
+    // eased slice per frame, on the machine's own clock (consumeLunge reads
+    // state.t — see weapons.js). The metres-to-impulse conversion is
+    // impulseForDistance(1) x metres: ONE cached solve scaled linearly, so
+    // sixty tiny slices cost nothing, at the price of a slight undershoot
+    // versus the single-impulse solve (continuous feed gives friction more
+    // frames to eat). That undershoot is accepted on purpose — the carry is
+    // a lean, not a dash, and arriving a shade short of the authored lunge
+    // reads as weight where overshooting would read as skating.
+    if (w && p.attack.active && p.body) {
+      const carry = consumeLunge(p.attack, w);
+      if (carry > 0) {
+        const f = this._forward(p.yaw, tmpV);
+        const v0 = p.body.impulseForDistance(1) * carry;
+        p.body.addImpulse(f.x * v0, 0, f.z * v0);
+      }
+    }
     // TEMPEST STEP: "basic attacks ignore their cooldown" — the inter-combo
     // cd the machine just banked is zeroed while the window runs. The steps'
     // own windup/active/recovery timing is untouched: the storm buys cadence
@@ -3858,6 +4179,11 @@ export class Game {
       // start value in _tryDash. Purely visual — i-frames are p.invuln's.
       dashPhase: p.dashTimer > 0 ? p.dashTimer / 0.26 : 0,
       hurt: Math.max(0, p.hurt),
+      // Directional flinch (stage 3): the side _damagePlayer computed from
+      // the blow's bearing, live only while the hurt clock runs. Skinned
+      // bodies ignore it (their HitRecieve clip is the flinch); the
+      // procedural box-man leans away from the hit with it.
+      flinch: p.hurt > 0 ? (p.flinchSide || 0) : 0,
       airborne: !p.body.grounded,
       riseRate: p.vel.y,
       // The time-scaled dt, so hit-stop and level-up dilation slow the
@@ -3888,7 +4214,10 @@ export class Game {
       // trip", so it has to be asked at the height the shot travels at.
       a.losBlocked = dist <= a.range
         && Boolean(this.world.obstacleField?.lineBlocked(
-          e.pos.x, e.pos.z, this.player.pos.x, this.player.pos.z, { feetY: PROJECTILE_Y }));
+          e.pos.x, e.pos.z, this.player.pos.x, this.player.pos.z,
+          // e.pos.y IS the shooter's floor (bodies settle to heightAt) —
+          // absolute tops in the tower's obstacle field need an absolute ray.
+          { feetY: e.pos.y + PROJECTILE_Y }));
     }
     return a.losBlocked;
   }
@@ -4068,7 +4397,9 @@ export class Game {
       if (e.spawning > 0) {
         e.spawning -= dt;
         const k = 1 - Math.max(0, e.spawning) / (e.isBoss ? 1.2 : 0.55);
-        e.mesh.position.y = THREE.MathUtils.lerp(e.isBoss ? -6 : -3, 0, k);
+        // Rise to the enemy's own floor (tower wiring): e.pos.y is where
+        // the body settles; the old absolute 0 made upper-floor spawns pop.
+        e.mesh.position.y = e.pos.y + THREE.MathUtils.lerp(e.isBoss ? -6 : -3, 0, k);
         e.mesh.position.x = e.pos.x;
         e.mesh.position.z = e.pos.z;
         continue;
@@ -4097,6 +4428,50 @@ export class Game {
         }
       }
       if (e.attackCd > 0) e.attackCd -= edt;
+      // The pattern plan's per-pattern cooldowns run down on the ACTION clock
+      // (edt), like attackCd: Rime slows how often a jab may recur exactly as
+      // it slows the jab itself. plan.pattern is ALWAYS null here (stage 2
+      // uses the plan as the dice cup — selection state, cooldowns, chains —
+      // never as the clock; see the commit site below), so tickPattern is
+      // purely the cds/gcd decrement and its stage machine stays idle.
+      if (e.plan) tickPattern(e.plan, edt);
+      // Poise regen (stage 3's slice of the reaction state): the pool the
+      // mass-law knockback drains refills on the ACTION clock, so Rime slows
+      // an enemy's recovery from pressure exactly as it slows the enemy.
+      if (e.react) tickReaction(e.react, edt);
+      // THE ENEMY SWEEP (Wave D stage 3): a strike window _resolvePattern
+      // armed is advanced here, on the same action clock as every other
+      // attack timer, BEFORE the strike dispatch below — so a sweep armed
+      // later this frame is never advanced on its own arm frame (the window
+      // opens at the contact instant; the arm frame's k=0 coverage was
+      // tested at the arm site). The sweep follows the body (cones ride the
+      // yaw, the lancer's lunge carries its lane) except where the arm site
+      // anchored it; the player is one target, so sweepHitsPoint's token
+      // bookkeeping makes the whole window a single application — covered
+      // once, hit once, and a dash THROUGH the band during i-frames counts
+      // as dodged for the rest of the window (the blade passed you).
+      if (e.sweep && e.sweep.live) {
+        advanceSweep(e.sweep, edt, e.pos.x, e.pos.z, e.yaw);
+        const spat = e._sweepPat;
+        if (spat && sweepHitsPoint(e.sweep, p.pos.x, p.pos.z, 0.4)) {
+          // Folded multi-hit, unchanged from stage 2 (dmg x hits in one
+          // application): _damagePlayer's 0.42 s i-frames still eat any
+          // honest second tap, and the stalker's pressure ledger
+          // (ENEMY_RHYTHM's gcd derivation) is balanced against the fold.
+          // Unfolding waits for the poise stage to reshape player i-frames.
+          this._damagePlayer(e.atk * (spat.dmg ?? 1) * (spat.hits || 1), e.pos, e);
+        }
+        if (!e.sweep.live) {
+          // RETREAT (the lancer's hop-back) moved from the arm frame to the
+          // window's END: the body finishes travelling its lane, THEN hops
+          // out. At the arm frame it would drag a follow-sweep backward
+          // through floor the tell never marked.
+          if (spat?.retreat) {
+            e.vel.addScaledVector(this._forward(e.yaw, tmpV), -spat.retreat);
+          }
+          e._sweepPat = null;
+        }
+      }
       // SUNDER's armour-break clock (set by the finisher, read by
       // _damageEnemy and the residue tick) runs down like hurt/stagger do.
       if (e.sunderT > 0) e.sunderT -= dt;
@@ -4152,6 +4527,7 @@ export class Game {
           _steerCtx.targetPos = p.pos; _steerCtx.selfPos = e.pos;
           _steerCtx.distance = dist; _steerCtx.losBlocked = false;
           _steerCtx.aggression = 1; _steerCtx.dt = dt;
+          _steerCtx.rnd = this._combatRnd || null;
           const bsteer = steerAgent(e.agent, _steerCtx, dt);
           moveX = bsteer.moveX; moveZ = bsteer.moveZ;
         }
@@ -4162,31 +4538,79 @@ export class Game {
         // DUNGEON_SPEC EDIT 5: casters stop shooting through walls.
         _steerCtx.distance = dist; _steerCtx.losBlocked = this._agentLosBlocked(e, dist, dt);
         _steerCtx.aggression = 1; _steerCtx.dt = dt;
+        _steerCtx.rnd = this._combatRnd || null;
         const steer = steerAgent(e.agent, _steerCtx, dt);
         moveX = steer.moveX; moveZ = steer.moveZ;
         e.vel.x += steer.impulseX; e.vel.z += steer.impulseZ;
         if (steer.wantAttack && e.attackCd <= 0) {
-          // The fairness window is still enemyai.js's number — armed humanoids
-          // just pour it into the machine's windup instead of a bare timer.
-          // startAttack can refuse (recovery of the previous blow still
-          // running); a refused ask charges no cooldown, matching the old
-          // code's behaviour where attackCd alone gated and never overlapped
-          // a live swing.
-          let began = true;
-          if (e.attack) {
-            e.strikeW.combo[0].windup = steer.telegraph;
-            began = Boolean(startAttack(e.attack, e.strikeW));
-            if (began) e.telegraph = steer.telegraph;   // mirror for this frame's readers
-          } else {
-            e.telegraph = steer.telegraph;
-          }
-          if (began) {
-            // Remembered so the attack CLIP can start its windup at telegraph
-            // start and land its blow on the exact frame _enemyStrike fires —
-            // the fairness timing itself is untouched.
-            e.telegraphMax = steer.telegraph;
-            e.attackCd = e.base.attackCd + Math.random() * (steer.attackKind === 'ranged' ? 0.6 : 0.4);
-            noteAttack(e.agent);
+          // THE PATTERN BRAIN (Wave D stage 2). steerAgent still owns the ASK
+          // — its wantAttack gate is the fairness range unchanged — but WHAT
+          // gets thrown now comes off attacks.js's per-archetype roster: a
+          // grunt draws jab or telegraphed overhead, a lancer skewer or lash,
+          // a caster bolt / volley / point-blank wardpulse, a howler leap or
+          // burst. The pattern's own windup replaces the fixed 0.42/0.5/0.55
+          // window — LONGER for every heavy (the overhead's 0.74 s against
+          // the old 0.42), which is the "bigger tell" half of the ask — and
+          // its recovery+gcd replace the flat cadence jitter (the pairing is
+          // derived at ENEMY_RHYTHM; ENEMY_TYPES.attackCd stays the anchor).
+          // Selection is dist-gated and rank-skewed (RANK_PATTERN_SKEW:
+          // higher gates draw heavier, feintier rosters from the SAME
+          // tables), and every roll is the seeded combat fork — a null pick
+          // (all eligible rows cooling down) draws nothing and charges
+          // nothing, so the ask simply re-fires next frame.
+          if (!e.plan) e.plan = makeAttackPlan(e.key);
+          const rnd = this._combatRnd || this.rnd;
+          const skew = rankSkew(this.gate?.rank);
+          _patCtx.dist = dist;
+          _patCtx.rnd = rnd;
+          _patCtx.hpFrac = e.maxHp > 0 ? e.hp / e.maxHp : 1;
+          _patCtx.heavyMul = skew.heavy;
+          _patCtx.feintMul = skew.feint;
+          const pat = selectPattern(e.plan, _patCtx);
+          if (pat) {
+            // startAttack can refuse (recovery of the previous blow still
+            // running); a refused ask charges no cooldown NOR pattern state,
+            // matching the old code's behaviour where attackCd alone gated
+            // and never overlapped a live swing.
+            let began = true;
+            if (e.attack) {
+              // Armed humanoids pour the pattern's numbers into the machine's
+              // one step: windup lands the blow on the exact frame the
+              // fairness countdown promises (the fight suite pins this
+              // frame-exact), recovery is the step's follow-through so
+              // e.swing — and the punish window it represents — is the
+              // PATTERN's recovery, not the old flat 0.3.
+              const st = e.strikeW.combo[0];
+              st.windup = pat.windup;
+              st.recovery = pat.recovery;
+              began = Boolean(startAttack(e.attack, e.strikeW));
+              if (began) e.telegraph = pat.windup;   // mirror for this frame's readers
+            } else {
+              e.telegraph = pat.windup;
+            }
+            if (began) {
+              // beginPattern stamps the roster bookkeeping — last (no-repeat
+              // penalty) and the per-pattern cooldown — then the plan's stage
+              // machine is put straight back to idle: in stage 2 the plan is
+              // the DICE CUP and the shipped machinery above stays the clock.
+              // (tickPattern in this loop only drains cooldowns.) The stage
+              // machine takes over as the clock when stage 3's swept hitboxes
+              // need its active windows.
+              beginPattern(e.plan, pat);
+              e.plan.pattern = null;
+              e.plan.stage = PATTERN_STAGE.IDLE;
+              e._pat = pat;
+              // Remembered so the attack CLIP can start its windup at telegraph
+              // start and land its blow on the exact frame _enemyStrike fires —
+              // the fairness timing itself is untouched.
+              e.telegraphMax = pat.windup;
+              // THE CADENCE (balance guard): commit + recovery + a seeded gcd
+              // roll. attackCd starts counting NOW (it always has), so the
+              // windup and recovery must be inside it or a pattern would
+              // overlap its own follow-through.
+              e.attackCd = pat.windup + pat.recovery + range2(rhythmFor(e.key).gcd, rnd);
+              noteAttack(e.agent);
+            }
           }
         }
 
@@ -4216,7 +4640,14 @@ export class Game {
       // Deliberately still facing the PLAYER, not steer.yaw: the line below has
       // always overwritten the shadow-facing yaw above, and keeping that quirk
       // is what makes this swap behaviour-neutral outside the stuck breaker.
-      if (e.telegraph <= 0 && !staggered) e.yaw = Math.atan2(toPlayer.x, toPlayer.z);
+      // BUT never while a sweep window is LIVE (review blocker): advanceSweep
+      // reads e.yaw every frame, so re-aiming here let a follow-cone track the
+      // player through the active band — the swing chased you across floor the
+      // tell never marked, the exact lie the tell law forbids. The yaw freezes
+      // the frame the band goes live and resumes when it dies.
+      if (e.telegraph <= 0 && !staggered && !(e.sweep && e.sweep.live)) {
+        e.yaw = Math.atan2(toPlayer.x, toPlayer.z);
+      }
 
       e.vel.multiplyScalar(1 - Math.min(0.95, 7 * dt));
       // GRAVEMAUL ASCENDANT (positioning verb): bodies inside the crater cover
@@ -4234,20 +4665,123 @@ export class Game {
       e.mesh.position.copy(e.pos);
       e.mesh.rotation.y = e.yaw;
 
-      // READING (AUGUR T1): the telegraph the fairness system already runs
-      // becomes a VISIBLE ground arc — the actual swing cone (the acos(0.2)
-      // sector _enemyStrike tests) at the actual reach, appearing
-      // derived.tellLeadMs before contact, so more PER genuinely shows the
-      // blow earlier. Ranged casters are skipped (their output is a dodgeable
-      // bolt, not a cone); the boss's slam is radial, so it reads as the full
-      // 11 m disc _bossBrain will actually damage. Pushed per frame into the
-      // pooled channel — max 6 arcs, one draw call, zero when none are live.
-      if (this._mastery?.per >= 1 && e.telegraph > 0
-        && e.telegraph <= this.derived.tellLeadMs / 1000
-        && (e.isBoss || e.base.ai !== 'ranged')) {
+      // THE TELL CHANNEL (Wave D stage 1 — attacks.js's TELL vocabulary
+      // adopted as a rendering channel; fairness before variety). Every
+      // ENEMY windup draws its honest contact shape on the floor for EVERY
+      // save. This generalises the READING (AUGUR T1) arc that lived here:
+      // READING revealed the same acos(0.2) cone tellLeadMs early for
+      // per >= 1, but baseline fairness cannot be a stat — the whole windup
+      // is now visible to everyone, so the mastery's remaining bite is its
+      // T2 cancel roll in _damageEnemy (untouched). THE FILL IS THE TIMER:
+      // each shape grows from nothing at windup start to its true contact
+      // geometry on the exact frame damage lands — k reaches 1 when
+      // e.telegraph reaches 0, the same countdown _enemyStrike (and the
+      // swing machine's mirror above) fires on, so the fill fraction reads
+      // as "how long until this hurts". Only e.telegraph holders draw:
+      // shadow-army swipes and the shadow-aggro bite set e.swing directly
+      // and never enter this channel — tells are the ENEMY fairness
+      // contract, not a general VFX bus, and the player's own attacks stay
+      // untelegraphed. Everything rides the pooled instanced quads (discs
+      // shared with RESIDUE/Ashfall, arcs with the old READING path, lanes
+      // as stretched disc instances): zero per-frame allocation, zero new
+      // programs, zero draw calls on any frame nothing winds up.
+      if (e.telegraph > 0 && e.telegraphMax > 0) {
         const gfx = this._ensureGroundFx();
-        if (e.isBoss && e._slam) gfx.pushDisc(e.pos.x, e.pos.z, 11, READING_COLOR, 1);
-        else gfx.pushArc(e.pos.x, e.pos.z, e.yaw, (e.base.range || 2) + (e.isBoss ? 2.2 : 0.6), READING_COLOR);
+        const k = Math.min(1, Math.max(0, 1 - e.telegraph / e.telegraphMax));
+        if (e.isBoss && e._slam) {
+          // Radial shockwave: a disc growing to the TRUE 11 m radius the
+          // slam resolve damages. Red — there is no cone to sidestep and no
+          // poise to shrug it with; the only answer is OUT before k hits 1.
+          gfx.pushDisc(e.pos.x, e.pos.z, Math.max(0.6, 11 * k), TELL_DANGER_COLOR, 0.6 + 0.4 * k, e.pos.y);
+        } else if (e.isBoss && e._charge) {
+          // Committed rush: a lane along the bearing CAPTURED at windup
+          // start — the same unit vector the resolve will impulse along, so
+          // the lane never lies. Length ~7.5 m: the 34-impulse integrates to
+          // ~4.9 m under the shared 7/s velocity damping, plus the boss's
+          // own body radius and the chase step that follows the rush.
+          gfx.pushLane(e.pos.x, e.pos.z, Math.atan2(e._chargeX ?? 0, e._chargeZ ?? 1),
+            Math.max(0.8, 7.5 * k), Math.max(2.4, e.radius * 2), TELL_DANGER_COLOR, 0.7 + 0.3 * k, e.pos.y);
+        } else if (e.isBoss && e._fan) {
+          // Spread volley: the pooled sector along the CAPTURED aim. The
+          // baked acos(0.2) sector is WIDER than the fan's true +/-0.84 rad
+          // spread — wider than truth is the safe direction (see ARC_HALF's
+          // note in decalpool.js: only an arc narrower than the hit teaches
+          // players to stand in it). Amber: a step off the bearing empties
+          // the middle of the fan.
+          // FIXED length, brightness-as-fill (review nit): a GROWING sector that
+          // stopped at 7 m read as "danger ends here" to a player at the
+          // 10-14 m the volley actually lands (fight-suite trials) — the
+          // direction the tell law forbids. Same rationale as the caster's
+          // fixed feet disc. ?? not ||: an aim of exactly 0 rad is a real
+          // bearing, not a missing one.
+          gfx.pushArc(e.pos.x, e.pos.z, e._fanAim ?? e.yaw, 12, TELL_WARN_COLOR, 0.45 + 0.55 * k, e.pos.y);
+        } else if (e._pat) {
+          // PATTERN TELLS (Wave D stage 2). Every roster entry speaks the
+          // stage-1 channel in its own shape, and the shape is read straight
+          // off the pattern's OWN hit data — the tell can never disagree
+          // with the strike because both read the same row. Colour is the
+          // two-word palette: heavy => red (the shape commits; be elsewhere
+          // at contact), else amber (a step out is a full answer).
+          const pat = e._pat;
+          const col = pat.heavy ? TELL_DANGER_COLOR : TELL_WARN_COLOR;
+          if (pat.feint && k > pat.feint) {
+            // THE FLICKER (attacks.js's one honest mixup): past the feint
+            // fraction the tell DROPS — the floor goes quiet while the strike
+            // is still coming. Drawing nothing here IS the mechanic; the
+            // pattern's windup ran long enough to bait the dodge, and the
+            // rank skew keeps this out of E entirely, where tells are still
+            // being learned.
+          } else if (pat.projectile) {
+            // Caster muzzle cue: the eye-mote flare below stays the primary
+            // ranged tell (a bolt is dodged by watching the CASTER, not the
+            // floor); this small feet disc only makes the winding caster
+            // findable in a crowd at a glance. Fixed radius with brightness
+            // as the fill — a GROWING disc would read as an AoE the bolt does
+            // not have, and an honest tell never claims area it cannot touch.
+            gfx.pushDisc(e.pos.x, e.pos.z, 0.9, col, 0.25 + 0.75 * k, e.pos.y);
+          } else if (pat.shape?.shape === PATTERN_SHAPE.CAPSULE) {
+            // Thrust / pounce lane, the same capsule _resolvePattern will
+            // test: near end at the feet, far end at the pattern's range,
+            // width its thickness both sides.
+            gfx.pushLane(e.pos.x, e.pos.z, e.yaw,
+              Math.max(0.8, pat.shape.range * k), pat.shape.thickness * 2, col, 0.6 + 0.4 * k, e.pos.y);
+          } else if (pat.shape?.shape === PATTERN_SHAPE.CIRCLE) {
+            // Radial burst (howlburst, wardpulse): a disc growing to the true
+            // damage radius — the slam grammar players already know from the
+            // boss, at trash scale.
+            gfx.pushDisc(e.pos.x, e.pos.z, Math.max(0.5, pat.shape.range * k), col, 0.5 + 0.5 * k, e.pos.y);
+          } else if (pat.shape.arc + (pat.shape.sweepArc || 0) > TELL_ARC_DISC) {
+            // A "cone" whose swept coverage (arc + travel) exceeds
+            // TELL_ARC_DISC is really a SPIN — the brute's backhand travels
+            // 1.3pi on top of its 0.55pi width — and the baked arc sector
+            // would claim less floor than the stage-3 sweep hits, the one
+            // direction a tell may never lie in. The honest marker is the
+            // disc: over-wide (the spin's dead zone is time, not angle),
+            // which ARC_HALF's law endorses, and it reuses the slam grammar
+            // players already read.
+            gfx.pushDisc(e.pos.x, e.pos.z, Math.max(0.5, pat.shape.range * k), col, 0.5 + 0.5 * k, e.pos.y);
+          } else {
+            // Swing cone at the PATTERN's reach. The baked acos(0.2) sector
+            // is as wide as (or wider than) every cone's swept coverage —
+            // narrower cones fit inside it and the arm site CLAMPS any
+            // cone's travel so arc + sweepArc never exceeds the drawn
+            // sector (see _resolvePattern) — so wider-than-truth stays the
+            // only direction the tell is wrong in (decalpool's ARC_HALF
+            // note).
+            gfx.pushArc(e.pos.x, e.pos.z, e.yaw, Math.max(0.4, pat.shape.range * k), col, 1, e.pos.y);
+          }
+        } else if (e.base.ai === 'ranged' && !e.isBoss) {
+          // Patternless ranged windup (none ships today — casters always
+          // carry a pattern — kept so a future countdown user still tells).
+          gfx.pushDisc(e.pos.x, e.pos.z, 0.9, TELL_WARN_COLOR, 0.25 + 0.75 * k, e.pos.y);
+        } else {
+          // Patternless melee: today that is exactly the BOSS BITE (its
+          // 0.5 s close-range swipe stays on the plain countdown), plus any
+          // legacy path. The exact acos(0.2) cone _enemyStrike will test, at
+          // the exact reach it tests it, grown over the windup.
+          const reach = (e.base.range || 2) + (e.isBoss ? 2.2 : 0.6);
+          gfx.pushArc(e.pos.x, e.pos.z, e.yaw, Math.max(0.4, reach * k), TELL_WARN_COLOR, 1, e.pos.y);
+        }
       }
 
       // telegraph tint: eyes flare before a strike lands
@@ -4312,6 +4846,30 @@ export class Game {
   _enemyStrike(e) {
     const p = this.player;
     e.swing = 0.3;
+    // A boss windup that belongs to a RANGED or CHARGE pattern is resolved
+    // by _bossBrain (same frame — it runs right after the telegraph
+    // countdown in the enemy loop). The shared countdown still lands here,
+    // but playing the melee swipe's cone test, burst and swing audio under a
+    // spread volley would deal untelegraphed damage and stamp a second,
+    // false tell onto the pattern. Swing stays set: the body still throws
+    // the motion the animation span reads.
+    // _slam joined the guard (review important): the slam's telegraph crosses
+    // zero in the shared countdown, but _bossBrain resolves the slam LATER
+    // the same frame — running the patternless bite cone here first meant a
+    // player at the boss's face ate an untelegraphed 1.0x bite whose 0.42 s
+    // i-frames then swallowed the honest, telegraphed slam.
+    if (e.isBoss && (e._fan || e._charge || e._slam)) return;
+    // PATTERN RESOLUTION (Wave D stage 2): a strike committed through the
+    // roster resolves through the pattern's own shape and numbers. The
+    // pattern is CONSUMED here — a whiffed windup never haunts the next
+    // commit — and the boss deliberately never enters (its bite stays the
+    // patternless cone below, its real patterns live in _bossBrain).
+    if (e._pat && !e.isBoss) {
+      const pat = e._pat;
+      e._pat = null;
+      this._resolvePattern(e, pat);
+      return;
+    }
     if (e.base.ai === 'ranged' && !e.isBoss) {
       this._spawnProjectile(e.pos.clone().setY(PROJECTILE_Y), p.pos.clone().setY(1.2), e.atk, e.base.glow, 14);
       this.audio.tone({ freq: 700, type: 'triangle', gain: 0.1, decay: 0.2, sweep: 300 });
@@ -4333,6 +4891,138 @@ export class Game {
     this.audio.swing();
   }
 
+  /**
+   * Resolve one committed attacks.js pattern at its contact frame (Wave D
+   * stage 2). Fires on the exact frame the fairness countdown promises —
+   * _enemyStrike dispatches here for every trash enemy — and reads ONLY the
+   * pattern row, so the tell channel (which read the same row during the
+   * windup) and the damage can never disagree.
+   *
+   * Resolution notes (stage 2 shapes, stage 3 sweep), all deliberate:
+   *   - SWEPT, not instant (Wave D stage 3): the contact frame arms the
+   *     shape and tests its k=0 band; the enemy loop advances it across the
+   *     pattern's active window, so a swing TRAVELS — a player sprinting
+   *     across a backhand's path mid-window is caught, a player who was at
+   *     the arc's far edge has until the band arrives to leave. Same
+   *     armSweep/sweepHitsPoint machinery as the player's blade.
+   *   - MULTI-HIT MELEE STAYS FOLDED: dmg x hits in one application. Honest
+   *     equivalence still — _damagePlayer grants 0.42 s of i-frames, so
+   *     applications 2..n of a 0.38 s flurry could never land, and the
+   *     stalker's cycle pressure (ENEMY_RHYTHM's derivation) is balanced
+   *     against the fold. Unfolding into real taps waits for the poise
+   *     stage, which owns reshaping player-side i-frames to coexist with
+   *     them. Projectile hits stay UNfolded: each bolt is its own
+   *     dodgeable object.
+   *   - LUNGE lands at contact, not windup end: the tables' capsule ranges
+   *     are derived as travel + reach and the lane ANCHORS at the arm site
+   *     (follow off), so the body launches through the strip the lane tell
+   *     drew while the sweep tests exactly that strip. The alternative —
+   *     impulse first, test after — would test from a position the tell
+   *     never showed.
+   *   - RETREAT (the lancer's hop-back) fires when the sweep window closes
+   *     (enemy loop), after the thrust has finished its lane; the same 7/s
+   *     velocity damping everyone shares turns 13 into ~1.9 m of disengage.
+   */
+  _resolvePattern(e, pat) {
+    const p = this.player;
+    if (pat.projectile) {
+      const n = pat.hits || 1;
+      if (n === 1) {
+        // Single bolt: the legacy call byte-for-byte (aim at the player's
+        // chest at release; _spawnProjectile stamps the bolt plane) — the
+        // fight suite's caster probes measure this exact flight.
+        this._spawnProjectile(e.pos.clone().setY(PROJECTILE_Y), p.pos.clone().setY(1.2),
+          e.atk * (pat.dmg ?? 1), e.base.glow, pat.projectile.speed || 14);
+      } else {
+        // Volley: an odd fan about the true bearing, the boss fan's grammar
+        // (one bolt ALWAYS rides the aim line — standing still is always
+        // punished) at trash scale and the pattern's own spacing.
+        const aim = Math.atan2(p.pos.x - e.pos.x, p.pos.z - e.pos.z);
+        const spread = pat.projectile.spread || 0.2;
+        for (let i = 0; i < n; i++) {
+          const a = aim + (i - (n - 1) / 2) * spread;
+          // tmpV2 is safe to reuse per bolt: _spawnProjectile copies, never
+          // retains (the boss fan leans on the same fact).
+          tmpV2.set(Math.sin(a), 0, Math.cos(a)).multiplyScalar(20).add(e.pos).setY(1.2);
+          this._spawnProjectile(e.pos.clone().setY(PROJECTILE_Y), tmpV2,
+            e.atk * (pat.dmg ?? 1), e.base.glow, pat.projectile.speed || 12);
+        }
+      }
+      this.audio.tone({ freq: 700, type: 'triangle', gain: 0.1, decay: 0.2, sweep: 300 });
+      return;
+    }
+
+    const fwd = this._forward(e.yaw);
+    if (pat.lunge) e.vel.addScaledVector(fwd, pat.lunge);
+    const sh = pat.shape || {};
+    // --- THE ENEMY SWEEP (Wave D stage 3) ----------------------------------
+    // The stage-2 instant shape tests are replaced by the SAME armSweep the
+    // player's blade now runs — the audit's asymmetry complaint answered with
+    // one shared resolver. armSweep copies the pattern's own shape row (the
+    // row the tell channel drew from), then three arm-site adjustments keep
+    // the sweep honest to the tell it grew under:
+    //   * capsules ANCHOR (follow = false): the tables derive lane range as
+    //     travel + reach, and the lunge above is about to carry the body down
+    //     that lane — a lane that also rode the body would cover range +
+    //     travel, floor the tell never marked. Cones keep following: the
+    //     drawn arc tracks e.yaw live during the windup, so a facing-riding
+    //     cone and its tell stay one thing. Circles ship follow:false in the
+    //     tables already.
+    //   * cone coverage is CLAMPED to the drawn sector: the pooled arc tell
+    //     is the baked acos(0.2) sector, so a cone's total claim (arc +
+    //     travel) may not exceed TELL_ARC_TOTAL — the travel gives way, the
+    //     authored width stays. Past TELL_ARC_DISC (the brute's backhand:
+    //     0.55pi of arc travelling 1.3pi) the move is really a spin and the
+    //     tell channel shows the DISC instead, so the full travel stands.
+    //     The 0.4 m target pad overhangs either ceiling by the player's own
+    //     body width — the stage-2 lane test's precedent: the tell claims
+    //     floor for your CENTRE, and an edge that clips your shoulder counts.
+    //   * duration stretches to the pattern's whole active window: stage 2's
+    //     damage fold (dmg x hits in ONE application — see below) means one
+    //     sweep owns the window instead of `hits` re-armed slices.
+    const sw = e.sweep || (e.sweep = makeSweep());
+    armSweep(sw, sh, e.pos.x, e.pos.z, e.yaw);
+    if (sh.shape === PATTERN_SHAPE.CAPSULE) sw.follow = false;
+    if (!sh.shape || sh.shape === PATTERN_SHAPE.CONE) {
+      const total = sw.arc + sw.sweepArc;
+      if (total > TELL_ARC_TOTAL && total <= TELL_ARC_DISC) {
+        sw.sweepArc = Math.max(0, TELL_ARC_TOTAL - sw.arc);
+      }
+    }
+    sw.duration = Math.max(sw.duration, pat.active || 0);
+    e._sweepPat = pat;
+    // THE FAIRNESS FRAME: the sweep's k=0 band is tested NOW, on the exact
+    // frame the telegraph countdown promised, so a target standing where the
+    // tell filled takes the blow this frame — frame-identical to stage 2 for
+    // the dead-ahead case the fight suite pins. Edge-of-arc targets are no
+    // longer hit instantly; the travelling band reaches them mid-window,
+    // which is the sweep's whole point (and a slightly wider dodge window at
+    // the fringe of a swing is the generous direction to be wrong in).
+    // Expanding circles cover only their leading edge per frame, so a
+    // wardpulse now genuinely RIPPLES outward across its 0.14 s instead of
+    // detonating; the enemy-loop advance carries the rest of the window.
+    if (sweepHitsPoint(sw, p.pos.x, p.pos.z, 0.4)) {
+      // Folded multi-hit — see the method note. The striker rides along so
+      // the damage pipeline can ask its tier (ossuary 5pc cares).
+      this._damagePlayer(e.atk * (pat.dmg ?? 1) * (pat.hits || 1), e.pos, e);
+    }
+    if (sh.shape === PATTERN_SHAPE.CIRCLE) {
+      // A radial resolve reads as a shockwave, whatever hit: the ring IS the
+      // follow-through, at the tell's exact radius.
+      this.fx.ring(e.pos, e.base.glow, sh.range || 3, 0.4);
+      this.fx.burst(tmpV.copy(e.pos).setY(0.8), 14, e.base.glow, { speed: 8, up: 3, life: 0.4 });
+    } else {
+      this.fx.burst(tmpV.copy(e.pos).addScaledVector(fwd, 1.2).setY(1.2), 8, e.base.glow, {
+        speed: 4, up: 2, life: 0.3,
+      });
+    }
+    // (pat.retreat — the lancer's hop-back — now fires when the sweep window
+    // CLOSES, in the enemy loop: the thrust finishes its lane, then the body
+    // hops out. Firing it here would yank an anchored lane's owner backward
+    // while the strike is still live.)
+    this.audio.swing();
+  }
+
   _bossBrain(b, dt, dist, toPlayer) {
     if (!b.enraged && b.hp / b.maxHp < 0.4) {
       b.enraged = true;
@@ -4347,16 +5037,91 @@ export class Game {
     if (b.telegraph > 0 || b.stagger > 0) return;
 
     if (b.patternCd <= 0) {
-      b.pattern = Math.floor(Math.random() * 3);
-      b.patternCd = (b.enraged ? 3.0 : 4.4) + Math.random() * 1.6;
+      // THE PER-BOSS BRAIN (Wave D stage 2). The dead shared 3-way roll is
+      // replaced by attacks.js BOSS_BRAINS: each of the six named bosses
+      // sequences the SAME three building blocks below through its own
+      // opener, weighted pool, pacing bands and under-30%-hp escalation —
+      // per-boss sequencing and tells, zero new mechanics.
+      //
+      // SEEDED dice (stage 1's law, upheld): every number here draws the
+      // combat fork, never Math.random — a boss's opener is SIM, and a
+      // replayed gate seed must throw the same slam on the same frame.
+      // Exactly two draws per roll, ALWAYS, drawn up front before any
+      // branch (opener, forced chain, pool) so the fork's draw order stays
+      // a flat contract the way the main stream's is.
+      const brain = bossBrainFor(this.gate?.boss);
+      const rnd = this._combatRnd || this.rnd;
+      const rollPat = rnd();
+      const rollCd = rnd();
+      const hpFrac = b.maxHp > 0 ? b.hp / b.maxHp : 1;
+      const esc = Boolean(brain.escalate && hpFrac < brain.escalate.below);
+      // Pacing: the brain's band (warden's is byte-for-byte the old
+      // 4.4-6.0 / enraged 3.0-4.6), compressed by the dying escalation.
+      const pace = b.enraged ? brain.enragedPacing : brain.pacing;
+      b.patternCd = (pace[0] + rollCd * (pace[1] - pace[0])) * (esc ? brain.escalate.pacingMul : 1);
+      // The escalation's other lever: the SAME attacks get harder to read.
+      // Never applied above 30% hp, so every windup a player learns in the
+      // fight's first two thirds is the honest full-length one.
+      const tellMul = esc ? (brain.escalate.tellMul ?? 1) : 1;
+      let patId;
+      if (!b._opened) {
+        // The scripted opener — this boss's signature hello, identical on
+        // every replay of the seed because it costs no dice at all (the two
+        // draws above are still consumed: draw order is contract).
+        b._opened = true;
+        patId = brain.opener;
+        if (brain.openerFollow) b._openerChain = brain.openerFollow;
+      } else if (b._forced) {
+        // A chain set by _bossAfterPattern: the escalation's forced 1-2.
+        patId = b._forced;
+        b._forced = '';
+      } else {
+        patId = selectBrainPattern(brain, rollPat, dist);
+      }
 
-      if (b.pattern === 0 && dist < 12) {
+      if (patId === 'slam' && dist < 12) {
         // Slam: telegraphed radial shockwave.
-        b.telegraph = 0.75;
-        b.telegraphMax = 0.75;
+        b.telegraph = 0.75 * tellMul;
+        b.telegraphMax = b.telegraph;
         b._slam = true;
-        this.fx.ring(b.pos, 0xff4d6d, 9, 0.75);
-      } else if (b.pattern === 1) {
+        // Same red as the ground tell: one danger statement, one named colour.
+        this.fx.ring(b.pos, TELL_DANGER_COLOR, 9, b.telegraph);
+      } else if (patId === 'fan') {
+        // Spread shot — NOW TELEGRAPHED (stage 1's fairness rule: no damage
+        // without a tell; this and the charge were the only attacks left
+        // that fired from silence). The aim is CAPTURED here, at windup
+        // start, and the volley below flies down exactly that bearing: the
+        // amber sector the tell channel draws during these 0.7 s is the
+        // sector the bolts take, so the tell can never lie, and moving off
+        // the bearing during the windup is a real dodge. 0.7 s is
+        // attacks.js BOSS_PATTERNS.spread.windup — the number the stage-2
+        // pattern rosters adopted; the dying escalation's tellMul is the
+        // only thing allowed to compress it.
+        b.telegraph = 0.7 * tellMul;
+        b.telegraphMax = b.telegraph;
+        b._fan = true;
+        b._fanAim = Math.atan2(toPlayer.x, toPlayer.z);
+      } else {
+        // Charge — NOW TELEGRAPHED, with the rush bearing CAPTURED at
+        // windup start so the red lane the tell channel lays down is the
+        // strip of floor the impulse will actually cover (recomputing at
+        // fire time would let the lane lie to anyone who moved). 0.72 s is
+        // attacks.js BOSS_PATTERNS.charge.windup, same adoption note as the
+        // fan above. toPlayer arrives normalised from the enemy loop. This
+        // branch is ALSO where an out-of-range slam lands (patId 'slam' at
+        // dist >= 12 fails the gate above) — the same slam-degrades-to-charge
+        // rule the dead 3-way roll had implicitly through its else.
+        b.telegraph = 0.72 * tellMul;
+        b.telegraphMax = b.telegraph;
+        b._charge = true;
+        b._chargeX = toPlayer.x;
+        b._chargeZ = toPlayer.z;
+      }
+    }
+
+    if (b._fan && b.telegraph <= 0) {
+      b._fan = false;
+      {
         // Spread shot: a fan of projectiles, ODD count in both phases.
         //
         // 7/9 rather than 6/9. An EVEN count has no bolt on the aim bearing, so
@@ -4374,10 +5139,12 @@ export class Game {
         // rad, so the fan still opens with range: at 4 m the two neighbours also
         // connect (4*sin(0.24) = 0.95 m < 1.025), at 8 m only the centre does.
         const n = b.enraged ? 9 : 7;
-        // Sampled ONCE, outside the loop. See the _aimDir comment at the top of
-        // this file: reading the bearing per bolt is what let a scratch-vector
-        // alias turn this fan into a running sum.
-        const aim = Math.atan2(toPlayer.x, toPlayer.z);
+        // Sampled ONCE, at WINDUP START (b._fanAim, captured by the roll
+        // above so the tell and the volley share one bearing). The old
+        // per-bolt-read hazard stands: see the _aimDir comment at the top of
+        // this file — reading the bearing per bolt is what let a
+        // scratch-vector alias turn this fan into a running sum.
+        const aim = b._fanAim;
         for (let i = 0; i < n; i++) {
           const a = aim + (i - (n - 1) / 2) * 0.24;
           tmpV2.set(Math.sin(a), 0, Math.cos(a)).multiplyScalar(20).add(b.pos).setY(PROJECTILE_Y);
@@ -4388,28 +5155,69 @@ export class Game {
           this._spawnProjectile(b.pos.clone().setY(PROJECTILE_Y), tmpV2, b.atk * 0.6, b.base.glow, 15);
         }
         this.audio.skill();
-      } else {
-        // Charge.
-        b.vel.addScaledVector(toPlayer, 34);
-        this.fx.burst(b.pos.clone().setY(1), 20, b.base.glow, { speed: 6, up: 3 });
-        this.audio.dash();
       }
+      this._bossAfterPattern(b, 'fan');
+    }
+
+    if (b._charge && b.telegraph <= 0) {
+      b._charge = false;
+      // The impulse rides the bearing captured at windup start — see the
+      // roll above. tmpV2 is free here (the fan volley that also uses it
+      // cannot be resolving on the same frame: one pattern per roll).
+      tmpV2.set(b._chargeX, 0, b._chargeZ);
+      b.vel.addScaledVector(tmpV2, 34);
+      this.fx.burst(b.pos.clone().setY(1), 20, b.base.glow, { speed: 6, up: 3 });
+      this.audio.dash();
+      this._bossAfterPattern(b, 'charge');
     }
 
     if (b._slam && b.telegraph <= 0) {
       b._slam = false;
       const r = 11;
       if (this.player.pos.distanceTo(b.pos) < r) this._damagePlayer(b.atk * 1.4, b.pos, b);
-      this.fx.ring(b.pos, 0xff4d6d, r * 1.1, 0.5);
+      this.fx.ring(b.pos, TELL_DANGER_COLOR, r * 1.1, 0.5);
       this.fx.burst(b.pos.clone().setY(0.6), 60, b.base.glow, { speed: 16, up: 4, life: 0.9, spread: 2 });
       this.fx.addShake(1.0);
       this.audio.nova();
+      this._bossAfterPattern(b, 'slam');
     }
 
     if (dist < 4.5 && b.attackCd <= 0) {
       b.telegraph = 0.5;
       b.telegraphMax = 0.5;
       b.attackCd = b.enraged ? 1.5 : 2.2;
+    }
+  }
+
+  /**
+   * The frame a boss pattern RESOLVED (Wave D stage 2): where chains are
+   * decided. Two kinds, both data on the boss's BOSS_BRAINS row:
+   *   - the opener 1-2 (openerFollow, the archon's charge-into-fan): armed at
+   *     the opener's commit, cashed on the next resolve, no dice — it is part
+   *     of the script.
+   *   - the dying escalation's follow (escalate.follow): below 30% hp, a
+   *     named resolve rolls the SEEDED fork once against `chance` and, on a
+   *     hit, forces the next pattern and pulls the roll forward to 0.9 s —
+   *     short enough to read as one combo, long enough that the second tell
+   *     is still a real tell. This extra draw happens only under escalation,
+   *     so the pinned-dice fight probes (which hold the boss at full hp)
+   *     never see it and the fork's draw order stays flat where they measure.
+   */
+  _bossAfterPattern(b, id) {
+    if (b._openerChain) {
+      b._forced = b._openerChain;
+      b._openerChain = null;
+      b.patternCd = Math.min(b.patternCd, 0.9);
+      return;
+    }
+    const brain = bossBrainFor(this.gate?.boss);
+    const f = brain.escalate?.follow;
+    if (!f || f.after !== id) return;
+    if (!(b.maxHp > 0) || b.hp / b.maxHp >= brain.escalate.below) return;
+    const rnd = this._combatRnd || this.rnd;
+    if (rnd() < f.chance) {
+      b._forced = f.then;
+      b.patternCd = Math.min(b.patternCd, 0.9);
     }
   }
 
@@ -5231,7 +6039,7 @@ export class Game {
         s.pos.copy(this.player.pos);
         s.pos.x += Math.sin(a) * 2.0;
         s.pos.z += Math.cos(a) * 2.0;
-        s.pos.y = 0;
+        s.pos.y = this.world.heightAt(s.pos.x, s.pos.z);
         this.world.resolve(s.pos, s.radius, s.vel);
         s.vel.set(0, 0, 0);
         // 50% HP is the cycle's price: the detonation traded the army's
@@ -5477,11 +6285,12 @@ export class Game {
       new THREE.OctahedronGeometry(0.34, 0),
       new THREE.MeshBasicMaterial({ color }),
     );
-    mesh.position.copy(pos).setY(0.9);
+    // Floor-relative (tower wiring): pos carries the dead enemy's real y.
+    mesh.position.copy(pos).setY(pos.y + 0.9);
     mesh.add(new THREE.PointLight(color, 2.4, 5));
     mesh.layers.enable(GLOW_LAYER);
     this.scene.add(mesh);
-    this.pickups.push({ mesh, pos: mesh.position, kind, life: 22, t: Math.random() * 6 });
+    this.pickups.push({ mesh, pos: mesh.position, kind, life: 22, t: Math.random() * 6, baseY: pos.y });
   }
 
   _updatePickups(dt) {
@@ -5491,13 +6300,16 @@ export class Game {
       it.life -= dt;
       it.t += dt;
       it.mesh.rotation.y += dt * 2.4;
-      it.mesh.position.y = (it.kind === 'weapon' || it.kind === 'armor' ? 1.05 : 0.9) + Math.sin(it.t * 3) * 0.16;
+      // baseY = the spawn floor (tower wiring): the old absolute 0.9 put
+      // upper-terrace drops underground and the 3D collection test never
+      // passed — orbs on floor 2 were simply lost.
+      it.mesh.position.y = it.baseY + (it.kind === 'weapon' || it.kind === 'armor' ? 1.05 : 0.9) + Math.sin(it.t * 3) * 0.16;
 
       const d = it.mesh.position.distanceTo(p.pos);
       // Magnet: drift toward the player once they're close, so you never have
       // to fight the camera to stand exactly on a drop.
       if (d < 5.5) {
-        tmpV.copy(p.pos).setY(0.9).sub(it.mesh.position).normalize();
+        tmpV.copy(p.pos).setY(p.pos.y + 0.9).sub(it.mesh.position).normalize();
         it.mesh.position.addScaledVector(tmpV, (6.5 - d) * 2.2 * dt);
       }
       if (d < 1.5) {
