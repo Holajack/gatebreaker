@@ -432,7 +432,10 @@ export function tryGenerateCavern(rank, params, enemies, seed) {
 // Spawn points for a disc room: jittered cell centres inside the trigger disc
 // whose full 8-neighbourhood is floor (>= ~2.5 m of wall clearance survives
 // the jitter), greedy 2.4 m spacing — the crawl's guarantees, disc-shaped.
-function discSpawnPoints(room, mask, w, h, at, originX, originZ, rnd) {
+// Exported for the waste kind (layouts/waste.js), whose sites are the same
+// disc rooms; it stamps each point's terrain height on top. Pure function of
+// its arguments, so sharing it cannot entangle the two kinds' streams.
+export function discSpawnPoints(room, mask, w, h, at, originX, originZ, rnd) {
   const ccx = (room.centre.x - originX) / CELL;
   const ccz = (room.centre.z - originZ) / CELL;
   const rc = room.radius / CELL - 0.6;   // keep the jittered point inside

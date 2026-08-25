@@ -64,6 +64,17 @@ import { PROJECTILE_Y } from '../../game/config.js';
 // three modules have finished evaluating.
 import { tryGenerate } from './crawl.js';
 import { tryGenerateCavern } from './cavern.js';
+import { tryGenerateTower } from './tower.js';
+import { tryGenerateWaste } from './waste.js';
+import { tryGenerateReach } from './reach.js';
+
+// The waste's field helpers travel through this module (and the facade) so
+// tools/dungeon-gen-test.mjs runs the SAME reachability code the generator's
+// own route-waypoint guarantee runs — floodFillRoom's no-two-copies rule.
+export {
+  buildWasteField, wasteFieldFill, terrainHeightFn,
+  TERRAIN_MAX_SLOPE, ROUTE_CORRIDOR_HALF, WASTE_FILL_STEP,
+} from './waste.js';
 
 // ---------------------------------------------------------------------------
 // ROOM SIZING IS MEASURED IN DASH UNITS. Read this before touching roomSize.
@@ -257,6 +268,213 @@ export const LAYOUT_PARAMS = {
     // the crawl's rubble), so a second placer here would double-dress it.
     enemies: 57,          // nominal = midpoint of GATES.C enemyBand [48, 66]
   },
+  B: {
+    kind: 'tower',                  // Wave E task E-B — THE ASCENT (tower.js)
+    grid: 100,                      // 100 x 100 cells = 200 m; the folded
+                                    // 4-6 floor chain needs the slack (see
+                                    // TOWER_DIR_WEIGHTS in tower.js)
+    floors: [4, 6],                 // stacked floors, entry at 0, boss on top
+    // 3.0 m per floor, and the number is load-bearing three times over:
+    //   ramps  rise/(len+1) <= 0.33 m per tread at rampLen 8-10, under the
+    //          body's 0.4 m stepHeight — the stair climbs with zero physics;
+    //   edges  a 3 m drop across the 0.9 m normal-sample span keeps the
+    //          ground normal above the 0.55 slope limit, so standing at a
+    //          parapet edge never flips the body into its sliding state;
+    //   jumps  jump apex is ~1.9 m, so a drop is one-way without any gate.
+    floorRise: 3.0,
+    rooms: [3, 6],                  // combat-room band (entry + boss excluded)
+    roomsPerFloor: [1, 2],          // per mid floor; fixed roll, clamped by
+    maxCombat: 6,                   //   this cap so 6-floor rolls stay lean
+    entrySize: { w: [6, 8], d: [5, 6] },
+    roomSize: { w: [12, 15], d: [12, 14] },   // 24-30 x 24-28 m (3.2+ dashes)
+    bossSize: { w: 21, d: 21 },               // 42 x 42 m (5.6 dashes), on top
+    corridorWidths: [2, 3],         // flat, intra-floor corridors
+    corridorLen: [2, 4],
+    rampWidth: 2,                   // 4 m stair — the door-span floor
+    rampLen: [8, 10],               // treads 0.27-0.33 m; see floorRise
+    tunnelLen: [8, 10],
+    loops: 0,                       // the ascent is a chain; gaps are the loop
+    minBossDepth: 4,                // >= floors[0] hops entry -> boss
+    wallHeight: 4,
+    wallHeightLow: 2,
+    torchSpacing: 7,
+    torchMinGap: 11,
+    torchCap: 40,
+    propDensity: 'medium',
+    alcoves: false,                 // the alcove niche math is flat-wall D
+                                    // furniture; the tower's identity beat is
+                                    // its parapets, not bone shelves
+    treasure: { chance: 0.55, guaranteed: false },
+    // Parapet gaps — tower.js's candidate scan + fixed-roll carve. `span` in
+    // cells (4-6 m notches), `max` per gate.
+    parapets: { chance: 0.8, span: [2, 3], max: 4 },
+    // Consumed by dungeonmode.js off layout.params: a landing above minSpeed
+    // costs maxHp * (landSpeed - minSpeed) * scale. minSpeed 13 clears the
+    // tallest ordinary jump's landing (~11.5 m/s) with margin; a one-floor
+    // drop lands ~14.5 (7.5% maxHp), a two-floor drop ~20.5 (37%).
+    fallDamage: { minSpeed: 13, scale: 0.05 },
+    fog: { near: 14, far: 48 },
+    // D's cover field, one shade denser nowhere — the tower's rooms are the
+    // same plateau rects, so the whole clearance/connectivity discipline
+    // transfers unchanged; heights are stamped after placement (tower.js).
+    cover: {
+      step: 7.0,
+      jitter: 1.8,
+      chance: 0.66,
+      rubbleShare: 0.55,
+      lane: 3.0,
+      wallInset: 3.2,
+      doorClear: 5.5,
+      spawnClear: 1.6,
+      centreClear: 3.4,
+      bossClear: 4.5,
+      exitClear: 3.5,
+      ringFrac: 0.48,
+      ringSlots: 12,
+      ringKeep: 0.76,
+      quadSlots: 8,
+      minPieces: 2,
+      rubbleCap: 24,
+    },
+    // GATES.B carries no enemyBand yet (rollEnemyCount falls back to the flat
+    // gate.enemies = 32); nominal mirrors that number under the same ONE rule
+    // as the other ranks: move it in config.js, move it here in the same edit.
+    enemies: 32,
+  },
+  A: {
+    kind: 'waste',                  // Wave E task E-A — THE RIVEN WASTE (waste.js)
+    grid: 68,                       // 68 x 68 cells = 136 m; the disc union
+                                    // carves a ~120 m open field inside it
+    discs: [5, 7],                  // few, VERY large discs = one lobed field
+    discR: [20, 32],                // metres — cavern's chambers were 8-18
+    sites: 3,                       // the marked route: 3 objective camps
+    siteRadius: 11,                 // trigger disc, metres (the crawl's zone 10
+                                    // + 1: camps are approached across open
+                                    // ground, the pull can start a step early)
+    siteSpacing: 26,                // min stop-to-stop, metres — a route leg
+                                    // is 3+ dashes of open travel
+    bossRadius: 12,                 // the final site's trigger disc
+    tunnelLen: [8, 10],
+    tunnelWidth: 3,                 // cells (6 m), the cavern's arrival mouth
+    loops: 0,
+    // depth = criticalPath.length - 1 = entry + 3 sites + boss = 4; the regen
+    // loop in generateLayout treats anything shallower as a failed roll.
+    minBossDepth: 4,
+    wallHeight: 6,                  // the canyon rim — cavern enclosure rules,
+    wallHeightLow: 6,               //   camera boom probe is the net (no low
+                                    //   south walls on a landscape rim)
+    fog: { near: 20, far: 78 },     // open air: far must clear a 26-40 m route
+                                    // leg AND the far rim, or the compass
+                                    // points into a grey card
+    // Outcrop field — COVER_KINDS at landscape scale (buildWasteCover).
+    cover: {
+      step: 9.0,          // lattice pitch, m — sparser than a room's 7.0:
+                          // landmarks, not furniture
+      jitter: 2.4,
+      chance: 0.5,
+      rubbleShare: 0.5,   // collapsed-wall piles carry the bulk
+      stubShare: 0.25,    // stretched wall fragments = the ruin silhouettes
+      clusterChance: 0.35, // second leaning piece = a landmark cluster
+      lane: 3.0,          // the dash-lane rule, unchanged — body-sized
+      wallInset: 2.5,     // footprint to the rock rim, m
+      siteClear: 7.0,     // camps fight on open floor; the site's own cover
+                          // is the field AROUND the clearing
+      roamClear: 2.2,     // an advance body never rises inside a rock
+      spawnClear: 1.6,
+      bossClear: 4.5,
+      exitClear: 3.5,
+      rubbleCap: 30,      // 788-tri budget guard, downgrade-not-delete
+      maxPieces: 58,      // hard cap UNDER dungeon.js DRESS_LIMITS.cover (60)
+                          // so the render truncation there can never bite and
+                          // silently strip collision the soak measured
+    },
+    // Nominal mirrors GATES.A's flat enemies = 38 (no enemyBand yet), same
+    // ONE rule as every rank: move it in config.js, move it here in the same
+    // edit, or the soak tests a lighter waste than the one that ships.
+    enemies: 38,
+  },
+  S: {
+    kind: 'reach',                  // Wave E task E-S — ARCHON'S REACH (reach.js)
+    grid: 126,                      // 126 x 126 cells = 252 m; the worst-case
+                                    // straight-north chain (tunnel 11 + entry 6
+                                    // + 3 x (causeway 16 + room) + summit 25)
+                                    // is ~120 cells, so even an unfolded roll
+                                    // fits with margin
+    // The ascent's plateau heights, indexed by room level (entry, gauntlet 1,
+    // gauntlet 2, summit). 5 m per climb over 13-16 cell causeways keeps every
+    // tread at 0.29-0.36 m — under the body's 0.4 m stepHeight, the tower's
+    // exact zero-new-physics contract at half again the tower's rise.
+    levels: [0, 5, 10, 15],
+    entrySize: { w: [6, 8], d: [5, 6] },
+    roomSize: { w: [13, 16], d: [13, 15] },   // gauntlets 26-32 x 26-30 m
+    summitSize: 25,                 // cells; the disc is carved inside (r 24 m)
+    // THE COLLAPSING ARENA, as data. radii[0] = the full fight disc; each
+    // later entry is a collapse ring dungeon.js pre-registers a barrier on
+    // and the director seals when boss hp crosses the matching threshold.
+    // The rings RETRACT on the boss's death (encounters.onBossDeath resets
+    // the phase), so the walk-out portal — exitAnchor pushes 0.42 x 50 m =
+    // 21 m off centre — always rises on live, reachable floor inside
+    // radii[0]; the boss rise anchor (0.25 x 50 = 12.5 m) also sits inside
+    // it. The soak asserts both.
+    arenaRadii: [23, 17, 12],
+    arenaThresholds: [0.66, 0.33],  // boss hp fractions, one per collapse ring
+    causewayWidth: 4,               // cells (8 m) — the notch pass bites it
+                                    // down to a guaranteed >= 2-cell path
+    causewayLen: [13, 16],          // cells; treads 5/(len+1) = 0.29-0.36 m
+    corridorWidths: [2, 3],         // unused by the chain (kept for tooling
+                                    // that reads the row generically)
+    corridorLen: [2, 5],
+    tunnelLen: [9, 11],
+    loops: 0,
+    minBossDepth: 3,                // entry -> g1 -> g2 -> summit
+    wallHeight: 4,
+    wallHeightLow: 2,
+    torchSpacing: 7,
+    torchMinGap: 11,
+    torchCap: 40,
+    propDensity: 'none',            // the reach is bare stone and sky — its
+                                    // identity is the ascent, not clutter, and
+                                    // every clutter kind is +1 draw call the
+                                    // S budget spends on the collapse rings
+                                    // instead (see buildDecor's 'none' rung)
+    alcoves: false,
+    treasure: { chance: 0, guaranteed: false },  // linear chain: no off-path
+                                                 // leaf to hide one in; the
+                                                 // roll is still consumed
+    // Causeway notches — reach.js's break pass. span/depth in cells; max per
+    // gate. depth is re-capped at width - 2 so a path always survives.
+    breaks: { chance: 0.7, span: [2, 4], depth: [1, 2], max: 6 },
+    fog: { near: 16, far: 60 },     // far must clear the 44 m summit disc AND
+                                    // a 32 m causeway leg from its gauntlet
+    cover: {
+      step: 7.0,
+      jitter: 1.8,
+      chance: 0.66,
+      rubbleShare: 0.55,
+      lane: 3.0,
+      wallInset: 3.2,
+      doorClear: 5.5,
+      spawnClear: 1.6,
+      centreClear: 3.4,
+      bossClear: 4.5,
+      exitClear: 3.5,
+      ringFrac: 0.48,     // unused (summit skips the colonnade); kept so the
+      ringSlots: 12,      //   row stays shape-compatible with the tooling
+      ringKeep: 0.76,
+      quadSlots: 8,
+      minPieces: 2,
+      rubbleCap: 24,
+      // The summit's own broken ring (reach.js buildSummitRing): inside the
+      // FINAL collapse radius, so the kite loop keeps cover in every phase.
+      summitRingFrac: 0.62,
+      summitRingSlots: 6,
+      summitRingKeep: 0.85,
+    },
+    // GATES.S carries no enemyBand yet (rollEnemyCount falls back to the flat
+    // gate.enemies = 46); nominal mirrors it under the same ONE rule as every
+    // rank: move it in config.js, move it here in the same edit.
+    enemies: 46,
+  },
 };
 
 export const CELL = 2;
@@ -284,7 +502,10 @@ export function generateLayout({ rank, seed, params = LAYOUT_PARAMS[rank], enemi
   if (!params) throw new Error(`generateLayout: no params for rank ${rank}`);
   const gen = params.kind === 'crawl' ? tryGenerate
     : params.kind === 'cavern' ? tryGenerateCavern
-      : null;
+      : params.kind === 'tower' ? tryGenerateTower
+        : params.kind === 'waste' ? tryGenerateWaste
+          : params.kind === 'reach' ? tryGenerateReach
+            : null;
   if (!gen) {
     throw new Error(`generateLayout: unknown kind '${params.kind}' (rank ${rank})`);
   }
@@ -598,8 +819,12 @@ export function buildDecor(rooms, doors, wallRuns, params, rnd) {
   });
 
   // Prop clusters near room corners; density per rank. Treasure rooms get the
-  // statue + candles shrine at their centre instead of clutter.
-  const clusterChance = params.propDensity === 'medium' ? 0.7 : 0.4;
+  // statue + candles shrine at their centre instead of clutter. 'none' (the S
+  // reach) skips clutter outright — each clutter KIND is its own render field
+  // (+1 draw), and the reach's identity is bare wind-scoured stone; the
+  // per-room keep roll is still consumed, so the stream contract holds.
+  const clusterChance = params.propDensity === 'medium' ? 0.7
+    : params.propDensity === 'none' ? 0 : 0.4;
   for (const r of rooms) {
     if (r.kind === 'treasure') {
       props.push({ x: r.centre.x, z: r.centre.z, yaw: rnd() * Math.PI * 2, kind: 'statue' });

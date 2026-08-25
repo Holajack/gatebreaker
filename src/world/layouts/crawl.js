@@ -322,7 +322,12 @@ function roomCentre(r) {
 // frontier corridor + room candidate geometry
 // ---------------------------------------------------------------------------
 
-function corridorAndRoom(src, dir, cw, len, rw, rd, rnd) {
+// Exported for the tower kind (layouts/tower.js): a ramp between two floors is
+// EXACTLY this candidate geometry — a corridor rect + a room rect + two door
+// records — with a longer corridor and a height gradient stamped over it.
+// Pure function of its arguments (no module state), so sharing it cannot
+// entangle the two kinds' streams.
+export function corridorAndRoom(src, dir, cw, len, rw, rd, rnd) {
   // The opening strip must fit fully on the source wall.
   if (dir === 'n' || dir === 's') {
     if (src.gw < cw) return null;
@@ -500,7 +505,10 @@ function aSide(room, low, lowDoor, highDoor) {
 // Jittered cell centres whose full 8-neighbourhood is floor — that keeps every
 // point >= ~2 m clear of any wall run even after jitter (spec: >= 1.5 m), so a
 // rise-from-floor spawn can never clip a wall. Greedy 2.4 m spacing.
-function spawnPointsFor(room, mask, w, h, at, originX, originZ, rnd) {
+// Exported for the tower kind, whose rooms are the same stamped rects; the
+// tower stamps each point's floor height on top and adds one extra prune
+// (points near its parapet-gap shoulders) after its wall runs exist.
+export function spawnPointsFor(room, mask, w, h, at, originX, originZ, rnd) {
   const pts = [];
   for (let gz = room.gz; gz < room.gz + room.gd; gz++) {
     for (let gx = room.gx; gx < room.gx + room.gw; gx++) {

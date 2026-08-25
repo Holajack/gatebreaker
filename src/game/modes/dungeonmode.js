@@ -4,8 +4,11 @@ import { FLAT_GROUND } from '../physics.js';
 import { GATES, ANOMALY_CHANCE } from '../config.js';
 import { animateRig } from '../entities.js';
 import { Dungeon } from '../../world/dungeon.js';
+import { LAYOUT_PARAMS } from '../../world/dungeonlayout.js';
+import { RANK_IDENTITY } from '../../world/layouts/identity.js';
 import { EncounterDirector } from '../encounters.js';
 import { mulberry32 } from '../../core/rng.js';
+import { t } from '../strings.js';
 
 /**
  * The gate run — and, since DUNGEON_SPEC STEP 4, the place that decides WHICH
@@ -15,7 +18,20 @@ import { mulberry32 } from '../../core/rng.js';
  *           mode so its GPU-side caches survive re-entry.
  *   C    -> the same Dungeon class generating kind 'cavern' (STEP 8): one
  *           organic chamber, encounter zones, boss grotto behind a membrane.
- *   B/A/S -> the flat arena World built in Game's ctor (g._arenaWorld).
+ *   B    -> the same Dungeon class generating kind 'tower' (Wave E, THE
+ *           ASCENT): terraced floors climbed by stair ramps, parapet drops
+ *           with fall damage (this mode owns the damage — see update()), and
+ *           the player body bound to the layout's own height function.
+ *   A    -> the same Dungeon class generating kind 'waste' (Wave E task E-A,
+ *           THE RIVEN WASTE): an open landscape run — rolling smooth terrain
+ *           through the SAME heightAt seam the tower opened (the binding
+ *           below is already kind-agnostic), a compass-gated route of
+ *           objective sites, roaming packs, boss at the final site.
+ *   S    -> the same Dungeon class generating kind 'reach' (Wave E task E-S,
+ *           THE REACH): a scripted linear set-piece — broken causeways up,
+ *           two gauntlet fights, and a collapsing summit arena whose phase
+ *           radii live in layout.arenaPhases. The flat arena World survives
+ *           only behind forceOpen (dev/baseline path).
  *
  * The swap is a single assignment BEFORE _beginGate: _beginGate calls
  * this.world.build(gate, seed) and the _arenaResolve closure reads this.world
@@ -28,9 +44,12 @@ import { mulberry32 } from '../../core/rng.js';
  * exercise the arena through it (spec worldJsArenasFate).
  */
 
-// Ranks that open into a generated interior: E/D crawl, C cavern (STEP 8).
-// B+ keep the arena until the landscape wave.
-const INTERIOR_RANKS = new Set(['E', 'D', 'C']);
+// Ranks that open into a generated interior: E/D crawl, C cavern (STEP 8),
+// B tower (Wave E task E-B), A waste (Wave E task E-A), S reach (Wave E task
+// E-S — THE set-piece: broken causeway, gauntlet arenas, the RIFT ARCHON's
+// collapsing summit). Every rank is an interior now; the flat arena World
+// stays reachable only through the forceOpen dev override.
+const INTERIOR_RANKS = new Set(['E', 'D', 'C', 'B', 'A', 'S']);
 
 // Interior camera probe constants — citymode's proven boom-probe numbers
 // (spec: copy the pattern, do not invent a new one).
@@ -81,8 +100,10 @@ const INTRO_LOOK_TO = INTERIOR_LEAD;   // the follow rig's forward lead
 // DERIVED, not typed: the END pose has to BE the follow rig's steady state
 // (camPos = camLook + boom, camLook = player - lead) or the handoff snaps. It
 // was a hardcoded 0,11,7.6 left over from the 0,11,11 boom two zoom passes ago,
-// which is exactly the drift this now cannot have.
-const INTRO_CAM_TO = { x: 0, y: INTERIOR_CAM.y, z: INTERIOR_CAM.z - INTERIOR_LEAD };
+// which is exactly the drift this now cannot have. Since the identity rows
+// landed the live values are INSTANCE state (this._cam / this._camTo, derived
+// per rank in enter() with this exact formula); INTERIOR_CAM stays the shared
+// default a null identity row falls back to.
 // Boss reveal (spec bossChamberAndExit beat 1): a 1.2 s camera hold on the
 // rising boss, reusing the intro lerp machinery instead of a bespoke cutscene.
 const BOSS_HOLD = 1.2;
@@ -115,6 +136,20 @@ export class DungeonMode extends GameMode {
     // Boss-reveal camera hold (STEP 6 wiring of the STEP 5 deferral).
     this._bossSeen = false;
     this._bossHold = 0;
+    // The height-environment closure for kinds whose layout carries a height
+    // function (the B tower). Built ONCE (physics.js: creating environment
+    // callbacks inline per frame allocates), reads the dungeon dynamically so
+    // a context-loss rebuild needs no rebind.
+    this._height = (x, z) => (this.dungeon ? this.dungeon.heightAt(x, z) : 0);
+    // PER-RANK IDENTITY (Wave E task E-S item 2): the RANK_IDENTITY row this
+    // run applies — camera boom, fog density, glow strength/grade, intro card
+    // key. Camera state is instance-level so a rank override never leaks into
+    // the next run; the shipped defaults live in INTERIOR_CAM.
+    this._identity = null;
+    this._cam = { y: INTERIOR_CAM.y, z: INTERIOR_CAM.z };
+    this._camTo = { x: 0, y: INTERIOR_CAM.y, z: INTERIOR_CAM.z - INTERIOR_LEAD };
+    this._prevGlowStrength = null;
+    this._prevCamOffset = null;
   }
 
   get name() { return 'dungeon'; }
@@ -134,18 +169,37 @@ export class DungeonMode extends GameMode {
     g.frameClock?.setTarget(60);
     g.quality?.setTargetFps(60);
 
-    // Clear the city's region grade (Wave B6) — gates get their own per-rank
-    // identity rows in Wave E; until then a gate renders the shipped look.
-    g.glow?.setGrade(null);
+    // PER-RANK IDENTITY ROWS (Wave E task E-S item 2): fog density, palette
+    // grade, camera boom, glow strength, intro card key — one table
+    // (layouts/identity.js), applied here, restored in exit(). Absent fields
+    // keep the shipped behaviour bit for bit.
+    const identity = RANK_IDENTITY[baseGate.rank] || null;
+    this._identity = identity;
+    this._cam = identity?.cam
+      ? { y: identity.cam.y, z: identity.cam.z }
+      : { y: INTERIOR_CAM.y, z: INTERIOR_CAM.z };
+    this._camTo = { x: 0, y: this._cam.y, z: this._cam.z - INTERIOR_LEAD };
+    // Region grade: the rank's row replaces the city's (Wave B6 uniforms; a
+    // null row restores the shipped look — the old unconditional setGrade(null)).
+    g.glow?.setGrade(identity?.grade ?? null);
+    // Glow strength set-piece value; previous strength restored on exit.
+    this._prevGlowStrength = g.glow?.strength ?? null;
+    if (identity?.glowStrength != null) g.glow?.setStrength(identity.glowStrength);
 
     // Biome roll. forceBiome (dev/payload) wins outright; otherwise B+ ranks
-    // may roll an anomaly — the gate opens into another gate's palette. The
-    // shallow copy travels through _beginGate into this.gate, which is what
-    // the context-loss rebuild reads, so a lost GL context restores the SAME
-    // anomaly instead of re-rolling it.
-    const rolledBiome = forceBiome || this._rollAnomaly(baseGate);
-    const gateOverride = rolledBiome && rolledBiome !== baseGate.biome
-      ? { ...baseGate, biome: rolledBiome }
+    // may roll an anomaly — the gate opens into another gate's palette AND
+    // (Wave E task E-S item 3) may re-roll its layout KIND off the same
+    // stream: an anomalous B can generate as a cavern or a waste. The shallow
+    // copy travels through _beginGate into this.gate, which is what the
+    // context-loss rebuild reads, so a lost GL context restores the SAME
+    // anomaly (biome and kind both) instead of re-rolling it.
+    const anomaly = forceBiome ? { biome: forceBiome, kind: null } : this._rollAnomaly(baseGate);
+    const gateOverride = anomaly && (anomaly.biome !== baseGate.biome || anomaly.kind)
+      ? {
+        ...baseGate,
+        biome: anomaly.biome || baseGate.biome,
+        ...(anomaly.kind ? { anomalyKind: anomaly.kind } : {}),
+      }
       : null;
 
     // World selection — assign BEFORE _beginGate, which builds this.world.
@@ -164,7 +218,47 @@ export class DungeonMode extends GameMode {
     // empty one.
     g.player.body.setEnvironment(FLAT_GROUND, g._arenaResolve);
 
+    // THE camOffset override seam (identity rows): the OPEN/arena rig reads
+    // game.js's shared camOffset vector, and a rank row may override it — the
+    // mode sets the vector, game.js's read is untouched, exit() restores.
+    // Every row ships null today (the arena framing is owner-approved), but
+    // the seam is live for the forceOpen path.
+    if (g.world === g._arenaWorld && identity?.camOffset) {
+      this._prevCamOffset = g.camOffset.clone();
+      g.camOffset.set(identity.camOffset.x, identity.camOffset.y, identity.camOffset.z);
+    }
+
     g._beginGate(gateIndex, gateOverride);
+
+    // Fog density (identity rows): a mood multiplier over the geometry-sized
+    // fog planes the layout carries — applied after build() wrote scene.fog,
+    // interiors only (the arena's fog is world.js's own business).
+    if (g.world === this.dungeon && g.scene.fog && identity?.fogScale
+      && identity.fogScale !== 1) {
+      g.scene.fog.near /= identity.fogScale;
+      g.scene.fog.far /= identity.fogScale;
+    }
+
+    // The Wave E heightAt seam: a layout that carries its own height function
+    // (the B tower's terraces + stair treads) rebinds the body's ground to it
+    // — necessarily AFTER _beginGate, because the layout only exists once
+    // build() ran, and BEFORE setObstacles, because setEnvironment always
+    // assigns the obstacles slot (see the FLAT_GROUND comment above). Flat
+    // kinds keep FLAT_GROUND and its identity fast path in physics.js.
+    if (g.world === this.dungeon && this.dungeon?.layout?.heightAt) {
+      // ownsY: the CharacterBody's groundHeight IS this layout's heightAt, so
+      // Dungeon.resolve must never height-settle this body — on the first
+      // frame off a parapet lip the body is still grounded (vel.y 0) and the
+      // settle teleported it 0.55 m down BEFORE gravity engaged, which both
+      // distorted every fall's entry speed (the review measured the damage
+      // table drifting from its stated tuning) and stole the drop's apex.
+      // Enemies/shadows keep the settle: their flat integrator has no ground
+      // binding, and the settle is exactly how they ride treads and falls.
+      if (!this._ownResolve) {
+        this._ownResolve = (pos, radius, vel) => this.dungeon?.resolve(pos, radius, vel, true);
+      }
+      g.player.body.setEnvironment(this._height, this._ownResolve);
+    }
 
     // Substepped anti-tunnelling + wall-slide against this world's solids —
     // arena pillars and scatter rocks, or the crawl's wall runs and membranes.
@@ -253,6 +347,14 @@ export class DungeonMode extends GameMode {
     // makes this read as an entrance (spec entryExperience.hudTiming).
     g.ui.showHud(true);
     g.ui.toast(`${g.gate.rank}-GRADE RIFT — ${g.gate.name}`, 'gold');
+    // The rank's intro card line (identity rows; Wave G's card surface will
+    // consume the same key). t() is total — a missing key comes back
+    // bracketed, which we treat as "no line" rather than toasting a bug.
+    const key = this._identity?.introKey;
+    if (key) {
+      const line = t(key);
+      if (line && line[0] !== '[') g.ui.toast(line, '');
+    }
   }
 
   _removeSkipListeners() {
@@ -275,7 +377,17 @@ export class DungeonMode extends GameMode {
     const rnd = mulberry32((Math.random() * 0xffffffff) >>> 0);
     if (rnd() >= chance) return null;
     const others = GATES.map((x) => x.biome).filter((b) => b !== gate.biome);
-    return others[Math.floor(rnd() * others.length)] || null;
+    const biome = others[Math.floor(rnd() * others.length)] || null;
+    // Wave E task E-S item 3: the anomaly ALSO re-rolls the layout kind, off
+    // the same stream (one more draw — the biome roll's count is unchanged
+    // before it, so old behaviour up to this line is identical). Pool: every
+    // interior kind except the rank's own and 'reach' — the S set-piece is
+    // singular; an anomaly may STEAL from the reach's rank (an anomalous S
+    // opens as any other kind) but never counterfeit its summit.
+    const own = LAYOUT_PARAMS[gate.rank]?.kind;
+    const kinds = ['crawl', 'cavern', 'tower', 'waste'].filter((k) => k !== own);
+    const kind = kinds[Math.floor(rnd() * kinds.length)] || null;
+    return { biome, kind };
   }
 
   exit() {
@@ -296,6 +408,23 @@ export class DungeonMode extends GameMode {
     // a mounted gate (quit(), the title screen, the next open-rank run) talks
     // to the World it was built against rather than a cleared Dungeon.
     g.world = g._arenaWorld;
+    // And the body's ground with it: a tower run bound this._height, and a
+    // dead Dungeon reference returning stale heights under the title screen
+    // is exactly the kind of leak the alias handoff above exists to prevent.
+    g.player.body.setEnvironment(FLAT_GROUND, g._arenaResolve);
+    g.player.body.setObstacles(g.world.obstacleField);
+    // Identity rows: hand back the shipped presentation — grade cleared,
+    // glow strength restored to whatever the run started with, and the
+    // arena camOffset returned if a row overrode it.
+    g.glow?.setGrade(null);
+    if (this._prevGlowStrength != null) {
+      g.glow?.setStrength(this._prevGlowStrength);
+      this._prevGlowStrength = null;
+    }
+    if (this._prevCamOffset) {
+      g.camOffset.copy(this._prevCamOffset);
+      this._prevCamOffset = null;
+    }
     g.audio.music(false);
     g.ui.showHud(false);
     g.state = 'idle';
@@ -314,6 +443,24 @@ export class DungeonMode extends GameMode {
     // (updateAlways already ran). This gate IS the input suppression.
     if (this.intro) { this._updateIntro(dt); return; }
     this.game._updateDungeonFrame(dt);
+    // Fall damage (Wave E, the tower's parapet drops). The body solver already
+    // did all the work — justLanded/landSpeed are set by the ground-contact
+    // step _updateDungeonFrame just ran — so this is pure scoring, data-driven
+    // off layout.params.fallDamage (only the tower carries one). minSpeed 13
+    // clears every ordinary jump's landing (~11.5 m/s); the damage routes
+    // through _damagePlayer so DR, death and the hurt flash all behave.
+    {
+      const g = this.game;
+      const fd = g.world === this.dungeon
+        ? this.dungeon?.layout?.params?.fallDamage : null;
+      const body = g.player.body;
+      if (fd && body.justLanded && body.landSpeed > fd.minSpeed) {
+        const frac = Math.min(0.6, (body.landSpeed - fd.minSpeed) * fd.scale);
+        g._damagePlayer(Math.max(1, Math.round(g.derived.maxHp * frac)), g.player.pos);
+        g.fx.addShake(Math.min(0.4, 0.1 + frac * 0.5));
+        g.audio.noise({ gain: 0.16, decay: 0.2, filter: 500 });
+      }
+    }
     // After the frame, not before: triggers and clears read entity state the
     // frame just settled (kills spliced, positions resolved).
     this.director?.update(dt);
@@ -334,6 +481,17 @@ export class DungeonMode extends GameMode {
    */
   onContextRestored() {
     this.director?.rebindAfterContextLoss();
+    // Re-apply the identity fog multiplier (review fix): _restoreContext's
+    // world.build() rewrote scene.fog from the base LAYOUT_PARAMS values, so
+    // without this a context loss mid-run visibly snapped D/C/A/S gates back
+    // to unscaled fog. Same guard as enter()'s application.
+    const g = this.game;
+    const identity = this._identity;
+    if (g.world === this.dungeon && g.scene.fog && identity?.fogScale
+      && identity.fogScale !== 1) {
+      g.scene.fog.near /= identity.fogScale;
+      g.scene.fog.far /= identity.fogScale;
+    }
   }
 
   updateCamera(dt) {
@@ -362,9 +520,9 @@ export class DungeonMode extends GameMode {
     _v.set(p.pos.x, 0, p.pos.z - lead);
     g.camLook.lerp(_v, Math.min(1, dt * 6));
     g.camPos.set(
-      p.pos.x + INTRO_CAM_FROM.x + (INTRO_CAM_TO.x - INTRO_CAM_FROM.x) * k,
-      INTRO_CAM_FROM.y + (INTRO_CAM_TO.y - INTRO_CAM_FROM.y) * k,
-      p.pos.z + INTRO_CAM_FROM.z + (INTRO_CAM_TO.z - INTRO_CAM_FROM.z) * k,
+      p.pos.x + INTRO_CAM_FROM.x + (this._camTo.x - INTRO_CAM_FROM.x) * k,
+      INTRO_CAM_FROM.y + (this._camTo.y - INTRO_CAM_FROM.y) * k,
+      p.pos.z + INTRO_CAM_FROM.z + (this._camTo.z - INTRO_CAM_FROM.z) * k,
     );
     g.camera.position.lerp(g.camPos, Math.min(1, dt * 7));
     g.camera.lookAt(g.camLook.x, g.camLook.y + 1.2, g.camLook.z);
@@ -393,22 +551,24 @@ export class DungeonMode extends GameMode {
     // below still runs, so the swung shot cannot clip a wall.
     if (this._bossHold > 0 && g.boss) {
       this._bossHold -= dt;
-      _v.set(g.boss.pos.x, 0, g.boss.pos.z);
+      // boss.pos.y: the tower's boss rises on the top floor — the hold has to
+      // look AT it, not at ground level nine metres below (flat kinds: 0).
+      _v.set(g.boss.pos.x, g.boss.pos.y, g.boss.pos.z);
       g.camLook.lerp(_v, Math.min(1, dt * 4));
-      g.camPos.set(g.camLook.x, g.camLook.y + INTERIOR_CAM.y, g.camLook.z + INTERIOR_CAM.z);
+      g.camPos.set(g.camLook.x, g.camLook.y + this._cam.y, g.camLook.z + this._cam.z);
     } else {
       // Lead the camera slightly toward movement so you can see what you're running into.
       _v.copy(p.pos).addScaledVector(p.vel, 0.22);
       if (yaw === 0 && pitch === 0) {
         _v.z -= INTERIOR_LEAD;
         g.camLook.lerp(_v, Math.min(1, dt * 6));
-        g.camPos.set(g.camLook.x, g.camLook.y + INTERIOR_CAM.y, g.camLook.z + INTERIOR_CAM.z);
+        g.camPos.set(g.camLook.x, g.camLook.y + this._cam.y, g.camLook.z + this._cam.z);
       } else {
         _v.x -= Math.sin(yaw) * INTERIOR_LEAD;
         _v.z -= Math.cos(yaw) * INTERIOR_LEAD;
         g.camLook.lerp(_v, Math.min(1, dt * 6));
-        const boom = Math.hypot(INTERIOR_CAM.y, INTERIOR_CAM.z);
-        const pa = Math.atan2(INTERIOR_CAM.y, INTERIOR_CAM.z) + pitch;
+        const boom = Math.hypot(this._cam.y, this._cam.z);
+        const pa = Math.atan2(this._cam.y, this._cam.z) + pitch;
         g.camPos.set(
           g.camLook.x + Math.sin(yaw) * boom * Math.cos(pa),
           g.camLook.y + boom * Math.sin(pa),
@@ -422,8 +582,11 @@ export class DungeonMode extends GameMode {
       // Blocked: sit at the last unobstructed point along the boom.
       _dir.copy(g.camPos).sub(p.pos).normalize();
       g.camPos.copy(p.pos).addScaledVector(_dir, dist);
-      // Floors are flat at y=0 indoors; keep the boom off the deck.
-      if (g.camPos.y < 2.4) g.camPos.y = 2.4;
+      // Keep the boom off the deck — the LOCAL deck: flat kinds' floors sit
+      // at y=0 and this is the old constant; the tower's floors ride
+      // heightAt, and the boom must not clip into a terrace it retreated over.
+      const deck = (this.dungeon ? this.dungeon.heightAt(g.camPos.x, g.camPos.z) : 0) + 2.4;
+      if (g.camPos.y < deck) g.camPos.y = deck;
     }
 
     g.camera.position.lerp(g.camPos, Math.min(1, dt * 7));
@@ -465,11 +628,18 @@ export class DungeonMode extends GameMode {
   _boomBlocked(x, y, z) {
     const layout = this.dungeon?.layout;
     if (!layout) return false;
-    if (y < 0.6) return true;
+    // The local floor (tower: heightAt; flat kinds: 0) is the ground plane
+    // the old `y < 0.6` constant meant.
+    const floorY = layout.heightAt ? layout.heightAt(x, z) : 0;
+    if (y < floorY + 0.6) return true;
     const low = layout.params.wallHeightLow;
     const high = layout.params.wallHeight;
     for (const run of layout.wallRuns) {
-      if (y > (run.face === 's' ? low : high)) continue;
+      // Tower runs carry top = the highest floor they bound; their rendered
+      // slab reaches top + wallHeight(/Low), which is exactly the occlusion
+      // question this probe asks. Flat kinds carry no `top` and keep the old
+      // arithmetic to the bit.
+      if (y > (run.top || 0) + (run.face === 's' ? low : high)) continue;
       if (Math.abs(x - run.x) < run.w / 2 + WALL_PAD
         && Math.abs(z - run.z) < run.d / 2 + WALL_PAD) return true;
     }

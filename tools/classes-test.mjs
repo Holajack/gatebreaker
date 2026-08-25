@@ -543,8 +543,12 @@ section('SAVE MIGRATION  (three generations in, sane defaults out; the token gra
   const shippedKeys = ['version', 'level', 'xp', 'points', 'stats', 'autoStats', 'playerBody', 'cleared', 'shadows', 'ash', 'daily', 'classTier', 'unlockedAnomaly', 'totalKills', 'deaths', 'weapon', 'stash', 'equipment', 'shop', 'worldTime'];
   ok(shippedKeys.every((k) => k in fresh), 'every shipped save key survives in freshSave');
   const newKeys = Object.keys(fresh).filter((k) => !shippedKeys.includes(k));
-  ok(newKeys.sort().join(',') === 'archon,archonState,className,hunterName,respecTokens',
-    'the new footprint is exactly the five additive fields', newKeys.join(','));
+  // RETARGET (Wave B5): settlement + visited joined the additive footprint —
+  // multi-town travel state, absent-means-default like every field before
+  // them. The fence still does its job: an EIGHTH field must be argued into
+  // this list, never slipped past it.
+  ok(newKeys.sort().join(',') === 'archon,archonState,className,hunterName,respecTokens,settlement,visited',
+    'the new footprint is exactly the seven additive fields', newKeys.join(','));
 }
 
 // -------------------------------------------------------------- sanitisers
@@ -2605,7 +2609,10 @@ try {
       g.save.archonState.sigils = 0;
       g.refreshDerived(true);
       Math.random = () => 0.42;
-      g.enterGate('S');
+      // forceOpen (Wave E retarget): S mounts the reach natively now; these
+      // probes poke g.killed/g.spawned against the ARENA wave path, which
+      // survives exactly behind the sanctioned forceOpen override.
+      g.enterGate('S', { forceOpen: true });
       Math.random = realRandom;
       for (let i = 0; i < 5; i++) g.update(1 / 60);
       out.trialArmed = g._trialRun;
@@ -2684,7 +2691,10 @@ try {
       // Re-enter THE REACH by the real door (the flag re-arms in _beginGate)
       // and take the trial to the end this time.
       Math.random = () => 0.42;
-      g.enterGate('S');
+      // forceOpen (Wave E retarget): S mounts the reach natively now; these
+      // probes poke g.killed/g.spawned against the ARENA wave path, which
+      // survives exactly behind the sanctioned forceOpen override.
+      g.enterGate('S', { forceOpen: true });
       Math.random = realRandom;
       for (let i = 0; i < 5; i++) g.update(1 / 60);
       out.reArmed = g._trialRun;

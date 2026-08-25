@@ -4,7 +4,9 @@
 // — new kinds 'tower' / 'waste' / 'reach' each get a file, not 800 more lines
 // in one): the shared contract, kind dispatch and every exported name below
 // live in layouts/core.js, the E/D rooms-and-corridors kind in
-// layouts/crawl.js, the C open-cavern kind in layouts/cavern.js. This file is
+// layouts/crawl.js, the C open-cavern kind in layouts/cavern.js, and the B
+// terraced-ascent kind (Wave E task E-B — layout.heightAt, stair ramps,
+// parapet gaps) in layouts/tower.js. This file is
 // a re-export facade so consumers (dungeon.js, tools/dungeon-gen-test.mjs,
 // tools/dungeon-test.mjs's dynamic import) keep importing ONE module — and so
 // the module identity of COVER_KINDS / LAYOUT_PARAMS / ALCOVE_LIMITS stays a
@@ -19,4 +21,9 @@ export {
   ALCOVE_LIMITS, COVER_MIN_TOP, COVER_KINDS,
   bossAnchor, exitAnchor,
   NAV_BODY_RADIUS, NAV_FILL_STEP, floodFillRoom, doorReachableFrom,
+  // Waste kind (Wave E task E-A, layouts/waste.js via core's re-export): the
+  // route-waypoint connectivity helpers + terrain contract constants, so the
+  // soak runs the exact code the generator's own guarantee runs.
+  buildWasteField, wasteFieldFill, terrainHeightFn,
+  TERRAIN_MAX_SLOPE, ROUTE_CORRIDOR_HALF, WASTE_FILL_STEP,
 } from './layouts/core.js';

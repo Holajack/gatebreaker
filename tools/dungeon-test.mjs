@@ -37,9 +37,25 @@
 //      tap, zone aggro with NO door seals (kiting out of the zone keeps the
 //      pack chasing), the boss grotto membrane holding until allCleared, the
 //      boss fight behind the resealed neck, and the exit-portal walk-out.
-//   C. regression_arena: a B-rank run must still be the arena, wave-driven,
-//      byte-identical in flow; and the forceOpen dev override must pin the
-//      arena for E (every older tool depends on it).
+//   T. Wave E task E-B: the B-rank ASCENT tower mount — budgets, the live
+//      heightAt seam (terraces + stair treads), ramp-mouth membranes across a
+//      height step, one-way parapet ledges, per-floor containment, leak
+//      discipline, and a dressed screenshot.
+//   V. Wave E task E-A: the A-rank RIVEN WASTE mount, standalone — budgets on
+//      an open landscape (fewer walls, terrain triangles), the SMOOTH
+//      heightAt seam (rolling analytic terrain, spawn on the datum), route +
+//      compass-beacon contract, rim containment, outcrop collision on
+//      terrain, determinism, leak discipline, and a dressed screenshot.
+//   Y. Wave E task E-A walkthrough: a NATIVE A-gate run — the compass gate
+//      (site N+1 and the boss refuse to trigger early with NO membranes
+//      anywhere), roaming packs rising on the route legs, site-by-site
+//      kill metering, the boss rising at the final open site, and the
+//      exit-portal walk-out behind it.
+//   C. regression_arena: an S-rank run must still be the arena, wave-driven,
+//      byte-identical in flow (retargeted B -> A when B became the tower,
+//      A -> S when A became the waste — S is the last arena rank until its
+//      own Wave E task); and the forceOpen dev override must pin the arena
+//      for E (every older tool depends on it).
 //
 // Landscape viewport (harness default) is load-bearing: portrait trips the
 // rotate gate and swallows pointers.
@@ -55,7 +71,9 @@ function check(name, ok, detail = '') {
   if (!ok) fails.push(name);
 }
 
-const SEEDS = { E: 90210, D: 40417, C: 51877 };
+// B: 70388 is picked ON PURPOSE for its 3 parapet gaps over 5 floors — the
+// phase-T ledge one-way probe needs a seed that actually rolled one.
+const SEEDS = { E: 90210, D: 40417, C: 51877, B: 70388, A: 31337 };
 const DRAW_BUDGET = 24;       // spec performance.drawCallBudget, E/D interior
 const DRAW_BUDGET_CAVERN = 30;  // C adds dome, stalagmite/stalactite fields, crystals
 const TRI_BUDGET_KIT = 130000;  // spec performance.triangleBudget, kit loaded
@@ -95,6 +113,25 @@ const TRI_BUDGET_PROC = 45000;  // procedural-only bound (fallback phase F)
 const FRAME_BUDGET = {
   E: { draws: 24, tris: 130000 },     // the spec budget, met on every seed
   D: { draws: 30, tris: 190000 },     // measured 27-28 / 182,327 worst seed
+  // B (Wave E tower): D's dressing set minus alcoves, plus the terraced
+  // shell's risers/staircase shafts (more triangles, zero extra draws — the
+  // risers ride the ONE floor mesh). Measured ceiling + headroom, same
+  // regression-guard-not-endorsement stance as D's row.
+  B: { draws: 30, tris: 210000 },
+  // S (Wave E reach): the shell alone — measured whole-frame 28 draws /
+  // 90-92k tris over 4 seeds, plus headroom (review fix: the reach had no
+  // row, so only phase Z's live-gate ceilings — which include the player,
+  // shadows and fx — guarded it; those ceilings now DERIVE from this row so
+  // the bar has one home).
+  S: { draws: 30, tris: 130000 },
+  // A (Wave E waste): the spec budget, and the roomiest fit of any rank —
+  // an open landscape is ONE smooth floor mesh, a rim, and <= 58 outcrop
+  // instances across five dressing fields; there are no torch sconces, no
+  // alcoves, no clutter rows at all. The task brief's "watch tri budget on
+  // terrain" is this row: the corner-sampled heightmap floor rides the same
+  // single mesh as every kind's floor, so terrain costs vertices, never
+  // draws.
+  A: { draws: 24, tris: 130000 },
 };
 
 const server = await ensureServer();
@@ -119,6 +156,9 @@ try {
       PROJECTILE_Y: cfg.PROJECTILE_Y,
       COVER_KINDS: layout.COVER_KINDS,
       COVER_MIN_TOP: layout.COVER_MIN_TOP,
+      // Phase Z pins the S anomaly roll to zero through this live reference
+      // (config's exported const object — property writes stick).
+      ANOMALY_CHANCE: cfg.ANOMALY_CHANCE,
     };
   });
 
@@ -652,10 +692,10 @@ try {
         };
       }
       return out;
-    }, { ranks: ['E', 'D', 'C'] });
+    }, { ranks: ['E', 'D', 'C', 'B'] });
     report.space = space;
     const DASH = 7.5;
-    for (const rank of ['E', 'D', 'C']) {
+    for (const rank of ['E', 'D', 'C', 'B']) {
       const s = space[rank];
       const d = s.dims;
       // C's fight "rooms" are trigger discs in open cavern — the gen soak
@@ -670,9 +710,16 @@ try {
       const lo = Math.min(...s.rolls);
       const hi = Math.max(...s.rolls);
       const distinct = new Set(s.rolls).size;
-      check(`${rank}: enemy count rolls ${lo}-${hi} inside band ${JSON.stringify(s.band)}, ${distinct} distinct over 10 seeds`,
-        Array.isArray(s.band) && lo >= s.band[0] && hi <= s.band[1] && distinct >= 3,
-        JSON.stringify(s.rolls));
+      if (Array.isArray(s.band)) {
+        check(`${rank}: enemy count rolls ${lo}-${hi} inside band ${JSON.stringify(s.band)}, ${distinct} distinct over 10 seeds`,
+          lo >= s.band[0] && hi <= s.band[1] && distinct >= 3,
+          JSON.stringify(s.rolls));
+      } else {
+        // B carries no enemyBand yet — rollEnemyCount's documented fallback
+        // is the flat gate.enemies, every seed, every rebuild.
+        check(`${rank}: bandless gate holds the flat count ${s.nominal} on every seed`,
+          lo === s.nominal && hi === s.nominal, JSON.stringify(s.rolls));
+      }
       check(`${rank}: same seed re-rolls the same count (${s.repeat})`,
         s.repeat === s.rolls[0]);
       check(`${rank}: room budgets sum ${s.budgetSum} = rolled gate.enemies ${s.rolls[0]}`,
@@ -925,6 +972,610 @@ try {
       res.boss.inBossRoom && res.boss.spawnPoints >= 6);
     check('D: nav flow reaches the grotto', res.nav.goalSet && res.nav.bossReaches);
     check(`D: no GPU leak (geo ${res.leak.geoBefore}->${res.leak.geoAfter}, tex ${res.leak.texBefore}->${res.leak.texAfter})`,
+      res.leak.geoAfter <= res.leak.geoBefore + 2 && res.leak.texAfter <= res.leak.texBefore + 2);
+  }
+
+  // ------------------------------------------------------------- phase T
+  // Wave E task E-B: THE ASCENT — the B-rank tower mount, through the same
+  // standalone lens as phases A/D. Tower-specific claims on top of the shared
+  // ones: heightAt is live (entry 0, boss on the top floor), the player-body
+  // seam data is present (layout.heightAt + params.fallDamage), stair-mouth
+  // membranes seal ACROSS a height step, wall containment holds at each run's
+  // own floor, parapet-gap ledges are one-way BY HEIGHT, and resolve()'s
+  // settle walks a body up treads / drops it off a ledge.
+  {
+    const res = await page.evaluate(async ({ seed }) => {
+      const { Dungeon, GATES } = window.__dt;
+      const g = window.__game;
+      const gate = GATES.find((x) => x.rank === 'B');
+      const r = g.renderer;
+      const out = {};
+      const frame = () => {
+        r.info.autoReset = false;
+        r.info.reset();
+        r.render(g.scene, g.camera);
+        const withShadow = { calls: r.info.render.calls, tris: r.info.render.triangles };
+        r.info.autoReset = true;
+        r.render(g.scene, g.camera);
+        return {
+          calls: r.info.render.calls,
+          tris: r.info.render.triangles,
+          frameCalls: withShadow.calls,
+          frameTris: withShadow.tris,
+        };
+      };
+      const cityGroup = g.world?.group || null;
+      const cityWasVisible = cityGroup ? cityGroup.visible : false;
+      if (cityGroup) cityGroup.visible = false;
+      const aimShadow = (dd) => {
+        const c = dd.layout.rooms[dd.layout.bossRoom]?.centre || { x: 0, z: 0 };
+        dd.updateShadowCamera({ x: c.x, y: dd.layout.rooms[dd.layout.bossRoom]?.floorY || 0, z: c.z }, 12);
+        r.shadowMap.needsUpdate = true;
+      };
+      {
+        // PMREM warm-up, as in phase A.
+        const wd = new Dungeon(g.scene, g.renderer, g.camera);
+        wd.build(gate, seed);
+        r.render(g.scene, g.camera);
+        wd.clear();
+        g.scene.remove(wd.group);
+        r.render(g.scene, g.camera);
+      }
+      const memBefore = { geo: r.info.memory.geometries, tex: r.info.memory.textures };
+      const base = frame();
+      const d = new Dungeon(g.scene, g.renderer, g.camera);
+      d.build(gate, seed);
+      aimShadow(d);
+      const built = frame();
+      out.drawCalls = built.calls - base.calls;
+      out.triangles = built.tris - base.tris;
+      out.frame = {
+        drawCalls: built.frameCalls - base.frameCalls,
+        triangles: built.frameTris - base.frameTris,
+      };
+
+      const L = d.layout;
+      const bossRoom = L.rooms[L.bossRoom];
+      out.contract = {
+        kind: d.kind,
+        encounterDriven: d.encounterDriven === true,
+        radiusPadded: d.radius >= L.radius + 4 - 1e-9,
+        hasNavGrid: !!d.navGrid && d.navGrid.baked,
+        floors: L.floorCount,
+        ramps: L.ramps.length,
+        gaps: L.gaps.length,
+        heightEntry: d.heightAt(0, 0),
+        heightBoss: d.heightAt(bossRoom.centre.x, bossRoom.centre.z),
+        bossFloorY: bossRoom.floorY,
+        hasHeightFn: typeof L.heightAt === 'function',
+        hasFallDamage: !!L.params.fallDamage,
+        rooms: L.rooms.length,
+        doors: L.doors.length,
+      };
+
+      // Determinism: in-world rebuild agreement, heights included.
+      const d2 = new Dungeon(g.scene, g.renderer, g.camera);
+      d2.build(gate, seed);
+      const sig = (dd) => JSON.stringify({
+        rooms: dd.layout.rooms.map((rm) => [rm.id, rm.kind, rm.floor, rm.x, rm.z, rm.w, rm.d, rm.budget]),
+        doors: dd.layout.doors.map((dr) => [dr.id, dr.x, dr.z, dr.y, dr.w, dr.rot, dr.roomA, dr.roomB]),
+        runs: dd.layout.wallRuns.map((wr) => [wr.x, wr.z, wr.w, wr.d, wr.face, wr.base, wr.top]),
+        gaps: dd.layout.gaps.map((gp) => [gp.x, gp.z, gp.w, gp.rot, gp.yTop, gp.yLand]),
+        mask: Array.from(dd.layout.mask).join(''),
+        cellF: Array.from(dd.layout.cellF).join(','),
+      });
+      out.deterministic = sig(d) === sig(d2);
+      d2.clear();
+      g.scene.remove(d2.group);
+
+      const floorAt = (x, z) => {
+        const gx = Math.floor((x - L.originX) / L.cell);
+        const gz = Math.floor((z - L.originZ) / L.cell);
+        if (gx < 0 || gz < 0 || gx >= L.w || gz >= L.h) return false;
+        return L.mask[gx + gz * L.w] === 1;
+      };
+
+      // Containment: phase A's drive-into-every-run probe, with the body's y
+      // held at the run's OWN floor band (resolve's settle keeps it there —
+      // that seam is under test too).
+      const OUTWARD = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0] };
+      out.wallProbe = { probed: 0, skipped: 0, breaches: [] };
+      for (let i = 0; i < L.wallRuns.length; i++) {
+        const run = L.wallRuns[i];
+        const [tx, tz] = OUTWARD[run.face];
+        const sx = run.x - tx * 1.2;
+        const sz = run.z - tz * 1.2;
+        if (!floorAt(sx, sz)) { out.wallProbe.skipped++; continue; }
+        const pos = { x: sx, y: d.heightAt(sx, sz), z: sz };
+        const vel = { x: 0, y: 0, z: 0 };
+        for (let step = 0; step < 60; step++) {
+          vel.x = tx * 4; vel.z = tz * 4; vel.y = 0;
+          pos.x += vel.x * 0.05;
+          pos.z += vel.z * 0.05;
+          d.resolve(pos, 0.5, vel);
+        }
+        const along = (pos.x - run.x) * tx + (pos.z - run.z) * tz;
+        if (along > -0.55 || !floorAt(pos.x, pos.z)) {
+          out.wallProbe.breaches.push({ i, face: run.face, along: +along.toFixed(3) });
+        }
+        out.wallProbe.probed++;
+      }
+
+      // A ramp-mouth membrane: seal/unseal crossing ACROSS the height step —
+      // pick the boss room's door (always a ramp's high mouth).
+      const door = L.doors[bossRoom.doors[0]];
+      const [ntx, ntz] = door.rot === 0 ? [0, 1] : [1, 0];
+      const nsgn = Math.sign((bossRoom.centre.x - door.x) * ntx + (bossRoom.centre.z - door.z) * ntz) || 1;
+      const crossMouth = () => {
+        const px = door.x - nsgn * ntx * 1.5;
+        const pz = door.z - nsgn * ntz * 1.5;
+        const pos = { x: px, y: d.heightAt(px, pz), z: pz };
+        const vel = { x: 0, y: 0, z: 0 };
+        for (let step = 0; step < 60; step++) {
+          vel.x = nsgn * ntx * 4; vel.z = nsgn * ntz * 4; vel.y = 0;
+          pos.x += vel.x * 0.05; pos.z += vel.z * 0.05;
+          d.resolve(pos, 0.5, vel);
+        }
+        return {
+          crossed: ((pos.x - door.x) * ntx + (pos.z - door.z) * ntz) * nsgn > door.d / 2 + 0.3,
+          y: pos.y,
+        };
+      };
+      const open1 = crossMouth();
+      d.setDoorSealed(door.id, true);
+      const sealed = crossMouth();
+      d.setDoorSealed(door.id, false);
+      const open2 = crossMouth();
+      out.membrane = {
+        openCrosses: open1.crossed,
+        // The settle seam: driving up to and through the mouth climbed the
+        // approach treads, so the body's y rose toward the door's own floor.
+        climbedTo: +open1.y.toFixed(2),
+        doorY: door.y,
+        sealedCrosses: sealed.crossed,
+        reopenedCrosses: open2.crossed,
+      };
+
+      // Parapet ledge (when this seed rolled one): one-way by height. From
+      // the landing side the ledge box + the terrace face wall the body out;
+      // from the lip the body walks over the plane and the settle drops it.
+      out.ledge = null;
+      if (L.gaps.length) {
+        const gap = L.gaps[0];
+        const [lx, lz] = gap.rot === 0 ? [0, 1] : [1, 0];
+        // Outward = away from the gap's room.
+        const room = L.rooms[gap.room];
+        const osgn = Math.sign((gap.x - room.centre.x) * lx + (gap.z - room.centre.z) * lz) || 1;
+        const drive = (fromBelow) => {
+          const s0 = fromBelow ? 1 : -1;   // below: start outside, drive in
+          const px = gap.x + osgn * lx * 1.5 * s0;
+          const pz = gap.z + osgn * lz * 1.5 * s0;
+          const pos = { x: px, y: d.heightAt(px, pz), z: pz };
+          const vel = { x: 0, y: 0, z: 0 };
+          for (let step = 0; step < 60; step++) {
+            vel.x = -s0 * osgn * lx * 4; vel.z = -s0 * osgn * lz * 4; vel.y = 0;
+            pos.x += vel.x * 0.05; pos.z += vel.z * 0.05;
+            d.resolve(pos, 0.5, vel);
+          }
+          const along = ((pos.x - gap.x) * lx + (pos.z - gap.z) * lz) * osgn;
+          return { along: +along.toFixed(2), y: +pos.y.toFixed(2) };
+        };
+        const up = drive(true);     // from the landing, into the cliff face
+        const down = drive(false);  // from the lip, off the edge
+        out.ledge = {
+          yTop: gap.yTop,
+          yLand: gap.yLand,
+          up,
+          down,
+          // Up: never past the plane (along stays positive = still outside),
+          // and never lifted to the top. Down: crossed the plane outward and
+          // settled to the landing floor.
+          blockedFromBelow: up.along > 0.2 && up.y < gap.yTop - 0.5,
+          dropsFromAbove: down.along > 0.2 && down.y <= gap.yLand + 0.05,
+        };
+      }
+
+      // randomSpawn: entry room, ground floor. bossSpawn: top floor, on its
+      // own height, standing on clear floor at ITS feet height.
+      let sRnd = 24680;
+      const rnd = () => {
+        sRnd = (sRnd * 1664525 + 1013904223) >>> 0;
+        return sRnd / 4294967296;
+      };
+      out.spawns = { inEntry: 0, total: 8 };
+      for (let i = 0; i < 8; i++) {
+        const p = d.randomSpawn(rnd, { x: 0, y: 0, z: 0 }, 4);
+        if (d.roomAt(p.x, p.z) === 0 && p.y === 0) out.spawns.inEntry++;
+      }
+      const bs = d.bossSpawn();
+      out.boss = {
+        inBossRoom: d.roomAt(bs.x, bs.z) === L.bossRoom,
+        y: bs.y,
+        spawnPoints: d.spawnPointsFor(L.bossRoom).length,
+        anchorClear: !d.obstacleField.blocked(bs.x, bs.z, 0.45, 0.4, bs.y),
+      };
+
+      out.roomAt = {
+        centresAgree: L.rooms.every((rm) => d.roomAt(rm.centre.x, rm.centre.z) === rm.id),
+        tunnelIsNoRoom: d.roomAt(0, 0) === -1,
+      };
+      const dirv = { x: 0, z: 0 };
+      out.nav = { goalSet: d.navGrid.setGoal(L.rooms[0].centre.x, L.rooms[0].centre.z), bossReaches: false };
+      if (out.nav.goalSet) out.nav.bossReaches = d.navGrid.flowAt(bossRoom.centre.x, bossRoom.centre.z, dirv);
+
+      out.dressing = d.dressing;
+      window.__dtLive = { d, memBefore };
+      return out;
+    }, { seed: SEEDS.B });
+
+    // Dressed evidence shot over a mid-floor room, camera riding its height —
+    // per-tick pinned redirect, as in phases A/D.
+    await page.evaluate(() => {
+      const g = window.__game;
+      const { d } = window.__dtLive;
+      const rooms = d.layout.rooms.filter((r) => r.kind === 'combat' && r.floor >= 1);
+      const room = rooms[0] || d.layout.rooms[d.layout.bossRoom];
+      document.getElementById('title').classList.add('hidden');
+      const orig = g.renderer.render.bind(g.renderer);
+      window.__dtLive.restoreRender = g.renderer.render;
+      const present = () => {
+        g.camera.position.set(room.centre.x, (room.floorY || 0) + 11, room.centre.z + 11);
+        g.camera.lookAt(room.centre.x, (room.floorY || 0) + 1, room.centre.z);
+        orig(g.scene, g.camera);
+      };
+      g.renderer.render = present;
+      present();
+    });
+    const shotTower = shotPath('dungeon-b-tower.png');
+    await page.screenshot({ path: shotTower });
+    report.screenshots.push(shotTower);
+    const leak = await page.evaluate(() => {
+      const g = window.__game;
+      const { d, memBefore, restoreRender } = window.__dtLive;
+      const r = g.renderer;
+      if (restoreRender) r.render = restoreRender;
+      d.clear();
+      g.scene.remove(d.group);
+      r.render(g.scene, g.camera);
+      document.getElementById('title').classList.remove('hidden');
+      window.__dtLive = null;
+      return {
+        geoBefore: memBefore.geo,
+        geoAfter: r.info.memory.geometries,
+        texBefore: memBefore.tex,
+        texAfter: r.info.memory.textures,
+      };
+    });
+    res.leak = leak;
+    report.ranks.B = res;
+    const c = res.contract;
+    check(`T: tower draw-call delta ${res.drawCalls} <= ${FRAME_BUDGET.B.draws}`,
+      res.drawCalls <= FRAME_BUDGET.B.draws && res.drawCalls >= 5);
+    check(`T: tower WHOLE-FRAME ${res.frame.drawCalls} draws / ${res.frame.triangles} tris <= ${FRAME_BUDGET.B.draws} / ${FRAME_BUDGET.B.tris}`,
+      res.frame.drawCalls <= FRAME_BUDGET.B.draws && res.frame.triangles <= FRAME_BUDGET.B.tris
+      && res.frame.triangles >= res.triangles);
+    check('T: contract surface (kind tower, height seam live, fallDamage data)',
+      c.kind === 'tower' && c.encounterDriven && c.radiusPadded && c.hasNavGrid
+      && c.hasHeightFn && c.hasFallDamage
+      && c.floors >= 4 && c.floors <= 6 && c.ramps === c.floors - 1,
+      JSON.stringify(c));
+    check(`T: heightAt — entry 0, boss ${c.heightBoss} on top floor (${c.bossFloorY})`,
+      c.heightEntry === 0 && c.heightBoss === c.bossFloorY && c.bossFloorY === (c.floors - 1) * 3);
+    check('T: deterministic rebuild (heights, runs, gaps included)', res.deterministic);
+    check(`T: wall containment at floor height — ${res.wallProbe.probed} probed, ${res.wallProbe.skipped} skipped`,
+      res.wallProbe.breaches.length === 0 && res.wallProbe.probed > 20
+      && res.wallProbe.skipped < res.wallProbe.probed * 0.4,
+      res.wallProbe.breaches.length ? JSON.stringify(res.wallProbe.breaches.slice(0, 4)) : '');
+    check(`T: ramp-mouth membrane seals across the height step (climbed to y ${res.membrane.climbedTo} toward door y ${res.membrane.doorY})`,
+      res.membrane.openCrosses === true && res.membrane.sealedCrosses === false
+      && res.membrane.reopenedCrosses === true
+      && res.membrane.climbedTo > res.membrane.doorY - 1.2,
+      JSON.stringify(res.membrane));
+    if (res.ledge) {
+      check(`T: parapet ledge is one-way (up blocked at y ${res.ledge.up.y}, drop lands at y ${res.ledge.down.y} of ${res.ledge.yLand.toFixed(1)})`,
+        res.ledge.blockedFromBelow === true && res.ledge.dropsFromAbove === true,
+        JSON.stringify(res.ledge));
+    } else {
+      console.log(`      (seed ${SEEDS.B} rolled no parapet gap — ledge probe covered by the gen soak's per-gap asserts)`);
+    }
+    check(`T: randomSpawn stays in the ground-floor entry ${res.spawns.inEntry}/${res.spawns.total}`,
+      res.spawns.inEntry === res.spawns.total);
+    check(`T: bossSpawn on the top floor at y ${res.boss.y} (${res.boss.spawnPoints} pts), clear floor`,
+      res.boss.inBossRoom && res.boss.y === c.bossFloorY && res.boss.spawnPoints >= 4
+      && res.boss.anchorClear === true);
+    check('T: roomAt agrees', res.roomAt.centresAgree && res.roomAt.tunnelIsNoRoom);
+    check('T: nav flow reaches the boss floor', res.nav.goalSet && res.nav.bossReaches);
+    check(`T: dressing roles placed ${JSON.stringify(res.dressing?.roles || {})}`,
+      res.dressing?.roles?.archway > 0 && res.dressing?.roles?.torch > 0
+      && res.dressing?.roles?.column > 0);
+    check(`T: no GPU leak (geo ${res.leak.geoBefore}->${res.leak.geoAfter}, tex ${res.leak.texBefore}->${res.leak.texAfter})`,
+      res.leak.geoAfter <= res.leak.geoBefore + 2 && res.leak.texAfter <= res.leak.texBefore + 2);
+  }
+
+  // ------------------------------------------------------------- phase V
+  // Wave E task E-A: THE RIVEN WASTE — the A-rank open-landscape mount,
+  // through the same standalone lens as phases A/D/T. Waste-specific claims
+  // on top of the shared ones: the SMOOTH height seam (rolling terrain,
+  // spawn exactly on the datum, walkable gradients), route + compass-beacon
+  // contract (one door, nothing else can seal), outcrop collision riding the
+  // terrain, rim containment, and bossSpawn/exit anchors on clear ground.
+  {
+    const res = await page.evaluate(async ({ seed }) => {
+      const { Dungeon, GATES } = window.__dt;
+      const g = window.__game;
+      const gate = GATES.find((x) => x.rank === 'A');
+      const r = g.renderer;
+      const out = {};
+      const frame = () => {
+        r.info.autoReset = false;
+        r.info.reset();
+        r.render(g.scene, g.camera);
+        const withShadow = { calls: r.info.render.calls, tris: r.info.render.triangles };
+        r.info.autoReset = true;
+        r.render(g.scene, g.camera);
+        return {
+          calls: r.info.render.calls,
+          tris: r.info.render.triangles,
+          frameCalls: withShadow.calls,
+          frameTris: withShadow.tris,
+        };
+      };
+      const cityGroup = g.world?.group || null;
+      if (cityGroup) cityGroup.visible = false;
+      const aimShadow = (dd) => {
+        const c = dd.layout.rooms[dd.layout.bossRoom]?.centre || { x: 0, z: 0 };
+        dd.updateShadowCamera({ x: c.x, y: 0, z: c.z }, 12);
+        r.shadowMap.needsUpdate = true;
+      };
+      {
+        // PMREM warm-up, as in phase A.
+        const wd = new Dungeon(g.scene, g.renderer, g.camera);
+        wd.build(gate, seed);
+        r.render(g.scene, g.camera);
+        wd.clear();
+        g.scene.remove(wd.group);
+        r.render(g.scene, g.camera);
+      }
+      const memBefore = { geo: r.info.memory.geometries, tex: r.info.memory.textures };
+      const base = frame();
+      const d = new Dungeon(g.scene, g.renderer, g.camera);
+      d.build(gate, seed);
+      aimShadow(d);
+      const built = frame();
+      out.drawCalls = built.calls - base.calls;
+      out.triangles = built.tris - base.tris;
+      out.frame = {
+        drawCalls: built.frameCalls - base.frameCalls,
+        triangles: built.frameTris - base.frameTris,
+      };
+
+      const L = d.layout;
+      const bossRoom = L.rooms[L.bossRoom];
+      out.contract = {
+        kind: d.kind,
+        encounterDriven: d.encounterDriven === true,
+        radiusPadded: d.radius >= L.radius + 4 - 1e-9,
+        hasNavGrid: !!d.navGrid && d.navGrid.baked,
+        hasHeightFn: typeof L.heightAt === 'function',
+        smooth: L.smoothHeight === true,
+        noFallDamage: !L.params.fallDamage,
+        route: L.route,
+        rooms: L.rooms.length,
+        doors: L.doors.length,
+        cover: L.decor.cover.length,
+        heightEntry: d.heightAt(0, 0),
+      };
+
+      // Terrain: the datum + walkable-gradient claims, sampled live.
+      {
+        let maxSlope = 0;
+        let maxH = 0;
+        for (const rm of L.rooms) {
+          for (const p of rm.spawnPoints.slice(0, 20)) {
+            const y = d.heightAt(p.x, p.z);
+            maxH = Math.max(maxH, Math.abs(y));
+            const gx = (d.heightAt(p.x + 0.45, p.z) - d.heightAt(p.x - 0.45, p.z)) / 0.9;
+            const gz = (d.heightAt(p.x, p.z + 0.45) - d.heightAt(p.x, p.z - 0.45)) / 0.9;
+            maxSlope = Math.max(maxSlope, Math.hypot(gx, gz));
+            if (Math.abs((p.y ?? -1) - y) > 1e-9) out.spawnYDrift = true;
+          }
+        }
+        out.terrain = { maxSlope: +maxSlope.toFixed(3), maxH: +maxH.toFixed(2) };
+      }
+
+      // Determinism: in-world rebuild agreement — terrain and outcrops
+      // included (the context-loss repair contract).
+      const d2 = new Dungeon(g.scene, g.renderer, g.camera);
+      d2.build(gate, seed);
+      const sig = (dd) => JSON.stringify({
+        rooms: dd.layout.rooms.map((rm) => [rm.id, rm.kind, rm.x, rm.z, rm.w, rm.d, rm.budget, rm.roam || 0]),
+        route: dd.layout.route,
+        doors: dd.layout.doors.map((dr) => [dr.id, dr.x, dr.z, dr.w, dr.rot, dr.roomA, dr.roomB]),
+        runs: dd.layout.wallRuns.map((wr) => [wr.x, wr.z, wr.w, wr.d, wr.face, wr.base, wr.top]),
+        cover: dd.layout.decor.cover.map((c) => [c.kind, c.x, c.z, c.yaw, c.y]),
+        terrain: dd.layout.terrain,
+        mask: Array.from(dd.layout.mask).join(''),
+      });
+      out.deterministic = sig(d) === sig(d2);
+      d2.clear();
+      g.scene.remove(d2.group);
+
+      const floorAt = (x, z) => {
+        const gx = Math.floor((x - L.originX) / L.cell);
+        const gz = Math.floor((z - L.originZ) / L.cell);
+        if (gx < 0 || gz < 0 || gx >= L.w || gz >= L.h) return false;
+        return L.mask[gx + gz * L.w] === 1;
+      };
+
+      // Rim containment: the drive-into-every-run probe on the canyon rim,
+      // body y riding the terrain settle.
+      const OUTWARD = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0] };
+      out.wallProbe = { probed: 0, skipped: 0, breaches: [] };
+      for (let i = 0; i < L.wallRuns.length; i++) {
+        const run = L.wallRuns[i];
+        const [tx, tz] = OUTWARD[run.face];
+        const sx = run.x - tx * 1.2;
+        const sz = run.z - tz * 1.2;
+        if (!floorAt(sx, sz)) { out.wallProbe.skipped++; continue; }
+        const pos = { x: sx, y: d.heightAt(sx, sz), z: sz };
+        const vel = { x: 0, y: 0, z: 0 };
+        for (let step = 0; step < 60; step++) {
+          vel.x = tx * 4; vel.z = tz * 4; vel.y = 0;
+          pos.x += vel.x * 0.05;
+          pos.z += vel.z * 0.05;
+          d.resolve(pos, 0.5, vel);
+        }
+        const along = (pos.x - run.x) * tx + (pos.z - run.z) * tz;
+        if (along > -0.55 || !floorAt(pos.x, pos.z)) {
+          out.wallProbe.breaches.push({ i, face: run.face, along: +along.toFixed(3) });
+        }
+        out.wallProbe.probed++;
+      }
+
+      // Outcrop collision rides the terrain: drive a body into the first
+      // rubble/stub footprint — resolve must hold it out at its own ground.
+      out.outcrop = null;
+      const pile = L.decor.cover.find((c) => c.kind !== 'pillar');
+      if (pile) {
+        const pos = { x: pile.x - (pile.ex + 2.5), y: 0, z: pile.z };
+        pos.y = d.heightAt(pos.x, pos.z);
+        const vel = { x: 0, y: 0, z: 0 };
+        for (let step = 0; step < 60; step++) {
+          vel.x = 4; vel.z = 0; vel.y = 0;
+          pos.x += vel.x * 0.05;
+          d.resolve(pos, 0.5, vel);
+        }
+        out.outcrop = {
+          kind: pile.kind,
+          y: pile.y,
+          heldOut: pos.x < pile.x - pile.ex + 0.2,
+        };
+      }
+
+      // The compass beacon: a dungeon-owned toggle the director drives.
+      const site0 = L.rooms[L.route[0]];
+      d.setWaypoint(site0.id);
+      out.beacon = {
+        visibleOn: !!d._waypointBeacon?.visible,
+        atSite: d._waypointBeacon
+          ? Math.hypot(d._waypointBeacon.position.x - site0.centre.x,
+            d._waypointBeacon.position.z - site0.centre.z) < 0.01
+          : false,
+      };
+      d.setWaypoint(-1);
+      out.beacon.hiddenOff = !d._waypointBeacon?.visible;
+
+      // randomSpawn: entry disc, on the datum. bossSpawn: the final site's
+      // rise anchor, on its own terrain height, standing on clear floor.
+      let sRnd = 24680;
+      const rnd = () => {
+        sRnd = (sRnd * 1664525 + 1013904223) >>> 0;
+        return sRnd / 4294967296;
+      };
+      out.spawns = { inEntry: 0, total: 8 };
+      for (let i = 0; i < 8; i++) {
+        const p = d.randomSpawn(rnd, { x: 0, y: 0, z: 0 }, 4);
+        if (d.roomAt(p.x, p.z) === 0) out.spawns.inEntry++;
+      }
+      const bs = d.bossSpawn();
+      out.boss = {
+        inBossRoom: d.roomAt(bs.x, bs.z) === L.bossRoom,
+        onTerrain: Math.abs(bs.y - d.heightAt(bs.x, bs.z)) < 1e-9,
+        anchorClear: !d.obstacleField.blocked(bs.x, bs.z, 0.45, 0.4, bs.y),
+        spawnPoints: d.spawnPointsFor(L.bossRoom).length,
+      };
+
+      out.roomAt = {
+        centresAgree: L.rooms.every((rm) => d.roomAt(rm.centre.x, rm.centre.z) === rm.id),
+        tunnelIsNoRoom: d.roomAt(0, 0) === -1,
+      };
+      const dirv = { x: 0, z: 0 };
+      out.nav = { goalSet: d.navGrid.setGoal(L.rooms[0].centre.x, L.rooms[0].centre.z), bossReaches: false };
+      if (out.nav.goalSet) out.nav.bossReaches = d.navGrid.flowAt(bossRoom.centre.x, bossRoom.centre.z, dirv);
+
+      out.dressing = d.dressing;
+      window.__dtLive = { d, memBefore };
+      return out;
+    }, { seed: SEEDS.A });
+
+    // Dressed evidence shot over the middle route site — per-tick pinned
+    // redirect, as in phases A/D/T.
+    await page.evaluate(() => {
+      const g = window.__game;
+      const { d } = window.__dtLive;
+      const site = d.layout.rooms[d.layout.route[1]] || d.layout.rooms[d.layout.route[0]];
+      d.setWaypoint(site.id);
+      document.getElementById('title').classList.add('hidden');
+      const orig = g.renderer.render.bind(g.renderer);
+      window.__dtLive.restoreRender = g.renderer.render;
+      const y = d.heightAt(site.centre.x, site.centre.z);
+      const present = () => {
+        g.camera.position.set(site.centre.x, y + 13, site.centre.z + 14);
+        g.camera.lookAt(site.centre.x, y + 1, site.centre.z - 6);
+        orig(g.scene, g.camera);
+      };
+      g.renderer.render = present;
+      present();
+    });
+    const shotWaste = shotPath('dungeon-a-waste.png');
+    await page.screenshot({ path: shotWaste });
+    report.screenshots.push(shotWaste);
+    const leak = await page.evaluate(() => {
+      const g = window.__game;
+      const { d, memBefore, restoreRender } = window.__dtLive;
+      const r = g.renderer;
+      if (restoreRender) r.render = restoreRender;
+      d.clear();
+      g.scene.remove(d.group);
+      r.render(g.scene, g.camera);
+      document.getElementById('title').classList.remove('hidden');
+      window.__dtLive = null;
+      return {
+        geoBefore: memBefore.geo,
+        geoAfter: r.info.memory.geometries,
+        texBefore: memBefore.tex,
+        texAfter: r.info.memory.textures,
+      };
+    });
+    res.leak = leak;
+    report.ranks.A = res;
+    const c = res.contract;
+    check(`V: waste draw-call delta ${res.drawCalls} <= ${FRAME_BUDGET.A.draws}`,
+      res.drawCalls <= FRAME_BUDGET.A.draws && res.drawCalls >= 5);
+    check(`V: waste WHOLE-FRAME ${res.frame.drawCalls} draws / ${res.frame.triangles} tris <= ${FRAME_BUDGET.A.draws} / ${FRAME_BUDGET.A.tris}`,
+      res.frame.drawCalls <= FRAME_BUDGET.A.draws && res.frame.triangles <= FRAME_BUDGET.A.tris
+      && res.frame.triangles >= res.triangles);
+    check('V: contract surface (kind waste, smooth height seam live, route of 3, ONE door)',
+      c.kind === 'waste' && c.encounterDriven && c.radiusPadded && c.hasNavGrid
+      && c.hasHeightFn && c.smooth && c.noFallDamage
+      && Array.isArray(c.route) && c.route.length === 3 && c.doors === 1
+      && c.rooms === 5 && c.cover >= 8,
+      JSON.stringify(c));
+    check(`V: terrain — spawn on the datum, slope ${res.terrain.maxSlope} walkable, swell ${res.terrain.maxH} m`,
+      c.heightEntry === 0 && !res.spawnYDrift
+      && res.terrain.maxSlope <= 0.45 && res.terrain.maxH > 0.15 && res.terrain.maxH < 3);
+    check('V: deterministic rebuild (terrain, outcrops, route included)', res.deterministic);
+    check(`V: rim containment on terrain — ${res.wallProbe.probed} probed, ${res.wallProbe.skipped} skipped`,
+      res.wallProbe.breaches.length === 0 && res.wallProbe.probed > 20,
+      res.wallProbe.breaches.length ? JSON.stringify(res.wallProbe.breaches.slice(0, 4)) : '');
+    check('V: outcrop footprint holds a driven body out, on its own ground',
+      !!res.outcrop && res.outcrop.heldOut === true, JSON.stringify(res.outcrop));
+    check('V: compass beacon toggles (visible at the site, hidden on -1)',
+      res.beacon.visibleOn && res.beacon.atSite && res.beacon.hiddenOff,
+      JSON.stringify(res.beacon));
+    check(`V: randomSpawn stays in the entry clearing ${res.spawns.inEntry}/${res.spawns.total}`,
+      res.spawns.inEntry === res.spawns.total);
+    check(`V: bossSpawn at the final site on clear terrain (${res.boss.spawnPoints} pts)`,
+      res.boss.inBossRoom && res.boss.onTerrain && res.boss.anchorClear === true
+      && res.boss.spawnPoints >= 1);
+    check('V: roomAt agrees (discs; open field between sites is no-room)',
+      res.roomAt.centresAgree && res.roomAt.tunnelIsNoRoom);
+    check('V: nav flow crosses the field to the boss site', res.nav.goalSet && res.nav.bossReaches);
+    check(`V: dressing roles placed ${JSON.stringify(res.dressing?.roles || {})}`,
+      res.dressing?.roles?.archway > 0
+      && ((res.dressing?.roles?.coverRubble || 0) + (res.dressing?.roles?.coverStub || 0)
+        + (res.dressing?.roles?.column || 0)) >= 8);
+    check(`V: no GPU leak (geo ${res.leak.geoBefore}->${res.leak.geoAfter}, tex ${res.leak.texBefore}->${res.leak.texAfter})`,
       res.leak.geoAfter <= res.leak.geoBefore + 2 && res.leak.texAfter <= res.leak.texBefore + 2);
   }
 
@@ -1788,27 +2439,566 @@ try {
   await page.screenshot({ path: shotCResults });
   report.screenshots.push(shotCResults);
 
-  // ------------------------------------------------------------- phase C
-  // regression_arena (spec testStrategy): a B-rank run must be the arena,
-  // untouched by every seam edit — same world object, wave-driven spawns,
-  // kill-tail refill still live. forceBiome pins the palette so the shot is
-  // diffable run to run.
+  // ------------------------------------------------------------- phase Y
+  // Wave E task E-A walkthrough on a NATIVE A gate: the compass gate holds
+  // (site 2 and the boss refuse to trigger early with no membranes anywhere
+  // to do the holding), roaming packs rise on the route legs and are metered
+  // against their site's own budget, sites clear in order, the boss rises at
+  // the final open site, and the run ends on the exit-portal walk-in.
   await page.evaluate(() => window.__app.go('title'));
   await page.waitForTimeout(600);
   await page.evaluate(() => {
     const g = window.__game;
-    g.save.level = 40;   // B requires 19; the regression is about flow, not fairness
+    g.save.level = 40;   // A requires 29; the walkthrough is about flow
     g.refreshDerived(true);
-    g.enterGate('B', { forceBiome: 'emberfall' });
+    g.enterGate('A');
+  });
+  await page.waitForFunction(
+    () => window.__game?.mode?.name === 'dungeon' && window.__game.state === 'playing',
+    null, { timeout: 15000 },
+  );
+  await page.waitForTimeout(350);
+  const yswap = await page.evaluate(() => {
+    const g = window.__game;
+    const d = g.world;
+    return {
+      kind: d.kind,
+      isModeDungeon: g.mode.dungeon === d,
+      notArena: d !== g._arenaWorld,
+      encounterDriven: d.encounterDriven === true,
+      spawned: g.spawned,
+      enemies: g.enemies.length,
+      introActive: !!g.mode.intro,
+      hasDirector: !!g.mode.director,
+      hasRoute: Array.isArray(d.layout?.route) && d.layout.route.length === 3,
+      heightBound: typeof d.layout?.heightAt === 'function',
+      obstaclesBound: g.player.body.obstacles === d.obstacleField,
+      beaconAtFirstSite: d._waypointBeacon ? d._waypointRoom === d.layout.route[0] : false,
+    };
+  });
+  check('Y: A gate mounts the waste natively',
+    yswap.kind === 'waste' && yswap.isModeDungeon && yswap.notArena && yswap.encounterDriven,
+    JSON.stringify(yswap));
+  check('Y: field dormant through the intro, director + route + compass bound',
+    yswap.spawned === 0 && yswap.enemies === 0 && yswap.introActive
+    && yswap.hasDirector && yswap.hasRoute && yswap.heightBound
+    && yswap.obstaclesBound && yswap.beaconAtFirstSite);
+
+  await page.waitForTimeout(500);
+  const shotAEntry = shotPath('dungeon-a-intro.png');
+  await page.screenshot({ path: shotAEntry });
+  report.screenshots.push(shotAEntry);
+
+  // Skip the walk-in; the E phase owns intro timing.
+  await page.mouse.click(446, 206);
+  await page.waitForFunction(() => !window.__game.mode.intro, null, { timeout: 4000 });
+  await page.waitForTimeout(300);
+
+  // Y part 1: first-leg roamers + the compass gate.
+  const y1 = await page.evaluate(() => {
+    const g = window.__game;
+    const d = g.world;
+    const dir = g.mode.director;
+    const L = d.layout;
+    const out = {};
+    const origRender = g.renderer.render.bind(g.renderer);
+    g.renderer.render = () => {};
+    const step = (n) => { for (let i = 0; i < n; i++) g.update(1 / 60); };
+    const tp = (x, z) => {
+      const y = d.heightAt(x, z);
+      g.player.body.reset(x, y, z);
+      g.player.pos.set(x, y, z);
+    };
+    g.player.invuln = 30;
+
+    // First live tick primed the first leg's roaming pack — on its own
+    // roamPoints, spent from site 1's budget.
+    step(3);
+    const s1 = L.rooms[L.route[0]];
+    out.roam = {
+      expected: Math.min(s1.roam, s1.budget),
+      spawned: g.spawned,
+      enemies: g.enemies.length,
+      onPoints: g.enemies.every((e) => (s1.roamPoints || []).some((p) => (
+        Math.hypot(e.pos.x - p.x, e.pos.z - p.z) < 2.5
+      ))),
+    };
+
+    // THE compass gate: standing in site 2's disc (or the boss's) does
+    // NOTHING while site 1 is uncleared — there is no membrane to do the
+    // holding, the director's route order IS the seal.
+    const s2 = L.rooms[L.route[1]];
+    tp(s2.centre.x, s2.centre.z);
+    step(45);   // longer than the trigger grace
+    out.gate = { site2State: dir.roomStates[s2.id], site2Spawns: g.spawned };
+    const boss = L.rooms[L.bossRoom];
+    tp(boss.centre.x, boss.centre.z);
+    step(45);
+    out.gate.bossState = dir.roomStates[boss.id];
+    out.gate.bossActive = g.bossActive;
+
+    // Site 1 triggers when the compass says so.
+    tp(s1.centre.x, s1.centre.z);
+    step(3);
+    out.triggered = dir.roomStates[s1.id] === 1;
+    step(45);
+    out.combatState = dir.roomStates[s1.id];
+    out.concurrent = g.enemies.length;
+    out.waveSize = g.gate.waveSize;
+    g.renderer.render = origRender;
+    return out;
+  });
+  check(`Y: first-leg roaming pack rises on its route points (${y1.roam.enemies}/${y1.roam.expected})`,
+    y1.roam.enemies === y1.roam.expected && y1.roam.enemies > 0
+    && y1.roam.spawned === y1.roam.expected && y1.roam.onPoints,
+    JSON.stringify(y1.roam));
+  check('Y: compass gate — site 2 and the boss stay dormant underfoot until their turn',
+    y1.gate.site2State === 0 && y1.gate.bossState === 0 && !y1.gate.bossActive
+    && y1.gate.site2Spawns === y1.roam.spawned,
+    JSON.stringify(y1.gate));
+  check(`Y: site 1 triggers on entry and fights in the open (${y1.concurrent} live <= wave ${y1.waveSize})`,
+    y1.triggered && y1.combatState === 2 && y1.concurrent > 0 && y1.concurrent <= y1.waveSize);
+
+  await page.waitForTimeout(400);
+  const shotASite = shotPath('dungeon-a-site-combat.png');
+  await page.screenshot({ path: shotASite });
+  report.screenshots.push(shotASite);
+
+  // Y part 2: clear the route in order, boss at the final site, walk out.
+  const y2 = await page.evaluate(() => {
+    const g = window.__game;
+    const d = g.world;
+    const dir = g.mode.director;
+    const L = d.layout;
+    const origRender = g.renderer.render.bind(g.renderer);
+    const origDamage = g.fx.damageNumber.bind(g.fx);
+    g.renderer.render = () => {};
+    g.fx.damageNumber = () => {};
+    const step = (n) => { for (let i = 0; i < n; i++) g.update(1 / 60); };
+    const tp = (x, z) => {
+      const y = d.heightAt(x, z);
+      g.player.body.reset(x, y, z);
+      g.player.pos.set(x, y, z);
+    };
+    const heal = () => { g.player.hp = g.derived.maxHp; g.player.invuln = 30; };
+    const out = { sites: [], problems: [] };
+    let maxConcurrent = 0;
+    const clearActive = (roomId) => {
+      let guard = 0;
+      while (dir.roomStates[roomId] === 2 && guard++ < 200) {
+        for (const e of [...g.enemies]) if (e.hp > 0) g._damageEnemy(e, 9e9);
+        heal();
+        step(80);
+        maxConcurrent = Math.max(maxConcurrent, g.enemies.length);
+      }
+      return guard < 200;
+    };
+    for (let i = 0; i < L.route.length; i++) {
+      const roomId = L.route[i];
+      const room = L.rooms[roomId];
+      heal();
+      // Kill any live roamers of THIS site on the way in so the trigger's
+      // opening wave arithmetic is exercised too, then enter.
+      tp(room.centre.x, room.centre.z);
+      step(45);
+      if (dir.roomStates[roomId] !== 2 && dir.roomStates[roomId] !== 3) {
+        out.problems.push(`site ${roomId} state ${dir.roomStates[roomId]} after entry`);
+        break;
+      }
+      maxConcurrent = Math.max(maxConcurrent, g.enemies.length);
+      if (dir.roomStates[roomId] === 2 && !clearActive(roomId)) {
+        out.problems.push(`site ${roomId} never cleared`);
+        break;
+      }
+      const rec = { id: roomId, cleared: dir.roomStates[roomId] === 3 };
+      // The compass advanced: beacon on the next stop, next leg's roamers up.
+      if (i < L.route.length - 1) {
+        rec.beaconNext = d._waypointRoom === L.route[i + 1];
+        rec.roamersUp = g.enemies.length > 0;
+      } else {
+        rec.beaconBoss = d._waypointRoom === L.bossRoom;
+      }
+      out.sites.push(rec);
+    }
+    out.allCleared = dir.allCleared;
+    out.maxConcurrent = maxConcurrent;
+    out.waveSize = g.gate.waveSize;
+
+    // Boss: enter the final site — rises on its anchor, at terrain height.
+    heal();
+    const bossRoom = L.rooms[L.bossRoom];
+    tp(bossRoom.centre.x, bossRoom.centre.z);
+    step(45);
+    const anchor = d.bossSpawn();
+    out.boss = {
+      active: g.bossActive,
+      phase: dir.state,
+      nearAnchor: g.boss
+        ? Math.hypot(g.boss.pos.x - anchor.x, g.boss.pos.z - anchor.z) < 2.5
+        : false,
+      beaconDown: !d._waypointBeacon?.visible,
+    };
+    if (g.boss) { g.boss.spawning = 0; g._damageEnemy(g.boss, 9e9); }
+    step(5);
+    out.afterBoss = {
+      bossActive: g.bossActive,
+      phase: dir.state,
+      stillPlaying: g.state === 'playing',
+      portalExists: !!d._exitPortal,
+    };
+    heal();
+    step(200);   // portal rise
+    const pp = d._exitPortal ? d._exitPortal.position : { x: 0, z: 0 };
+    g.player.invuln = 0;
+    tp(pp.x, pp.z);
+    for (let i2 = 0; i2 < 5; i2++) g.update(1 / 60);
+    out.walkIn = {
+      state: g.state,
+      phase: dir.state,
+      resultsShown: !document.getElementById('results').classList.contains('hidden'),
+    };
+    document.querySelectorAll('#toasts > *').forEach((t) => t.remove());
+    g.renderer.render = origRender;
+    g.fx.damageNumber = origDamage;
+    return out;
+  });
+  report.wasteWalkthrough = y2;
+  check('Y: sites clear in route order; compass advances (beacon + next-leg roamers)',
+    y2.problems.length === 0 && y2.sites.length === 3 && y2.sites.every((s) => s.cleared)
+    && y2.sites[0].beaconNext && y2.sites[1].beaconNext && y2.sites[2].beaconBoss
+    && y2.allCleared,
+    y2.problems.join(' | ') || JSON.stringify(y2.sites));
+  check(`Y: concurrent enemies never exceeded waveSize (${y2.maxConcurrent}/${y2.waveSize})`,
+    y2.maxConcurrent > 0 && y2.maxConcurrent <= y2.waveSize);
+  check('Y: boss rises at the final open site on its anchor; compass stands down',
+    y2.boss.active && y2.boss.phase === 'boss' && y2.boss.nearAnchor && y2.boss.beaconDown,
+    JSON.stringify(y2.boss));
+  check('Y: boss death raises the portal behind the site; run ends on the walk-in',
+    !y2.afterBoss.bossActive && y2.afterBoss.phase === 'exit' && y2.afterBoss.stillPlaying
+    && y2.afterBoss.portalExists
+    && y2.walkIn.state === 'over' && y2.walkIn.phase === 'done' && y2.walkIn.resultsShown,
+    JSON.stringify({ afterBoss: y2.afterBoss, walkIn: y2.walkIn }));
+
+  await page.waitForTimeout(600);
+  const shotAResults = shotPath('dungeon-a-results.png');
+  await page.screenshot({ path: shotAResults });
+  report.screenshots.push(shotAResults);
+
+  // ------------------------------------------------------------- phase Z
+  // Wave E task E-S walkthrough on a NATIVE S gate: ARCHON'S REACH mounts the
+  // reach kind (broken causeway, two gauntlets, the collapsing summit).
+  // Claims: the swap facts + heightAt + arenaPhases data are live; the
+  // gauntlets seal and clear with the crawl's exact machinery; the summit
+  // seals, the boss rises on its anchor, and the COLLAPSE SEAM fires — each
+  // hp threshold seals its ring (probed at the collision field, the same
+  // resolve the player's body runs) and pulls stranded bodies inside; the
+  // rings retract on the boss's death; the exit portal rises inside the full
+  // disc and the run ends on the walk-in.
+  await page.evaluate(() => window.__app.go('title'));
+  await page.waitForTimeout(600);
+  await page.evaluate(() => {
+    const g = window.__game;
+    g.save.level = 55;   // S requires 42; the walkthrough is about flow
+    g.refreshDerived(true);
+    // PIN THE KIND (review fix): ANOMALY_CHANCE.S = 0.26 let the anomaly
+    // roll swap the S mount to another kind on ~1 run in 4 — phase Z's
+    // arenaPhases asserts then dereferenced undefined and the suite was
+    // nondeterministically red. Zeroing the chance in-page pins the reach.
+    window.__dt.ANOMALY_CHANCE.S = 0;
+    g.enterGate('S');
+  });
+  await page.waitForFunction(
+    () => window.__game?.mode?.name === 'dungeon' && window.__game.state === 'playing',
+    null, { timeout: 15000 },
+  );
+  await page.waitForTimeout(350);
+  const zswap = await page.evaluate(() => {
+    const g = window.__game;
+    const d = g.world;
+    const ph = d.layout?.arenaPhases;
+    return {
+      kind: d.kind,
+      isModeDungeon: g.mode.dungeon === d,
+      notArena: d !== g._arenaWorld,
+      encounterDriven: d.encounterDriven === true,
+      spawned: g.spawned,
+      enemies: g.enemies.length,
+      introActive: !!g.mode.intro,
+      hasDirector: !!g.mode.director,
+      heightBound: typeof d.layout?.heightAt === 'function',
+      summitHigh: d.layout ? d.layout.rooms[d.layout.bossRoom].floorY > 10 : false,
+      obstaclesBound: g.player.body.obstacles === d.obstacleField,
+      phases: ph ? { radii: ph.radii, thresholds: ph.thresholds } : null,
+      arenaPhase: d.arenaPhase,
+      ringsPrebuilt: Array.isArray(d._arenaRings) && d._arenaRings.length === (ph ? ph.radii.length - 1 : -1),
+    };
+  });
+  check('Z: S gate mounts the reach natively',
+    zswap.kind === 'reach' && zswap.isModeDungeon && zswap.notArena && zswap.encounterDriven,
+    JSON.stringify(zswap));
+  check('Z: dormant through the intro; heightAt + arenaPhases + rings pre-built',
+    zswap.spawned === 0 && zswap.enemies === 0 && zswap.introActive
+    && zswap.hasDirector && zswap.heightBound && zswap.summitHigh
+    && zswap.obstaclesBound && !!zswap.phases && zswap.arenaPhase === 0 && zswap.ringsPrebuilt,
+    JSON.stringify(zswap));
+
+  await page.waitForTimeout(400);
+  const shotSIntro = shotPath('dungeon-s-intro.png');
+  await page.screenshot({ path: shotSIntro });
+  report.screenshots.push(shotSIntro);
+
+  // Skip the walk-in; the E phase owns intro timing.
+  await page.mouse.click(446, 206);
+  await page.waitForFunction(() => !window.__game.mode.intro, null, { timeout: 4000 });
+  await page.waitForTimeout(300);
+
+  // Budget guard (spec performance): standalone probes measured the reach
+  // shell at 24 colour draws / 28 whole-frame / 90-97k tris over 4 seeds
+  // (2026-08-25, city hidden, shadow fitted to the summit). This live-gate
+  // measurement also carries the player + shadow escort, so the ceilings sit
+  // a band above the shell numbers — a REGRESSION GUARD in D's "measured
+  // ceiling" stance, not an endorsement of growth.
+  const zbudget = await page.evaluate(() => {
+    const g = window.__game;
+    const r = g.renderer;
+    r.info.autoReset = false;
+    r.info.reset();
+    r.render(g.scene, g.camera);
+    const frame = { calls: r.info.render.calls, tris: r.info.render.triangles };
+    r.info.autoReset = true;
+    r.render(g.scene, g.camera);
+    return { frame, colour: { calls: r.info.render.calls, tris: r.info.render.triangles } };
+  });
+  report.reachBudget = zbudget;
+  check(`Z: reach budget — colour ${zbudget.colour.calls} draws / ${zbudget.colour.tris} tris, `
+    + `frame ${zbudget.frame.calls} / ${zbudget.frame.tris}`,
+  zbudget.colour.calls <= FRAME_BUDGET.S.draws + 4 && zbudget.frame.calls <= FRAME_BUDGET.S.draws + 14
+    && zbudget.colour.tris <= FRAME_BUDGET.S.tris + 10000 && zbudget.frame.tris <= FRAME_BUDGET.S.tris + 60000,
+  JSON.stringify(zbudget));
+
+  // Z part 1: the gauntlets — the crawl's seal machinery at height.
+  const z1 = await page.evaluate(() => {
+    const g = window.__game;
+    const d = g.world;
+    const dir = g.mode.director;
+    const L = d.layout;
+    const out = { gauntlets: [], problems: [] };
+    const origRender = g.renderer.render.bind(g.renderer);
+    const origDamage = g.fx.damageNumber.bind(g.fx);
+    g.renderer.render = () => {};
+    g.fx.damageNumber = () => {};
+    const step = (n) => { for (let i = 0; i < n; i++) g.update(1 / 60); };
+    const tp = (x, z) => {
+      const y = d.heightAt(x, z);
+      g.player.body.reset(x, y, z);
+      g.player.pos.set(x, y, z);
+    };
+    const heal = () => { g.player.hp = g.derived.maxHp; g.player.invuln = 30; };
+    out.bossSealedAtStart = L.rooms[L.bossRoom].doors.every((id) => d.doorSealed(id));
+    let maxConcurrent = 0;
+    const clearActive = (roomId) => {
+      let guard = 0;
+      while (dir.roomStates[roomId] === 2 && guard++ < 200) {
+        for (const e of [...g.enemies]) if (e.hp > 0) g._damageEnemy(e, 9e9);
+        heal();
+        step(80);
+        maxConcurrent = Math.max(maxConcurrent, g.enemies.length);
+      }
+      return guard < 200;
+    };
+    const order = L.criticalPath.filter((id) => L.rooms[id].kind === 'combat');
+    for (const roomId of order) {
+      const room = L.rooms[roomId];
+      heal();
+      tp(room.centre.x, room.centre.z);
+      step(40);   // trigger + grace
+      if (dir.roomStates[roomId] !== 2) {
+        out.problems.push(`gauntlet ${roomId} state ${dir.roomStates[roomId]} not COMBAT`);
+        break;
+      }
+      const sealed = room.doors.every((id2) => d.doorSealed(id2));
+      const atHeight = g.enemies.every((e) => Math.abs(e.pos.y - room.floorY) < 1.2);
+      maxConcurrent = Math.max(maxConcurrent, g.enemies.length);
+      if (!clearActive(roomId)) { out.problems.push(`gauntlet ${roomId} never cleared`); break; }
+      out.gauntlets.push({
+        id: roomId,
+        sealed,
+        atHeight,
+        cleared: dir.roomStates[roomId] === 3,
+      });
+    }
+    out.maxConcurrent = maxConcurrent;
+    out.waveSize = g.gate.waveSize;
+    out.allCleared = dir.allCleared;
+    out.bossOpenAfter = !L.rooms[L.bossRoom].doors.every((id) => d.doorSealed(id));
+    g.renderer.render = origRender;
+    g.fx.damageNumber = origDamage;
+    return out;
+  });
+  check('Z: both gauntlets seal on entry (crawl vocabulary), fight at their floor height, and clear',
+    z1.problems.length === 0 && z1.gauntlets.length === 2 && z1.bossSealedAtStart
+    && z1.gauntlets.every((s) => s.sealed && s.atHeight && s.cleared)
+    && z1.allCleared && z1.bossOpenAfter,
+    z1.problems.join(' | ') || JSON.stringify(z1.gauntlets));
+  check(`Z: concurrent enemies never exceeded waveSize (${z1.maxConcurrent}/${z1.waveSize})`,
+    z1.maxConcurrent > 0 && z1.maxConcurrent <= z1.waveSize);
+
+  await page.waitForTimeout(400);
+  const shotSGauntlet = shotPath('dungeon-s-gauntlet.png');
+  await page.screenshot({ path: shotSGauntlet });
+  report.screenshots.push(shotSGauntlet);
+
+  // Z part 2: the summit — boss, collapse phases, retraction, walk-out.
+  const z2 = await page.evaluate(() => {
+    const g = window.__game;
+    const d = g.world;
+    const dir = g.mode.director;
+    const L = d.layout;
+    const ph = L.arenaPhases;
+    if (!ph) throw new Error('Z: no arenaPhases — S mounted a non-reach kind (anomaly not pinned?)');
+    const origRender = g.renderer.render.bind(g.renderer);
+    const origDamage = g.fx.damageNumber.bind(g.fx);
+    g.renderer.render = () => {};
+    g.fx.damageNumber = () => {};
+    const step = (n) => { for (let i = 0; i < n; i++) g.update(1 / 60); };
+    const tp = (x, z) => {
+      const y = d.heightAt(x, z);
+      g.player.body.reset(x, y, z);
+      g.player.pos.set(x, y, z);
+    };
+    const heal = () => { g.player.hp = g.derived.maxHp; g.player.invuln = 30; };
+    const out = {};
+    const bossRoom = L.rooms[L.bossRoom];
+    heal();
+    tp(bossRoom.centre.x, bossRoom.centre.z);
+    step(40);
+    const anchor = d.bossSpawn();
+    out.boss = {
+      active: g.bossActive,
+      phase: dir.state,
+      doorsSealed: bossRoom.doors.every((id2) => d.doorSealed(id2)),
+      nearAnchor: g.boss
+        ? Math.hypot(g.boss.pos.x - anchor.x, g.boss.pos.z - anchor.z) < 2.5
+        : false,
+      anchorInDisc: Math.hypot(anchor.x - ph.cx, anchor.z - ph.cz) <= ph.radii[0],
+    };
+    if (g.boss) g.boss.spawning = 0;
+
+    // A driven-body probe against a phase ring at radius R: park just inside,
+    // drive straight out for 1 s of resolve steps, and report how far past R
+    // it got. Same d.resolve the player's body runs.
+    const ringHolds = (R) => {
+      const pos = { x: ph.cx + R - 1.5, y: ph.y, z: ph.cz };
+      const vel = { x: 4, y: 0, z: 0 };
+      for (let s2 = 0; s2 < 60; s2++) {
+        vel.x = 4; vel.z = 0;
+        pos.x += vel.x * 0.05;
+        d.resolve(pos, 0.5, vel);
+      }
+      return (pos.x - ph.cx) < R + 0.3;
+    };
+    out.ringOpenAtFull = !ringHolds(ph.radii[1]);   // phase 0: barrier down
+
+    // Phase 1: cross the first hp threshold; park the player OUTSIDE the new
+    // radius first so the pull-inside rescue is exercised too.
+    heal();
+    tp(ph.cx + ph.radii[1] + 2.5, ph.cz);
+    if (g.boss) g.boss.hp = g.boss.maxHp * (ph.thresholds[0] - 0.02);
+    step(3);
+    out.phase1 = {
+      arenaPhase: d.arenaPhase,
+      dirPhase: dir._arenaPhase,
+      ringHolds: ringHolds(ph.radii[1]),
+      playerPulledIn: Math.hypot(g.player.pos.x - ph.cx, g.player.pos.z - ph.cz) <= ph.radii[1],
+      enemiesInside: g.enemies.every((e) => (
+        Math.hypot(e.pos.x - ph.cx, e.pos.z - ph.cz) <= ph.radii[1] + 0.5
+      )),
+    };
+    // Phase 2: the last threshold.
+    if (g.boss) g.boss.hp = g.boss.maxHp * (ph.thresholds[1] - 0.02);
+    step(3);
+    out.phase2 = {
+      arenaPhase: d.arenaPhase,
+      ringHolds: ringHolds(ph.radii[2]),
+    };
+
+    // Kill: rings retract with their maker; portal rises inside the disc.
+    heal();
+    if (g.boss) g._damageEnemy(g.boss, 9e9);
+    step(5);
+    out.afterBoss = {
+      bossActive: g.bossActive,
+      phase: dir.state,
+      stillPlaying: g.state === 'playing',
+      portalExists: !!d._exitPortal,
+      arenaPhase: d.arenaPhase,
+      ringsRetracted: !ringHolds(ph.radii[2]) && !ringHolds(ph.radii[1]),
+    };
+    heal();
+    step(200);   // portal rise
+    const pp = d._exitPortal ? d._exitPortal.position : { x: 0, z: 0 };
+    out.portalInDisc = Math.hypot(pp.x - ph.cx, pp.z - ph.cz) <= ph.radii[0];
+    g.player.invuln = 0;
+    tp(pp.x, pp.z);
+    for (let i2 = 0; i2 < 5; i2++) g.update(1 / 60);
+    out.walkIn = {
+      state: g.state,
+      phase: dir.state,
+      resultsShown: !document.getElementById('results').classList.contains('hidden'),
+    };
+    document.querySelectorAll('#toasts > *').forEach((t2) => t2.remove());
+    g.renderer.render = origRender;
+    g.fx.damageNumber = origDamage;
+    return out;
+  });
+  report.reachWalkthrough = z2;
+  check('Z: boss threshold seals the summit and the RIFT ARCHON rises on its anchor, inside the disc',
+    z2.boss.active && z2.boss.phase === 'boss' && z2.boss.doorsSealed
+    && z2.boss.nearAnchor && z2.boss.anchorInDisc,
+    JSON.stringify(z2.boss));
+  check('Z: collapse ring 1 — open at full hp, sealed past the first threshold, bodies pulled inside',
+    z2.ringOpenAtFull && z2.phase1.arenaPhase === 1 && z2.phase1.dirPhase === 1
+    && z2.phase1.ringHolds && z2.phase1.playerPulledIn && z2.phase1.enemiesInside,
+    JSON.stringify(z2.phase1));
+  check('Z: collapse ring 2 seals past the last threshold',
+    z2.phase2.arenaPhase === 2 && z2.phase2.ringHolds, JSON.stringify(z2.phase2));
+  check('Z: rings retract on the boss\'s death; portal rises inside the disc; run ends on the walk-in',
+    !z2.afterBoss.bossActive && z2.afterBoss.phase === 'exit' && z2.afterBoss.stillPlaying
+    && z2.afterBoss.portalExists && z2.afterBoss.arenaPhase === 0 && z2.afterBoss.ringsRetracted
+    && z2.portalInDisc
+    && z2.walkIn.state === 'over' && z2.walkIn.phase === 'done' && z2.walkIn.resultsShown,
+    JSON.stringify({ afterBoss: z2.afterBoss, portalInDisc: z2.portalInDisc, walkIn: z2.walkIn }));
+
+  await page.waitForTimeout(600);
+  const shotSResults = shotPath('dungeon-s-results.png');
+  await page.screenshot({ path: shotSResults });
+  report.screenshots.push(shotSResults);
+
+  // ------------------------------------------------------------- phase C
+  // regression_arena (spec testStrategy): the arena path must stay untouched
+  // by every seam edit — same world object, wave-driven spawns, kill-tail
+  // refill still live. forceBiome pins the palette so the shot is diffable
+  // run to run. RETARGETED B -> A -> S as each rank gained its interior, and
+  // now (Wave E task E-S: S mounts the reach, phase Z owns it) NO rank is
+  // canonically open — the regression rides the forceOpen dev override,
+  // which is exactly the path every pre-crawl tool leans on and therefore
+  // exactly the path this phase exists to keep honest.
+  await page.evaluate(() => window.__app.go('title'));
+  await page.waitForTimeout(600);
+  await page.evaluate(() => {
+    const g = window.__game;
+    g.save.level = 55;   // S requires 42; the regression is about flow, not fairness
+    g.refreshDerived(true);
+    g.enterGate('S', { forceOpen: true, forceBiome: 'archonreach' });
   });
   await page.waitForFunction(
     () => window.__game?.mode?.name === 'dungeon' && window.__game.state === 'playing',
     null, { timeout: 15000 },
   );
   await page.waitForTimeout(1200);
-  const shotB = shotPath('dungeon-regression-b-arena.png');
-  await page.screenshot({ path: shotB });
-  report.screenshots.push(shotB);
+  const shotA = shotPath('dungeon-regression-s-arena.png');
+  await page.screenshot({ path: shotA });
+  report.screenshots.push(shotA);
 
   const reg = await page.evaluate(() => {
     const g = window.__game;
@@ -1836,9 +3026,9 @@ try {
     return out;
   });
   report.regressionArena = reg;
-  check('C: B rank mounts the arena world (kind undefined, not encounter-driven)',
+  check('C: forceOpen S mounts the arena world (kind undefined, not encounter-driven)',
     reg.isArena && reg.kind === null && !reg.encounterDriven, JSON.stringify(reg));
-  check('C: forceBiome rode the AppState payload', reg.biome === 'emberfall', String(reg.biome));
+  check('C: forceBiome rode the AppState payload', reg.biome === 'archonreach', String(reg.biome));
   check('C: opening wave fired inline (arena path unchanged)',
     reg.spawnedAtEntry === reg.waveSize, `spawned ${reg.spawnedAtEntry} of wave ${reg.waveSize}`);
   check('C: wave timer still drives spawns without a director',

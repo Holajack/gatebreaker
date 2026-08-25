@@ -50,6 +50,19 @@ export const STRINGS = {
   'voice.act2.forest': 'Ours was a forest once. Ash falls there like snow falls here.',
   'voice.act3.named': 'I was the first to walk in. I am what walked back out. Part of me.',
 
+  // ---- gate intro cards (Wave E per-rank identity rows) -------------------
+  // Fired at intro end by dungeonmode._endIntro alongside the rank toast;
+  // Wave G's per-rank intro card surface consumes the same keys when it
+  // lands. Keyed by rank via layouts/identity.js RANK_IDENTITY.introKey.
+  'gate.intro.E': 'A SHALLOW TEAR. LEARN WHICH END OF THE BLADE CUTS.',       // [BIBLE]
+  'gate.intro.D': 'THE DEAD HERE KEEP THEIR RANKS. HOLD YOURS.',              // [BIBLE]
+  'gate.intro.C': 'THE GLASS REMEMBERS EVERY LIGHT IT SWALLOWED.',            // [BIBLE]
+  'gate.intro.B': 'CLIMB. THE FIRE ONLY EVER LOOKS DOWN.',                    // [BIBLE]
+  'gate.intro.A': 'NO WALLS OUT HERE. THE WASTE DOES NOT NEED THEM.',         // [BIBLE]
+  'gate.intro.S': 'THE REACH WAS BUILT TO BE CLIMBED ONCE.',                  // [BIBLE]
+  // The summit arena's collapse beat (encounters.js arena-phase seam).
+  'gate.arena.collapse': 'THE RIM GIVES WAY — THE CIRCLE TIGHTENS',
+
   // ---- quest surfaces -----------------------------------------------------
   'quest.new': (c) => `NEW CONTRACT  ·  ${c.title}`,
   'quest.advanced': (c) => `${c.title}  ·  ${c.progress} / ${c.count}`,

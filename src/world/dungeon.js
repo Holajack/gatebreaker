@@ -32,7 +32,10 @@ import { natureKitLoaded, NatureField } from './naturekit.js';
 // table below: one KitField (single InstancedMesh) per piece TYPE, placed off
 // the layout's decorRnd-generated anchors, procedural-first (every role has a
 // bespoke PROC twin in citykit.js) with the kit upgrading it when the GLB is
-// loaded. The shell alone is 6 draw calls against the <= 24 budget; dressing
+// loaded. The shell alone is 6 draw calls against the <= 24 budget (E's row —
+// the per-rank FRAME_BUDGET table in tools/dungeon-test.mjs is AUTHORITATIVE
+// for every other rank; the 24/130k figures in this file's comments are E's
+// contract, not a global ceiling — review fix for the B/S drift); dressing
 // adds ~8-12 fields, capped by DRESS_LIMITS below.
 //
 // DETERMINISM IS LOAD-BEARING: context-loss recovery re-runs build(gate, seed)
@@ -98,9 +101,26 @@ export const OSSUARY_MODULES = {
 // cavern branch below, not this table — the kit roles it still uses are just
 // the two door treatments (arch over the boss neck, the shut arrival door).
 export const CAVERN_MODULES = {};
+// B — THE ASCENT (Wave E, kind 'tower'). The tower keeps the base table:
+// its identity is carried by the vertical shell itself (terraces, staircase
+// shafts, parapet drops), the emberfall biome palette, and the DRESS_TINT.B
+// row below — a future ember-themed kit retheme is a table edit here, same
+// seam as the ossuary's.
+export const EMBER_MODULES = {};
+// A — THE RIVEN WASTE (Wave E task E-A, kind 'waste'). Same stance as the
+// tower: identity is the open landscape itself (rolling terrain, outcrop
+// ruins, the compass beacon), the rivenwaste palette, and DRESS_TINT.A.
+export const WASTE_MODULES = {};
+// S — ARCHON'S REACH (Wave E task E-S, kind 'reach'). Same stance again:
+// identity is the broken-causeway ascent, the collapsing summit arena, the
+// archonreach palette and DRESS_TINT.S; a themed kit retheme is a table edit.
+export const REACH_MODULES = {};
 export function modulesFor(rank) {
   if (rank === 'D') return { ...DUNGEON_MODULES, ...OSSUARY_MODULES };
   if (rank === 'C') return { ...DUNGEON_MODULES, ...CAVERN_MODULES };
+  if (rank === 'B') return { ...DUNGEON_MODULES, ...EMBER_MODULES };
+  if (rank === 'A') return { ...DUNGEON_MODULES, ...WASTE_MODULES };
+  if (rank === 'S') return { ...DUNGEON_MODULES, ...REACH_MODULES };
   return { ...DUNGEON_MODULES, ...WARREN_MODULES };
 }
 
@@ -108,7 +128,9 @@ export function modulesFor(rank) {
 // the kit atlas (or the procedural twin's vertex colours). The warren reads
 // cold and moonlit, the ossuary bone-warm. The other half — fog near/far and
 // the shell's vertex palette — is already per-rank via LAYOUT_PARAMS + BIOMES.
-const DRESS_TINT = { E: 0xaab3d8, D: 0xdcc9a8, C: 0xbfe6f5 };  // C: deepglass cold
+const DRESS_TINT = {
+  E: 0xaab3d8, D: 0xdcc9a8, C: 0xbfe6f5, B: 0xf2a97e, A: 0xd9b9f2, S: 0xf2a3b8,
+};  // C: deepglass cold, B: ember warm, A: riven violet, S: archon crimson
 
 // Hard per-role caps, applied by deterministic list truncation. Each role is
 // +1 draw call (KitField per piece type) and the spec's risk list names
@@ -275,7 +297,12 @@ const INTERIOR_ENV_INTENSITY = 1.5;
 // measured 2x the crawl's frame luminance BEFORE any of this. Giving it the
 // crawl's full fill turns it into an overcast quarry; the crawl is a sealed
 // corridor lit by two torches and needs every bit of it.
-const FILL_SCALE = { crawl: 1.0, cavern: 0.6 };
+// The waste sits between: open air under a void sky, no torch anchors at all
+// — dimmer than the crawl's sealed-corridor lift, brighter than the cavern's
+// self-lit chamber. (tower reads the ?? 1 default, unchanged.)
+// The reach is torch-lit stone like the crawl but its summit fights under
+// open void — a notch under the crawl's sealed-corridor lift.
+const FILL_SCALE = { crawl: 1.0, cavern: 0.6, waste: 0.75, reach: 0.9 };
 // The key stays the only shadow caster and the only directional. It goes UP a
 // little, not down: raising the ambient floor without it would flatten the
 // contrast that makes the interior moody rather than merely lit.
@@ -326,6 +353,7 @@ export class Dungeon {
     this._membraneFieldIndex = new Map();   // doorId -> obstacle record index
     this._membraneInstance = new Map();     // doorId -> membrane instance slot
     this._torchAnchors = [];                // flat [x, z, x, z, ...]
+    this._torchAnchorY = [];                // parallel anchor floor heights
     this._torchLights = [];
     this._lightTimer = 0;
     // What the pooled lights imitate this build: torch fire (crawl) or
@@ -337,6 +365,18 @@ export class Dungeon {
     this._crystalBase = null;               // their base colour (pulse target)
     this._exitPortal = null;   // the walk-out return portal (STEP 5)
     this._exitRise = 0;
+    // The waste's compass beacon (Wave E task E-A): one light-pillar mesh the
+    // director retargets from cleared site to next site — the "compass
+    // unseals" read for a world with no doors to drop. Waste builds only.
+    this._waypointBeacon = null;
+    this._waypointRoom = -1;
+    // THE ARENA-PHASE SEAM (Wave E task E-S). Reach builds pre-register one
+    // ring of barrier boxes per collapse radius (layout.arenaPhases.radii[1..])
+    // plus a veil/rim mesh pair; setArenaPhase(i) flips them. The encounter
+    // director consumes the seam off boss hp; the boss's own brain is
+    // game.js's and stays untouched.
+    this.arenaPhase = 0;
+    this._arenaRings = null;
     // Arrival-portal seal animation (STEP 6): 0..1 progress, colour endpoints
     // baked at build. Purely visual — the wall behind it is a solid run.
     this._entrySeal = 1;
@@ -389,6 +429,7 @@ export class Dungeon {
     this._membraneFieldIndex.clear();
     this._membraneInstance.clear();
     this._torchAnchors.length = 0;
+    this._torchAnchorY.length = 0;
     this._torchLights.length = 0;
     this._membranes = null;
     this._flames = null;
@@ -398,6 +439,10 @@ export class Dungeon {
     this._crystalBase = null;
     this._exitPortal = null;
     this._exitRise = 0;
+    this._waypointBeacon = null;
+    this._waypointRoom = -1;
+    this.arenaPhase = 0;
+    this._arenaRings = null;
     this._entrySeal = 1;
     this._entryFrom = null;
     this._entryTo = null;
@@ -424,8 +469,19 @@ export class Dungeon {
     // fallback once meant "flipping B into INTERIOR_RANKS without adding
     // LAYOUT_PARAMS.B ships a mislabeled E-shaped warren with no error", and
     // the B/A/S expansion multiplies that trap. Fail at build, loudly.
-    const baseParams = LAYOUT_PARAMS[gate.rank];
+    let baseParams = LAYOUT_PARAMS[gate.rank];
     if (!baseParams) throw new Error(`Dungeon.build: no LAYOUT_PARAMS row for rank "${gate.rank}" — add one before routing this rank to an interior`);
+    // ANOMALY KIND SWAP (Wave E task E-S item 3). An anomalous B+ gate may
+    // carry `anomalyKind` on its per-run shallow copy (rolled in dungeonmode
+    // off the anomaly roll's own stream, exactly like the biome swap): the
+    // DONOR rank's whole params row generates — an anomalous B can open into
+    // a cavern or a waste — while rank/enemies/waveSize stay the gate's own.
+    // Baked into the gate copy, so the context-loss rebuild (same gate, same
+    // seed) reproduces the identical swapped world.
+    if (gate.anomalyKind && gate.anomalyKind !== baseParams.kind) {
+      const donor = Object.values(LAYOUT_PARAMS).find((p) => p.kind === gate.anomalyKind);
+      if (donor) baseParams = donor;
+    }
     const params = gate.crawl ? { ...baseParams, ...gate.crawl } : baseParams;
     // How many enemies this RUN holds is a roll, not a constant (config.js
     // GATES[].enemyBand). It is written back onto the gate object on purpose:
@@ -528,6 +584,7 @@ export class Dungeon {
       this._buildDome(layout, biome, shellRnd);
     }
     this._buildDust(layout, biome, shellRnd);
+    if (layout.kind === 'waste') this._buildWaypointBeacon(biome);
     // STEP 7 kit dressing + STEP 8 stalagmite field. Both register their own
     // collision circles/boxes, so they must run before obstacleField.build().
     this._buildDressing(layout, gate, seed);
@@ -557,6 +614,24 @@ export class Dungeon {
       });
       this._membraneFieldIndex.set(d.id, this.obstacleField.count - 1);
     }
+    // Parapet-gap ledges (tower kind): a thin box on each gap plane whose top
+    // IS the upper floor, which makes the drop one-way BY HEIGHT with zero new
+    // machinery — a body on the lip has feetY = yTop, so resolve()/blocked()
+    // skip the box (top <= feet + stepOver) and it walks off; a body below has
+    // feetY = yLand and is walled out of climbing a 3 m cliff face.
+    // nav:false like every membrane: the flow field's job is rooms and
+    // corridors, and enemies milling at the foot of a drop they cannot climb
+    // is the honest picture.
+    for (const gap of layout.gaps || []) {
+      this.obstacleField.addBox(gap.x, gap.z, gap.w, gap.d, gap.rot, {
+        top: gap.yTop, nav: false, tag: 'ledge',
+      });
+    }
+    // Collapse rings (reach kind): pre-registered like the membranes — top 0
+    // until setArenaPhase seals them, indices captured at add time, nav:false
+    // (the flow field's job stays rooms/corridors; a phase seal mid-fight
+    // must not rebake the grid).
+    if (layout.arenaPhases) this._buildArenaRings(layout, biome);
     this.obstacleField.build();
 
     // --- navigation -------------------------------------------------------
@@ -572,7 +647,13 @@ export class Dungeon {
       originX: cx,
       originZ: cz,
       size,
-      cell: 1.25,
+      // The reach's folded 3-causeway chain can span ~230 m; at 1.25 that is
+      // a ~40k-cell grid and the 4 Hz goal sweep stops being couple-of-ms.
+      // 1.5 keeps it near the C cavern's cell count, and the reach's narrowest
+      // walkable lane (a notched causeway's guaranteed 4 m) still spans >= 2
+      // open columns at cell 1.5 + pad 0.5 — the same door-width arithmetic
+      // the spec ran for the crawl.
+      cell: layout.kind === 'reach' ? 1.5 : 1.25,
       pad: 0.5,
       inside: (x, z) => this._floorAt(x, z),
     });
@@ -660,6 +741,20 @@ export class Dungeon {
   _buildFloor(layout, biome, rnd, entryTint, daisTint = null) {
     const { mask, w, h, cell, originX, originZ } = layout;
     const isCavern = layout.kind === 'cavern';
+    // Tower kind: every cell is a flat plateau/tread at its analytic height;
+    // flat kinds keep hFn null and this whole path is byte-identical to
+    // before the Wave E landing. The WASTE (layout.smoothHeight) samples cell
+    // CORNERS instead — its heightAt is a continuous rolling field, so the
+    // floor is a smooth heightmap with no risers, and the physics the body
+    // resolves against (heightAt itself) is exactly the surface drawn.
+    const hFn = layout.heightAt || null;
+    const smooth = !!layout.smoothHeight && !!hFn;
+    const cellY = hFn
+      ? (gx, gz) => hFn(originX + (gx + 0.5) * cell, originZ + (gz + 0.5) * cell)
+      : () => 0;
+    const cornerY = smooth
+      ? (gx, gz) => hFn(originX + gx * cell, originZ + gz * cell)
+      : null;
     // Three tones: the lifted floor stone, a greyer/cooler rock drawn from the
     // wall colour, and a damp darker one. Two fields pick between them.
     const ground = lift(new THREE.Color(biome.ground), FLOOR_VALUE);
@@ -715,6 +810,13 @@ export class Dungeon {
         const z0 = originZ + gz * cell;
         const x1 = x0 + cell;
         const z1 = z0 + cell;
+        const fy = cellY(gx, gz);
+        // Corner heights: equal to fy everywhere except the waste's smooth
+        // terrain, so the flat/tower output is byte-identical to before.
+        const y00 = smooth ? cornerY(gx, gz) : fy;
+        const y10 = smooth ? cornerY(gx + 1, gz) : fy;
+        const y01 = smooth ? cornerY(gx, gz + 1) : fy;
+        const y11 = smooth ? cornerY(gx + 1, gz + 1) : fy;
         const s00 = cornerShade(gx, gz);
         const s10 = cornerShade(gx + 1, gz);
         const s01 = cornerShade(gx, gz + 1);
@@ -725,13 +827,13 @@ export class Dungeon {
         const flip = hashi(gx, gz, ns + 5077) < 0.5;
         if (flip) {
           positions.push(
-            x0, 0, z0, x0, 0, z1, x1, 0, z1,
-            x0, 0, z0, x1, 0, z1, x1, 0, z0,
+            x0, y00, z0, x0, y01, z1, x1, y11, z1,
+            x0, y00, z0, x1, y11, z1, x1, y10, z0,
           );
         } else {
           positions.push(
-            x0, 0, z0, x0, 0, z1, x1, 0, z0,
-            x0, 0, z1, x1, 0, z1, x1, 0, z0,
+            x0, y00, z0, x0, y01, z1, x1, y10, z0,
+            x0, y01, z1, x1, y11, z1, x1, y10, z0,
           );
         }
         // Face colour, sampled at each triangle's own centroid.
@@ -745,6 +847,36 @@ export class Dungeon {
         } else {
           pushShaded(colors, cA, s00); pushShaded(colors, cA, s01); pushShaded(colors, cA, s10);
           pushShaded(colors, cB, s01); pushShaded(colors, cB, s11); pushShaded(colors, cB, s10);
+        }
+        // Tower risers: where an adjacent floor cell sits lower — a stair
+        // tread's front face, or the terrace face under a parapet drop — a
+        // vertical quad closes the step, wound to face the LOWER side (the
+        // side a camera or a fallen body actually sees). East and south
+        // edges only, so every shared edge is emitted exactly once. Pure
+        // function of the height table: no rnd() draws, so the flat kinds'
+        // streams are untouched (hFn null skips it entirely; the waste's
+        // smooth corner-sampled surface is continuous and needs none).
+        if (hFn && !smooth) {
+          const rTop = cA.clone().multiplyScalar(0.8);
+          const rBot = cA.clone().multiplyScalar(0.45);
+          const riser = (ax, az, bx, bz, yLo, yHi) => {
+            positions.push(
+              ax, yLo, az, ax, yHi, az, bx, yHi, bz,
+              ax, yLo, az, bx, yHi, bz, bx, yLo, bz,
+            );
+            colors.push(rBot.r, rBot.g, rBot.b, rTop.r, rTop.g, rTop.b, rTop.r, rTop.g, rTop.b);
+            colors.push(rBot.r, rBot.g, rBot.b, rTop.r, rTop.g, rTop.b, rBot.r, rBot.g, rBot.b);
+          };
+          if (gx + 1 < w && mask[gx + 1 + gz * w]) {
+            const ny = cellY(gx + 1, gz);
+            if (ny < fy - 0.01) riser(x1, z1, x1, z0, ny, fy);        // face +X
+            else if (ny > fy + 0.01) riser(x1, z0, x1, z1, fy, ny);   // face -X
+          }
+          if (gz + 1 < h && mask[gx + (gz + 1) * w]) {
+            const ny = cellY(gx, gz + 1);
+            if (ny < fy - 0.01) riser(x0, z1, x1, z1, ny, fy);        // face +Z
+            else if (ny > fy + 0.01) riser(x1, z1, x0, z1, fy, ny);   // face -Z
+          }
         }
       }
     }
@@ -776,10 +908,17 @@ export class Dungeon {
       // between the +Z camera and the floor they bound, so they render at
       // wallHeightLow and never occlude a 4 m corridor; every other face gets
       // full enclosure height.
-      const hgt = run.face === 's' ? params.wallHeightLow : params.wallHeight;
+      const relH = run.face === 's' ? params.wallHeightLow : params.wallHeight;
+      // Tower runs carry base/top — the min/max floor height they bound
+      // (tower.js's post-walk). The slab runs from the lowest adjacent floor
+      // to relH above the highest, so a staircase's side wall is one tall
+      // shaft slab; flat kinds carry neither field and get y 0..relH exactly
+      // as before.
+      const y0 = run.base || 0;
+      const hgt = (run.top ?? 0) + relH;
       // Per-VERTEX tint: the tunnel's side walls are single runs spanning its
       // whole length, so a per-run multiplier would flatten the ramp.
-      pushBox(positions, colors, run.x, run.z, run.w, run.d, hgt, base, top, entryTint);
+      pushBox(positions, colors, run.x, run.z, run.w, run.d, hgt, base, top, entryTint, y0);
     }
     const geo = bufferGeo(positions, colors);
     const mat = new THREE.MeshStandardMaterial({
@@ -801,6 +940,13 @@ export class Dungeon {
   _buildRockFill(layout, biome, entryTint) {
     const { mask, w, h, cell, originX, originZ, params } = layout;
     const BAND = 3;
+    // Tower kind: the rock mass tracks its DILATED floor heights (tower.js's
+    // cellF dilation), so terraces read as a solid stepped massif rather than
+    // one flat lid the upper floors poke through. Flat kinds: constant 0.
+    const hFn = layout.heightAt || null;
+    const baseAt = hFn
+      ? (gx, gz) => hFn(originX + (gx + 0.5) * cell, originZ + (gz + 0.5) * cell)
+      : () => 0;
     const isFloor = (gx, gz) => gx >= 0 && gz >= 0 && gx < w && gz < h && mask[gx + gz * w];
     // Distance-to-floor (chebyshev, capped at BAND+1) for the fill band and
     // the darkness ramp. One pass over the grid; grids are <= 64x64.
@@ -851,7 +997,7 @@ export class Dungeon {
         const z0 = originZ + gz * cell;
         const x1 = x0 + cell;
         const z1 = z0 + cell;
-        const y = lid(gx, gz);
+        const y = baseAt(gx, gz) + lid(gx, gz);
         c0.copy(rockNear).lerp(rockFar, shade(dist[i]));
         entryTint(c0, z0 + cell / 2);   // tunnel ramp, per-cell like the floor
         // Lid quad.
@@ -874,7 +1020,7 @@ export class Dungeon {
           if (isFloor(nx, nz)) continue;   // wall slab already faces this
           const inBand = nx >= 0 && nz >= 0 && nx < w && nz < h
             && dist[nx + nz * w] <= BAND;
-          const ny = inBand ? lid(nx, nz) : 0;
+          const ny = inBand ? baseAt(nx, nz) + lid(nx, nz) : 0;
           if (ny >= y) continue;
           const nd = inBand ? dist[nx + nz * w] : BAND;
           c1.copy(rockNear).lerp(rockFar, shade(nd));
@@ -949,10 +1095,12 @@ export class Dungeon {
     if (!visible) {
       // Zero scale = hidden without touching the draw count or instance order.
       _s.set(0.0001, 0.0001, 0.0001);
-      _v.set(door.x, 0, door.z);
+      _v.set(door.x, door.y || 0, door.z);
       _q.identity();
     } else {
-      _v.set(door.x, MEMBRANE_HEIGHT / 2, door.z);
+      // door.y: the floor the opening's own wall stands on (tower ramps put
+      // their two mouths one floorRise apart); 0 everywhere flat.
+      _v.set(door.x, (door.y || 0) + MEMBRANE_HEIGHT / 2, door.z);
       // rot 0: opening's normal is n/s, span runs along X — the plane's
       // default orientation. rot PI/2: span along Z.
       _q.setFromEuler(_e.set(0, door.rot, 0));
@@ -969,6 +1117,7 @@ export class Dungeon {
   _buildTorches(layout, biome) {
     const torches = layout.decor.torches;
     this._torchAnchors.length = 0;
+    this._torchAnchorY.length = 0;
     const geo = new THREE.OctahedronGeometry(1, 0);
     const mat = new THREE.MeshBasicMaterial({
       color: 0xffb35c, transparent: true, opacity: 0.92, depthWrite: false,
@@ -981,12 +1130,13 @@ export class Dungeon {
       const fz = -Math.cos(t.yaw);
       const x = t.x + fx * 0.45;
       const z = t.z + fz * 0.45;
-      _v.set(x, 1.8, z);
+      _v.set(x, (t.y || 0) + 1.8, z);
       _q.identity();
       _s.set(0.13, 0.26, 0.13);
       _m4.compose(_v, _q, _s);
       mesh.setMatrixAt(i, _m4);
       this._torchAnchors.push(x, z);
+      this._torchAnchorY.push(t.y || 0);
     }
     if (!torches.length) mesh.count = 0;
     mesh.instanceMatrix.needsUpdate = true;
@@ -1018,9 +1168,12 @@ export class Dungeon {
         gz = Math.floor(rnd() * h);
         found = !!mask[gx + gz * w];
       }
+      // Fixed roll ORDER (x roll, y roll, z roll), then the tower's floor
+      // height added after the fact — flat kinds add 0, streams unmoved.
       this._dustData.push({
         x: originX + (gx + 0.5) * cell + (rnd() - 0.5) * cell,
-        y: 0.5 + rnd() * 2.2,
+        y: 0.5 + rnd() * 2.2 + (layout.heightAt
+          ? layout.heightAt(originX + (gx + 0.5) * cell, originZ + (gz + 0.5) * cell) : 0),
         z: originZ + (gz + 0.5) * cell + (rnd() - 0.5) * cell,
         phase: rnd() * Math.PI * 2,
         speed: 0.15 + rnd() * 0.4,
@@ -1032,6 +1185,63 @@ export class Dungeon {
     this.group.add(mesh);
     this._dust = mesh;
     this._disposables.push(geo, mat);
+  }
+
+  // --------------------------------------------------------------- waste
+
+  /**
+   * The compass beacon: one tall accent light-pillar (two crossed unlit
+   * planes on the sanctioned portal/telegraph glow family) the director
+   * points at the route's next objective site. +1 draw call while visible,
+   * zero lights, zero new materials per retarget — setWaypoint is a
+   * position/visibility toggle, exactly the membrane discipline.
+   */
+  _buildWaypointBeacon(biome) {
+    const geo = new THREE.PlaneGeometry(1, 1);
+    const mat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(biome.accent).multiplyScalar(1.2),
+      transparent: true,
+      opacity: 0.34,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const group = new THREE.Group();
+    const BEAM_H = 26;
+    const BEAM_W = 1.7;
+    for (let i = 0; i < 2; i++) {
+      const plane = new THREE.Mesh(geo, mat);
+      plane.scale.set(BEAM_W, BEAM_H, 1);
+      plane.position.y = BEAM_H / 2;
+      plane.rotation.y = i * (Math.PI / 2);
+      plane.layers.enable(GLOW_LAYER);
+      group.add(plane);
+    }
+    group.visible = false;
+    group.frustumCulled = false;
+    this.group.add(group);
+    this._waypointBeacon = group;
+    this._disposables.push(geo, mat);
+  }
+
+  /**
+   * Point the compass at a room (site id), or hide it (null / -1). The
+   * encounter director owns WHEN — bind, every site clear, allCleared, boss
+   * death; the dungeon owns the mesh, same division as the membranes. A
+   * no-op on kinds that built no beacon.
+   */
+  setWaypoint(roomId) {
+    const beacon = this._waypointBeacon;
+    if (!beacon) return;
+    if (roomId == null || roomId < 0) {
+      beacon.visible = false;
+      this._waypointRoom = -1;
+      return;
+    }
+    const room = this.layout?.rooms?.[roomId];
+    if (!room) return;
+    beacon.position.set(room.centre.x, this.heightAt(room.centre.x, room.centre.z), room.centre.z);
+    beacon.visible = true;
+    this._waypointRoom = roomId;
   }
 
   // -------------------------------------------------------------- cavern
@@ -1064,6 +1274,7 @@ export class Dungeon {
       const bx = c.x + fx * 0.45;
       const bz = c.z + fz * 0.45;
       this._torchAnchors.push(bx, bz);
+      this._torchAnchorY.push(0);
       for (let k = 0; k < 3; k++) {
         const side = k === 0 ? 0 : (k === 1 ? -1 : 1);
         const hgt = k === 0 ? 0.75 + rnd() * 0.5 : 0.3 + rnd() * 0.25;
@@ -1305,6 +1516,98 @@ export class Dungeon {
    * trivially slid around by resolve(), while navgrid's pad (+~1.4 m) around
    * a door-flanking column would choke a 4 m door to under two open cells.
    */
+  /**
+   * THE COLLAPSING SUMMIT (Wave E task E-S): one barrier ring + veil/rim mesh
+   * pair per collapse radius (layout.arenaPhases.radii[1..]). Everything is
+   * pre-built here so a phase flip at fight time is O(segments) setTop calls
+   * and two visibility bits — no geometry, no draw-call change, no rebake.
+   *
+   * Visual v1: the collapsed outer band is a near-black VEIL annulus fading
+   * in over the old floor (the rim "fell away" into the void the fog already
+   * sells) with a glowing RIM torus at the live edge — the same family as the
+   * door membranes, and on the same sanctioned glow list (rift energy, not
+   * scenery fire). A true falling-floor animation is the combat workflow's
+   * set-piece sequel; the SEAM (data + setArenaPhase) is what this ships.
+   * Cost: 2 meshes per collapse ring (S ships 2 rings = +4 draws worst case,
+   * and only after the matching phase — the veils/rims start invisible).
+   */
+  _buildArenaRings(layout, biome) {
+    const ph = layout.arenaPhases;
+    this._arenaRings = [];
+    this.arenaPhase = 0;
+    const accent = new THREE.Color(biome.accent);
+    const y = ph.y || 0;
+    const SEGS = 14;
+    for (let p = 1; p < ph.radii.length; p++) {
+      const R = ph.radii[p];
+      const boxes = [];
+      // Chord segments with a little overlap so the polygonal barrier has no
+      // body-width gaps at the joints.
+      const segLen = (2 * Math.PI * R) / SEGS + 0.5;
+      for (let i = 0; i < SEGS; i++) {
+        const a = ((i + 0.5) / SEGS) * Math.PI * 2;
+        // Tangent rot: local +X maps to (cos t, -sin t); t = -a - PI/2 lays
+        // the box's long axis along the circle (the cover colonnade's maths).
+        this.obstacleField.addBox(
+          ph.cx + Math.cos(a) * R, ph.cz + Math.sin(a) * R,
+          segLen, 0.7, -a - Math.PI / 2,
+          { top: 0, nav: false, tag: 'arenaring' },
+        );
+        boxes.push(this.obstacleField.count - 1);
+      }
+      const outerR = ph.radii[p - 1] + 1.5;
+      const veilGeo = new THREE.RingGeometry(R, outerR, 40, 1);
+      const veilMat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(biome.sky).multiplyScalar(0.6),
+        transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide,
+      });
+      const veil = new THREE.Mesh(veilGeo, veilMat);
+      veil.rotation.x = -Math.PI / 2;
+      veil.position.set(ph.cx, y + 0.06, ph.cz);
+      veil.visible = false;
+      veil.frustumCulled = false;
+      const rimGeo = new THREE.TorusGeometry(R, 0.14, 6, 48);
+      const rimMat = new THREE.MeshBasicMaterial({
+        color: accent.clone().multiplyScalar(1.2), transparent: true, opacity: 0.8,
+      });
+      const rim = new THREE.Mesh(rimGeo, rimMat);
+      rim.rotation.x = -Math.PI / 2;
+      rim.position.set(ph.cx, y + 0.35, ph.cz);
+      rim.visible = false;
+      rim.frustumCulled = false;
+      // Membranes and portals get the layer; the arena's live edge is the
+      // same rift-membrane family (never scenery fire, never characters).
+      rim.layers.enable(GLOW_LAYER);
+      this.group.add(veil);
+      this.group.add(rim);
+      this._disposables.push(veilGeo, veilMat, rimGeo, rimMat);
+      this._arenaRings.push({ boxes, veil, rim, anim: 0 });
+    }
+  }
+
+  /**
+   * Seal every collapse ring up to phase `i` (0 = full arena). Idempotent and
+   * re-entrant — the director calls it as boss hp crosses thresholds, and
+   * rebindAfterContextLoss re-stamps the current phase after a rebuild. Only
+   * the LIVE edge's rim glows; every collapsed band keeps its veil.
+   */
+  setArenaPhase(i) {
+    if (!this._arenaRings) return;
+    const n = Math.max(0, Math.min(this._arenaRings.length, i | 0));
+    this.arenaPhase = n;
+    for (let p = 0; p < this._arenaRings.length; p++) {
+      const ring = this._arenaRings[p];
+      const on = p < n;   // ring p guards radii[p + 1]
+      for (const idx of ring.boxes) this.obstacleField.setTop(idx, on ? Infinity : 0);
+      ring.veil.visible = on;
+      ring.rim.visible = on && p === n - 1;
+      if (on) { if (ring.anim <= 0) ring.anim = 1e-4; } else {
+        ring.anim = 0;
+        ring.veil.material.opacity = 0;
+      }
+    }
+  }
+
   _buildDressing(layout, gate, seed) {
     const mods = modulesFor(gate.rank);
     const rnd = mulberry32((seed ^ 0x27d4eb2f) >>> 0);
@@ -1327,7 +1630,7 @@ export class Dungeon {
     const archW = archB?.size.x || 2.0;
     const archSy = ARCH_HEIGHT / (archB?.size.y || 2.0);
     for (const d of layout.doors.slice(0, DRESS_LIMITS.archways)) {
-      put('archway', d.x, 0, d.z, d.rot, d.w / archW, archSy, 1);
+      put('archway', d.x, d.y || 0, d.z, d.rot, d.w / archW, archSy, 1);
     }
 
     // The arrival frame: a shut stone-and-timber door on the tunnel's south
@@ -1343,7 +1646,7 @@ export class Dungeon {
     // seams, and the collision circle assumes near-symmetry.
     const colSy = COLUMN_HEIGHT / (pieceBounds(mods.column)?.size.y || 2.0);
     for (const c of layout.decor.columns.slice(0, DRESS_LIMITS.columns)) {
-      put('column', c.x, 0, c.z, Math.floor(rnd() * 4) * (Math.PI / 2), 1, colSy, 1);
+      put('column', c.x, c.y || 0, c.z, Math.floor(rnd() * 4) * (Math.PI / 2), 1, colSy, 1);
       field.addCircle(c.x, c.z, 0.34, { nav: false, tag: 'column' });
     }
 
@@ -1366,15 +1669,17 @@ export class Dungeon {
       if (!k) continue;
       if (k.shape === 'circle') {
         // Re-uses the `column` role's InstancedMesh: +0 draw calls.
-        put('column', c.x, 0, c.z, c.yaw, 1, colSy, 1);
+        put('column', c.x, c.y || 0, c.z, c.yaw, 1, colSy, 1);
         field.addCircle(c.x, c.z, k.r, { nav: false, tag: 'cover' });
       } else {
         // sx/sy/sz come from COVER_KINDS so the drawn silhouette and the
-        // footprint the placer reserved can never disagree.
-        put(c.kind === 'rubble' ? 'coverRubble' : 'coverStub', c.x, 0, c.z, c.yaw,
+        // footprint the placer reserved can never disagree. The collision top
+        // is ABSOLUTE (obstacles.js reads pos.y as feet), so a tower piece's
+        // relative COVER_KINDS top rides on its floor height; flat kinds add 0.
+        put(c.kind === 'rubble' ? 'coverRubble' : 'coverStub', c.x, c.y || 0, c.z, c.yaw,
           k.sx ?? 1, k.sy ?? 1, k.sz ?? 1);
         field.addBox(c.x, c.z, k.hx * 2, k.hz * 2, c.yaw,
-          { top: k.top, nav: false, tag: 'cover' });
+          { top: k.top + (c.y || 0), nav: false, tag: 'cover' });
       }
     }
 
@@ -1388,7 +1693,7 @@ export class Dungeon {
     for (const t of layout.decor.torches.slice(0, DRESS_LIMITS.torches)) {
       const fx = -Math.sin(t.yaw);
       const fz = -Math.cos(t.yaw);
-      put('torch', t.x + fx * TORCH_WALL_GAP, torchY, t.z + fz * TORCH_WALL_GAP,
+      put('torch', t.x + fx * TORCH_WALL_GAP, torchY + (t.y || 0), t.z + fz * TORCH_WALL_GAP,
         t.yaw + Math.PI);
     }
 
@@ -1400,24 +1705,26 @@ export class Dungeon {
         continue;
       }
       if (p.kind === 'candles') {
-        put('candles', p.x, 0, p.z, p.yaw);
+        put('candles', p.x, p.y || 0, p.z, p.yaw);
         continue;
       }
       if (clutter >= DRESS_LIMITS.clutter) continue;
       clutter++;
+      const py = p.y || 0;   // tower floor height; 0 everywhere flat
       if (p.kind === 'crate') {
-        put('crate', p.x, 0, p.z, p.yaw);
+        put('crate', p.x, py, p.z, p.yaw);
         // Spec collisionNav: pots/crates are step-over rubble (top 0.4 = the
-        // field's stepOver, so bodies walk over and bolts fly over).
-        field.addCircle(p.x, p.z, 0.4, { top: 0.4, nav: false, tag: 'prop' });
+        // field's stepOver, so bodies walk over and bolts fly over). Tops are
+        // ABSOLUTE, so the tower's floor height rides underneath.
+        field.addCircle(p.x, p.z, 0.4, { top: 0.4 + py, nav: false, tag: 'prop' });
       } else if (p.kind === 'barrel') {
-        put('barrel', p.x, 0, p.z, p.yaw);
+        put('barrel', p.x, py, p.z, p.yaw);
         // Honest top: barrels are hip-height cover — bodies bump, bolts at
         // flight height (1.2 + stepOver) still clear it.
-        field.addCircle(p.x, p.z, 0.4, { top: 1.05, nav: false, tag: 'prop' });
+        field.addCircle(p.x, p.z, 0.4, { top: 1.05 + py, nav: false, tag: 'prop' });
       } else {
-        put(rnd() < 0.5 ? 'potA' : 'potB', p.x, 0, p.z, p.yaw);
-        field.addCircle(p.x, p.z, 0.3, { top: 0.4, nav: false, tag: 'prop' });
+        put(rnd() < 0.5 ? 'potA' : 'potB', p.x, py, p.z, p.yaw);
+        field.addCircle(p.x, p.z, 0.3, { top: 0.4 + py, nav: false, tag: 'prop' });
       }
     }
 
@@ -1528,7 +1835,7 @@ export class Dungeon {
     const sx = Math.min(r.x + r.w - 1.3, Math.max(r.x + 1.3, anchor.x + dx * 1.8));
     const sz = Math.min(r.z + r.d - 1.3, Math.max(r.z + 1.3, anchor.z + dz * 1.8));
     // forward(yaw) = (-sin, -cos) pointed back along the push, at the door.
-    put('statue', sx, 0, sz, Math.atan2(dx, dz));
+    put('statue', sx, r.floorY || 0, sz, Math.atan2(dx, dz));
     field.addCircle(sx, sz, 0.7, { nav: false, tag: 'statue' });
   }
 
@@ -1588,7 +1895,8 @@ export class Dungeon {
             slot.anchor = slot.target;
             if (slot.anchor >= 0) {
               slot.light.position.set(
-                this._torchAnchors[slot.anchor * 2], 2.1,
+                this._torchAnchors[slot.anchor * 2],
+                (this._torchAnchorY[slot.anchor] || 0) + 2.1,
                 this._torchAnchors[slot.anchor * 2 + 1],
               );
             }
@@ -1601,6 +1909,27 @@ export class Dungeon {
           ? this._lightIntensity * slot.fade * flicker
           : 0;
       }
+    }
+
+    // Collapse rings (reach): veil fades in over ~0.8 s after its phase
+    // seals; the live edge's rim breathes. Material-field mutates only.
+    if (this._arenaRings) {
+      for (const ring of this._arenaRings) {
+        if (ring.veil.visible && ring.anim < 1) {
+          ring.anim = Math.min(1, ring.anim + dt / 0.8);
+          ring.veil.material.opacity = 0.92 * ring.anim;
+        }
+        if (ring.rim.visible) {
+          ring.rim.material.opacity = 0.6 + Math.sin(this._t * 3.1) * 0.25;
+        }
+      }
+    }
+
+    // Compass beacon: slow breathing pulse — a material-opacity mutate,
+    // nothing allocated, matching the membrane idiom above.
+    if (this._waypointBeacon && this._waypointBeacon.visible) {
+      const beamMat = this._waypointBeacon.children[0]?.material;
+      if (beamMat) beamMat.opacity = 0.3 + Math.sin(this._t * 2.1) * 0.09;
     }
 
     // Exit portal: grow in over the rise time, then idle — ring spin + disc
@@ -1730,7 +2059,8 @@ export class Dungeon {
         slot.anchor = slot.target;
         slot.fade = 0;
         slot.light.position.set(
-          this._torchAnchors[slot.anchor * 2], 2.1,
+          this._torchAnchors[slot.anchor * 2],
+          (this._torchAnchorY[slot.anchor] || 0) + 2.1,
           this._torchAnchors[slot.anchor * 2 + 1],
         );
       }
@@ -1767,9 +2097,32 @@ export class Dungeon {
    * that tunnels a wall in a spike frame gets caught by the box, mirroring
    * the arena's disc-clamp philosophy. Walls are the real boundary.
    */
-  resolve(pos, radius, vel = null) {
+  resolve(pos, radius, vel = null, ownsY = false) {
     this.obstacleField.resolve(pos, radius, vel);
-    const b = this.layout?.bounds;
+    const l = this.layout;
+    // Height settle for the tower kind. The PLAYER's CharacterBody owns its
+    // own y (groundHeight is bound to heightAt by dungeonmode), but enemies
+    // and shadows still move on the pre-Wave-D flat integrator with vel.y
+    // pinned at 0 — so this is where THEY meet the terraces: a stair tread
+    // under their feet lifts them one step (<= 0.5, the tread bound), and
+    // floor falling away beneath them (a ramp descent, a parapet shove)
+    // lowers them at ~33 m/s of pseudo-gravity until they stand again. The
+    // vel.y === 0 gate keeps the player's airborne frames out: a jumping or
+    // falling body always carries a live vertical velocity.
+    // ownsY bodies (the player — dungeonmode binds heightAt as the body's own
+    // groundHeight) SKIP the height settle entirely: the body's solver owns
+    // vertical, and the settle's walk-off-frame bite (review finding) both
+    // pre-dropped the body 0.55 m before gravity engaged and distorted fall
+    // speeds against the damage table's stated tuning.
+    if (l?.heightAt && !ownsY) {
+      const hy = l.heightAt(pos.x, pos.z);
+      const dy = hy - pos.y;
+      if (dy > 0 && dy <= 0.5) pos.y = hy;
+      else if (dy < 0 && (!vel || vel.y === 0 || vel.y === undefined)) {
+        pos.y = Math.max(hy, pos.y - 0.55);
+      }
+    }
+    const b = l?.bounds;
     if (!b) return;
     if (pos.x < b.minX + radius) { pos.x = b.minX + radius; if (vel && vel.x < 0) vel.x = 0; }
     else if (pos.x > b.maxX - radius) { pos.x = b.maxX - radius; if (vel && vel.x > 0) vel.x = 0; }
@@ -1799,7 +2152,7 @@ export class Dungeon {
       const d = minDistFrom
         ? Math.hypot(p.x - minDistFrom.x, p.z - minDistFrom.z)
         : Infinity;
-      if (d > minDist) return new THREE.Vector3(p.x, 0, p.z);
+      if (d > minDist) return new THREE.Vector3(p.x, p.y || 0, p.z);
       if (d > bestD) { bestD = d; bestIdx = (start + i) % pts.length; }
     }
     // Nothing satisfies minDist (small room, big escort): compress around the
@@ -1807,7 +2160,7 @@ export class Dungeon {
     // (spawn points are >= ~2 m clear by construction).
     const p = pts[bestIdx];
     return new THREE.Vector3(
-      p.x + (rnd() - 0.5) * 1.4, 0, p.z + (rnd() - 0.5) * 1.4,
+      p.x + (rnd() - 0.5) * 1.4, p.y || 0, p.z + (rnd() - 0.5) * 1.4,
     );
   }
 
@@ -1869,9 +2222,12 @@ export class Dungeon {
     const r = layout.rooms[layout.bossRoom];
     const doorId = r.doors[0];
     const door = doorId !== undefined ? layout.doors[doorId] : null;
-    if (!door) return new THREE.Vector3(r.centre.x, 0, r.centre.z);
+    // Door-less boss rooms (the waste's open final site) fall through to
+    // bossAnchor's null-door default (-Z push), NOT to the bare centre —
+    // the cover placer keeps THAT anchor clear, so returning anything else
+    // here is how a boss rises inside an outcrop.
     const a = bossAnchor(r, door);
-    return new THREE.Vector3(a.x, 0, a.z);
+    return new THREE.Vector3(a.x, this.heightAt(a.x, a.z), a.z);
   }
 
   spawnPointsFor(roomId) {
@@ -1916,7 +2272,7 @@ export class Dungeon {
     disc.position.y = 1.9;
     group.add(ring);
     group.add(disc);
-    group.position.set(px, 0, pz);
+    group.position.set(px, this.heightAt(px, pz), pz);
     // The plane faces back toward the entrance so the player walks into it
     // face-on. (-dx,-dz) is portal -> door.
     group.rotation.y = Math.atan2(-dx, -dz);
@@ -1932,9 +2288,19 @@ export class Dungeon {
     return group.position;
   }
 
-  // v1 floors are flat (FLAT_GROUND physics binding); the method exists so
-  // sloped floors are a later body.setEnvironment drop-in, like city.js.
-  heightAt() { return 0; }
+  /**
+   * Ground height at (x, z) — the Wave E seam the comment above always
+   * promised. A layout that carries height (the B tower's terraces + stair
+   * treads) publishes its own analytic layout.heightAt (tower.js); flat kinds
+   * publish none and this stays the constant 0 it has been since v1.
+   * dungeonmode.js binds this into the player body's setEnvironment for
+   * height-carrying kinds only, so the crawl/cavern keep the FLAT_GROUND
+   * identity fast path in physics.js.
+   */
+  heightAt(x, z) {
+    const l = this.layout;
+    return l && l.heightAt ? l.heightAt(x, z) : 0;
+  }
 
   // ---------------------------------------------------------------- private
 
@@ -2064,7 +2430,7 @@ function bufferGeo(positions, colors) {
 // low, dark up high, which is most of the "carved burrow" read. Optional
 // `tint(color, z)` mutates a scratch copy per vertex — the STEP 6 tunnel
 // darkness ramp, which must vary ALONG a run, not per run.
-function pushBox(positions, colors, cx, cz, w, d, hgt, base, top, tint = null) {
+function pushBox(positions, colors, cx, cz, w, d, hgt, base, top, tint = null, yBase = 0) {
   const x0 = cx - w / 2;
   const x1 = cx + w / 2;
   const z0 = cz - d / 2;
@@ -2078,8 +2444,8 @@ function pushBox(positions, colors, cx, cz, w, d, hgt, base, top, tint = null) {
   const quad = (ax, az, bx, bz) => {
     // Two triangles: a-bottom, a-top, b-top / a-bottom, b-top, b-bottom.
     positions.push(
-      ax, 0, az, ax, hgt, az, bx, hgt, bz,
-      ax, 0, az, bx, hgt, bz, bx, 0, bz,
+      ax, yBase, az, ax, hgt, az, bx, hgt, bz,
+      ax, yBase, az, bx, hgt, bz, bx, yBase, bz,
     );
     pushC(base, az); pushC(top, az); pushC(top, bz);
     pushC(base, az); pushC(top, bz); pushC(base, bz);

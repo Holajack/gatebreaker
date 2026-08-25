@@ -1,5 +1,6 @@
 import { mulberry32 } from '../core/rng.js';
 import { rollWaveSize } from './config.js';
+import { t } from './strings.js';
 
 // The room-state director — DUNGEON_SPEC.json STEP 5.
 //
@@ -23,6 +24,13 @@ import { rollWaveSize } from './config.js';
 // legal. Only the boss grotto keeps a door (its neck membrane), which the
 // standard machinery seals at start, re-seals behind the player at the boss
 // threshold, and drops on allCleared exactly like a crawl's boss chamber.
+//
+// ROUTE MODE (Wave E task E-A, the A-rank waste) is zone mode plus ORDER:
+// layout.route lists the combat sites in clear sequence, only the next site
+// (or, after allCleared, the boss site) may trigger — the deep-door gate for
+// a world with no doors — the dungeon's compass beacon retargets on every
+// clear, and each site sends part of its own budget ahead as a roaming pack
+// on the leg between stops (_spawnRoamers; points precomputed by waste.js).
 //
 // THREE-free on purpose: positions travel as {x,z} ducks and the one Vector3
 // this module needs is cloned off the game's own player position at bind time,
@@ -76,15 +84,32 @@ const BOSS_ADDS_INTERVAL = 1.2;
 // exist — the owner's "different E-rank gates have different enemies" is a
 // weighting table, not new content. gateIndex 0 = E; D+ adds the heavier
 // packs; C (the cavern, STEP 8) mixes in the lancer — the spec's "lancer at
-// the fringe" — whose charge is what the stalagmite cover exists to break.
+// the fringe" — whose charge is what the stalagmite cover exists to break;
+// B (the tower, Wave E) draws the HEAVY end of the roster outright — brutes,
+// lancers and the howler support body — and drops the pure-E starter packs
+// via maxGate, so an emberfall floor never deals a burrow of plain grunts.
+// maxGate is absent-means-open (the save format's absent-means-default rule):
+// only the three starter rows carry one, and every rank at or below C sees
+// the exact pool it saw before this column existed — same rows, same order,
+// same shuffle stream, same deals.
 const PACK_TABLE = [
-  { minGate: 0, name: 'burrow', mix: { grunt: 3, stalker: 2 } },
-  { minGate: 0, name: 'nest', mix: { grunt: 2, caster: 1 } },
-  { minGate: 0, name: 'hunt', mix: { stalker: 3, grunt: 1 } },
+  { minGate: 0, maxGate: 2, name: 'burrow', mix: { grunt: 3, stalker: 2 } },
+  { minGate: 0, maxGate: 2, name: 'nest', mix: { grunt: 2, caster: 1 } },
+  { minGate: 0, maxGate: 2, name: 'hunt', mix: { stalker: 3, grunt: 1 } },
   { minGate: 1, name: 'vault', mix: { brute: 1, grunt: 2 } },
   { minGate: 1, name: 'ossuary', mix: { caster: 2, stalker: 1, grunt: 1 } },
   { minGate: 2, name: 'fringe', mix: { lancer: 2, stalker: 2, grunt: 1 } },
   { minGate: 2, name: 'deepglass', mix: { grunt: 2, caster: 1, lancer: 1 } },
+  { minGate: 3, name: 'emberguard', mix: { brute: 2, lancer: 2, grunt: 1 } },
+  { minGate: 3, name: 'cinderchoir', mix: { caster: 2, howler: 1, stalker: 2 } },
+  { minGate: 3, name: 'pyreline', mix: { lancer: 2, brute: 1, howler: 1 } },
+  // A (the waste, Wave E task E-A) widens the top of the deck: void-touched
+  // hunt packs for camps fought in the open, where the caster line and the
+  // lancer charge have real approach room. Additive rows — every rank at or
+  // below B sees the exact pool, order, shuffle stream and deals it saw
+  // before these existed (the maxGate/minGate filter is the whole change).
+  { minGate: 4, name: 'rivenhunt', mix: { stalker: 2, caster: 2, lancer: 1 } },
+  { minGate: 4, name: 'wastewalkers', mix: { brute: 2, howler: 1, grunt: 2 } },
 ];
 
 /**
@@ -98,7 +123,8 @@ const PACK_TABLE = [
  */
 export function rollRoomPacks(gate, rnd, count = 16) {
   const gateIndex = ['E', 'D', 'C', 'B', 'A', 'S'].indexOf(gate.rank);
-  const pool = PACK_TABLE.filter((p) => gateIndex >= p.minGate);
+  const pool = PACK_TABLE.filter((p) => gateIndex >= p.minGate
+    && gateIndex <= (p.maxGate ?? Infinity));
   const packs = [];
   if (!pool.length) return packs;
   // SHUFFLE BAG, not an independent roll per room. An independent roll deals
@@ -196,8 +222,35 @@ export class EncounterDirector {
     // class — reused for every spawn/pickup call (they all copy internally).
     this._vec = game.player.pos.clone().set(0, 0, 0);
 
-    // The deep door opens on allCleared, not on arrival.
+    // ROUTE MODE (Wave E task E-A, the waste). layout.route lists the combat
+    // sites in clear order; a route-carrying world has no door membranes to
+    // seal, so the deep-door machinery's SHAPE survives as ordering: only the
+    // next site on the route may trigger, and the boss site only once
+    // allCleared — the same gate, enforced at the trigger instead of at a
+    // membrane box. _preSpawned tracks roam-pack bodies spawned against a
+    // site's budget BEFORE the site activates, so the kill-metering totals
+    // stay exact. Absent route (every other kind) = every path below is the
+    // shipped behaviour, untouched.
+    this._route = dungeon.layout.route || null;
+    this._routeIdx = 0;
+    this._preSpawned = new Map();
+    this._roamPrimed = false;
+
+    // COLLAPSING ARENA (Wave E task E-S, the S reach's summit). The layout
+    // carries the phase radii + boss-hp thresholds as data
+    // (layout.arenaPhases); dungeon.js pre-registered the ring barriers and
+    // owns setArenaPhase; THIS is the consumer — the director watches boss hp
+    // each boss-phase tick and seals rings as thresholds fall. The boss's own
+    // BRAIN stays game.js's untouched: hp is an output we read, never an
+    // input we steer. Absent arenaPhases (every other kind) = dead code.
+    this._arenaPhases = dungeon.layout.arenaPhases || null;
+    this._arenaPhase = 0;
+
+    // The deep door opens on allCleared, not on arrival. (No-op for the
+    // waste's door-less boss site — its gate is the route check above.)
     this._setRoomSealed(dungeon.layout.bossRoom, true);
+    // Compass: the beacon opens pointing at the first site.
+    if (this._route) this.dungeon.setWaypoint?.(this._route[0]);
   }
 
   get state() { return this._phase; }
@@ -220,11 +273,22 @@ export class EncounterDirector {
       // _killEnemy's boss branch skips _clearGate for encounter-driven worlds
       // (EDIT 6); the flip of bossActive is our death signal.
       if (this._bossSpawned && !g.bossActive) { this.onBossDeath(); return; }
-      if (this._bossSpawned) this._updateBossAdds(dt);
+      if (this._bossSpawned) {
+        this._updateArenaPhases();
+        this._updateBossAdds(dt);
+      }
       return;
     }
 
     // --- rooms phase ------------------------------------------------------
+    // Route mode: the FIRST leg's roaming pack rises on the director's first
+    // live tick — the mode gates update() on the intro, so this is the moment
+    // the player steps out of the tunnel, never a body spawned into the
+    // authored walk-in shot. Sites 2+ get theirs on the previous clear.
+    if (this._route && !this._roamPrimed) {
+      this._roamPrimed = true;
+      this._spawnRoamers(this.rooms[this._route[0]]);
+    }
     if (this._active >= 0) { this._updateActiveRoom(dt); return; }
 
     const p = g.player.pos;
@@ -234,9 +298,10 @@ export class EncounterDirector {
     if (this.states[roomId] !== ROOM_STATE.DORMANT) return;
 
     if (room.kind === 'treasure') {
-      // Treasure rooms pay out on discovery — no fight, no seal.
+      // Treasure rooms pay out on discovery — no fight, no seal. floorY: the
+      // tower's rooms sit at their floor's height (0 everywhere flat).
       this.states[roomId] = ROOM_STATE.CLEARED;
-      this._vec.set(room.centre.x, 0, room.centre.z);
+      this._vec.set(room.centre.x, room.floorY || 0, room.centre.z);
       g._spawnWeaponDrop(this._vec);
       g.fx.ring(this._vec, this._accent(), 4, 0.6);
       g.ui.toast('A CACHE IN THE DARK', 'gold');
@@ -244,6 +309,13 @@ export class EncounterDirector {
     }
     if (room.kind === 'combat' || room.kind === 'boss') {
       // Boss room is only reachable here once allCleared dropped its seal.
+      // Route mode has no seals, so the SAME two gates are enforced right
+      // here: a combat site off the compass stays dormant under the player's
+      // feet, and the boss site holds until every camp is down.
+      if (this._route) {
+        if (room.kind === 'combat' && roomId !== this._route[this._routeIdx]) return;
+        if (room.kind === 'boss' && !this.allCleared) return;
+      }
       this.states[roomId] = ROOM_STATE.TRIGGERED;
       this._active = roomId;
       this._grace = SEAL_GRACE;
@@ -278,6 +350,8 @@ export class EncounterDirector {
 
       if (room.kind === 'boss') {
         // Threshold crossed, door sealed behind — the chamber owns the rest.
+        // (Route mode: the compass stands down, the boss IS the marker now.)
+        if (this._route) this.dungeon.setWaypoint?.(-1);
         g._spawnBoss();
         this._phase = 'boss';
         this._bossSpawned = true;
@@ -286,9 +360,19 @@ export class EncounterDirector {
       }
 
       this._budget = room.budget;
-      this._roomSpawned = 0;
+      // Roam-pack bodies already spawned against this site's budget count as
+      // spawned (route mode; 0 everywhere else — the map is only ever written
+      // by _spawnRoamers).
+      this._roomSpawned = this._preSpawned.get(roomId) || 0;
       this._spawnCursor = Math.floor(this.rnd() * Math.max(1, room.spawnPoints.length));
-      const first = Math.min(this.waveSize, this._budget);
+      // Opening wave respects the LIVE cap, not just the budget: surviving
+      // roamers that chased the player into their own camp already occupy
+      // concurrency slots. In a crawl g.enemies is always empty at a trigger
+      // (the previous room's doors do not reopen mid-fight), so `live` is 0
+      // and this is the shipped arithmetic to the number.
+      let live = 0;
+      for (const e of g.enemies) if (!e.isBoss) live++;
+      const first = Math.max(0, Math.min(this.waveSize - live, this._budget - this._roomSpawned));
       for (let i = 0; i < first; i++) this._spawnOne(room);
       this._trickle = TRICKLE_INTERVAL;
       return;
@@ -312,7 +396,13 @@ export class EncounterDirector {
     // a membrane can never path back in. Cavern zones have no doors — nothing
     // separates a shadow standing one metre outside the trigger disc from the
     // fight, and blinking it every 1.5 s would strobe rings all run long.
-    if (room.doors.length) {
+    // ...and never when the PLAYER has left the sealed room through a
+    // parapet gap (review fix, tower): teleporting shadows back INTO the
+    // still-sealed room while the player fights below sealed them away from
+    // exactly the fight they exist for. If the player is out, the rescue
+    // waits — the room-clear unseal reunites everyone.
+    const playerInRoom = d.roomAt(g.player.pos.x, g.player.pos.z) === roomId;
+    if (room.doors.length && playerInRoom) {
       for (const s of g.shadows) {
         if (d.roomAt(s.pos.x, s.pos.z) === roomId) { s._outsideT = 0; continue; }
         s._outsideT = (s._outsideT || 0) + dt;
@@ -321,7 +411,7 @@ export class EncounterDirector {
           // the player rather than grinding against a sealed membrane.
           s._outsideT = 0;
           const pt = this._nearestPoint(room, g.player.pos);
-          s.pos.set(pt.x, 0, pt.z);
+          s.pos.set(pt.x, pt.y || 0, pt.z);
           s.vel.set(0, 0, 0);
           s.mesh.position.copy(s.pos);
           g.fx.ring(s.pos, 0x35e6ff, 3, 0.5);
@@ -340,17 +430,39 @@ export class EncounterDirector {
     g.audio.tone({ freq: 520, type: 'triangle', gain: 0.12, decay: 0.4, sweep: 400 });
 
     // Clear payout: a breather's worth of orbs at the room's heart. Treasure
-    // rooms pay a weapon on discovery instead (they never fight).
-    this._vec.set(room.centre.x - 0.8, 0, room.centre.z);
+    // rooms pay a weapon on discovery instead (they never fight). floorY:
+    // tower rooms sit at height, flat kinds at 0.
+    const ry = room.floorY || 0;
+    this._vec.set(room.centre.x - 0.8, ry, room.centre.z);
     g._spawnPickup(this._vec, 'hp');
-    this._vec.set(room.centre.x + 0.8, 0, room.centre.z);
+    this._vec.set(room.centre.x + 0.8, ry, room.centre.z);
     g._spawnPickup(this._vec, 'mp');
 
     const bossRoom = this.rooms[this.dungeon.layout.bossRoom];
+    // Route mode: advance the compass. Clearing site N unseals site N+1 —
+    // the beacon retargets, and the next site's advance pack rises on the
+    // leg between (the roaming-pack beat: bodies met in the open, spent from
+    // the NEXT site's own budget so gate.enemies stays the exact total).
+    if (this._route && this._route[this._routeIdx] === roomId) {
+      this._routeIdx++;
+      if (this._routeIdx < this._route.length) {
+        const next = this.rooms[this._route[this._routeIdx]];
+        this.dungeon.setWaypoint?.(next.id);
+        this._spawnRoamers(next);
+        g.ui.toast('THE COMPASS PULLS ONWARD', 'gold');
+      }
+    }
     if (this.allCleared) {
       this._setRoomSealed(bossRoom.id, false);
       this._doorFlare(bossRoom);
-      g.ui.toast('THE DEEP DOOR UNSEALS', 'gold');
+      if (this._route) {
+        // No door to drop out here on the open waste — the compass turns to
+        // the final site instead. Same machinery beat, reworded.
+        this.dungeon.setWaypoint?.(bossRoom.id);
+        g.ui.toast('THE COMPASS SEARS TOWARD THE HEART', 'gold');
+      } else {
+        g.ui.toast('THE DEEP DOOR UNSEALS', 'gold');
+      }
       g.audio.nova();
     } else {
       // A combat room can open STRAIGHT into the boss chamber; the unseal
@@ -360,12 +472,48 @@ export class EncounterDirector {
     }
   }
 
-  _spawnOne(room) {
+  /**
+   * Rise `room.roam` of the site's budget on its precomputed roamPoints —
+   * the leg between the just-cleared stop and this one (waste.js owns the
+   * WHERE; both are pure functions of the seed). Capped by the live wave so
+   * a pack met in the open never exceeds what a camp fight peaks at; bodies
+   * that do not fit under the cap simply stay in the site's own metering.
+   */
+  _spawnRoamers(room) {
+    const pts = room.roamPoints;
+    const want = Math.min(room.roam || 0, pts?.length || 0);
+    if (!want) return;
+    const g = this.g;
+    let live = 0;
+    for (const e of g.enemies) if (!e.isBoss) live++;
+    let spawned = this._preSpawned.get(room.id) || 0;
+    for (let i = 0; i < want; i++) {
+      if (live >= this.waveSize || spawned >= room.budget) break;
+      this._spawnOne(room, pts[i]);
+      live++;
+      spawned++;
+    }
+    this._preSpawned.set(room.id, spawned);
+  }
+
+  _spawnOne(room, forcePt = null) {
     const pts = room.spawnPoints;
     const pack = this.packs[room.id % this.packs.length];
     const key = pack ? pickFromMix(pack.mix, this.rnd) : null;
-    let pt = room.centre;
-    if (pts.length) {
+    // forcePt: a roam-pack rise on the open route (waste) — the point came
+    // from the layout's roamPoints, already floor-guaranteed and cover-clear.
+    let pt = forcePt || room.centre;
+    if (!forcePt && pts.length) {
+      // Collapsed-arena guard (reach summit): a boss add must never rise in
+      // a band the edge already swallowed. Live radius minus a body's width;
+      // any point passes when no phase has collapsed (or no phases exist).
+      const ph = this._arenaPhases;
+      const collapsed = ph && this._arenaPhase > 0
+        && room.id === this.dungeon.layout.bossRoom;
+      const liveR = collapsed
+        ? ph.radii[Math.min(this._arenaPhase, ph.radii.length - 1)] - 1.0 : Infinity;
+      const inArena = (p) => !collapsed
+        || Math.hypot(p.x - ph.cx, p.z - ph.cz) <= liveR;
       // Walk the ring from the cursor; take the first point clear of the
       // player, falling back to the farthest so a tiny room still spawns.
       let best = null;
@@ -374,13 +522,25 @@ export class EncounterDirector {
       const pz = this.g.player.pos.z;
       for (let i = 0; i < pts.length; i++) {
         const cand = pts[(this._spawnCursor + i) % pts.length];
+        if (!inArena(cand)) continue;
         const dd = Math.hypot(cand.x - px, cand.z - pz);
         if (dd >= SPAWN_CLEARANCE) { best = cand; this._spawnCursor += i + 1; break; }
         if (dd > bestD) { bestD = dd; best = cand; }
       }
       pt = best || pts[0];
+      // Collapsed-summit clamp (review fix): when EVERY candidate sat in a
+      // collapsed band, the raw pts[0] fallback could rise an add outside
+      // the sealed barrier — unengageable both ways. Project the fallback
+      // onto the live radius instead, the same pull _updateArenaPhases uses.
+      if (collapsed && !inArena(pt)) {
+        const dx = pt.x - ph.cx, dz = pt.z - ph.cz;
+        const dd = Math.hypot(dx, dz) || 1;
+        pt = { x: ph.cx + (dx / dd) * (liveR - 0.2), y: pt.y, z: ph.cz + (dz / dd) * (liveR - 0.2) };
+      }
     }
-    this._vec.set(pt.x, 0, pt.z);
+    // pt.y: tower spawn points carry their floor height; room.centre and the
+    // flat kinds' points carry none, so this is 0 everywhere it always was.
+    this._vec.set(pt.x, pt.y || (room.floorY || 0), pt.z);
     // pos AND key both supplied — game.js EDIT 2's contract. spawned++ and the
     // level roll stay the game's business.
     this.g._spawnEnemy(this._vec, key);
@@ -388,6 +548,53 @@ export class EncounterDirector {
   }
 
   // ---------------------------------------------------------------- boss
+
+  /**
+   * Collapse the summit's edge as the boss falls (reach kind only). One ring
+   * per threshold crossed: dungeon.setArenaPhase seals the barrier + flips
+   * the veil/rim visuals, and every body caught outside the live edge is
+   * pulled just inside it — the same teleport-recovery philosophy as the
+   * stranded-shadow rescue, because a barrier that seals the PLAYER out of
+   * the boss fight is a softlock, not a mechanic. The while-loop makes one
+   * huge hit that crosses two thresholds collapse both rings in one tick.
+   */
+  _updateArenaPhases() {
+    const ph = this._arenaPhases;
+    if (!ph) return;
+    const g = this.g;
+    const boss = g.boss;
+    if (!g.bossActive || !boss || !(boss.maxHp > 0)) return;
+    const frac = boss.hp / boss.maxHp;
+    while (this._arenaPhase < ph.thresholds.length
+      && frac <= ph.thresholds[this._arenaPhase]) {
+      this._arenaPhase++;
+      this.dungeon.setArenaPhase?.(this._arenaPhase);
+      const R = ph.radii[Math.min(this._arenaPhase, ph.radii.length - 1)];
+      const pull = (ent) => {
+        const dx = ent.pos.x - ph.cx;
+        const dz = ent.pos.z - ph.cz;
+        const d = Math.hypot(dx, dz);
+        if (d <= R - 0.8) return;
+        const s = (R - 1.2) / (d || 1);
+        const nx = ph.cx + dx * s;
+        const nz = ph.cz + dz * s;
+        if (ent.body?.reset) ent.body.reset(nx, ent.pos.y, nz);
+        ent.pos.x = nx;
+        ent.pos.z = nz;
+        ent.vel?.set?.(0, 0, 0);
+        ent.mesh?.position?.copy?.(ent.pos);
+        g.fx.ring(ent.pos, this._accent(), 2.5, 0.4);
+      };
+      pull(g.player);
+      for (const s of g.shadows) pull(s);
+      for (const e of g.enemies) pull(e);
+      this._vec.set(ph.cx, ph.y || 0, ph.cz);
+      g.fx.ring(this._vec, this._accent(), R, 0.9);
+      g.fx.addShake?.(0.35);
+      g.audio.noise?.({ gain: 0.2, decay: 0.5, filter: 300 });
+      g.ui.toast(t('gate.arena.collapse'), 'gold');
+    }
+  }
 
   /**
    * Trickle the boss chamber's pack in while the boss is alive.
@@ -423,10 +630,19 @@ export class EncounterDirector {
     if (this._phase === 'exit' || this._phase === 'done') return;
     const g = this.g;
     const L = this.dungeon.layout;
+    // The collapse settles with its maker: rings retract (barriers open,
+    // veils clear), so the walk-out crosses the full disc — the exit anchor
+    // sits 21 m off centre, outside every collapse ring by design.
+    if (this._arenaPhases) {
+      this._arenaPhase = 0;
+      this.dungeon.setArenaPhase?.(0);
+    }
     this.states[L.bossRoom] = ROOM_STATE.CLEARED;
     // Every membrane drops: the dungeon is beaten, the Bind window and the
     // drops play out at leisure, and the way home rises at the back wall.
     for (const door of L.doors) this.dungeon.setDoorSealed(door.id, false);
+    // The compass stands down — the exit portal is the marker now.
+    this.dungeon.setWaypoint?.(-1);
     this._portalPos = this.dungeon.showExitPortal();
     this._portalT = 0;
     this._phase = 'exit';
@@ -465,11 +681,25 @@ export class EncounterDirector {
         this._setRoomSealed(this._active, true);
         d.activeRoomId = this._active;
       }
+      // Route mode: the rebuilt beacon starts hidden — re-point it at the
+      // stop the run state implies (next site, or the boss once allCleared).
+      if (this._route) {
+        d.setWaypoint?.(this.allCleared
+          ? L.bossRoom
+          : this._route[Math.min(this._routeIdx, this._route.length - 1)]);
+      }
     } else if (this._phase === 'boss') {
       this._setRoomSealed(L.bossRoom, true);
+      if (this._route) d.setWaypoint?.(-1);
+      // The rebuild reset every collapse ring open; re-stamp the phase the
+      // fight had reached (idempotent — see dungeon.setArenaPhase).
+      if (this._arenaPhases) d.setArenaPhase?.(this._arenaPhase);
     } else if (this._phase === 'exit') {
       const pos = d.showExitPortal();
       if (pos) this._portalPos = pos;
+      // onBossDeath reset _arenaPhase to 0 (the collapse settles with its
+      // maker); re-stamping keeps the rebuilt rings open for the walk-out.
+      if (this._arenaPhases) d.setArenaPhase?.(this._arenaPhase);
     }
   }
 
@@ -493,7 +723,7 @@ export class EncounterDirector {
     const L = this.dungeon.layout;
     for (const doorId of room.doors) {
       const door = L.doors[doorId];
-      this._vec.set(door.x, 0, door.z);
+      this._vec.set(door.x, door.y || 0, door.z);
       this.g.fx.ring(this._vec, this._accent(), 3, 0.5);
     }
   }
