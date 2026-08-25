@@ -1,11 +1,18 @@
 import * as THREE from 'three';
 import {
-  HeightField, VERGE_EDGE, FRONTIER_CELL, FRONTIER_HALF,
+  HeightField, FRONTIER_CELL, FRONTIER_HALF,
   PORTAL_COLORS, buildPortalVisual, registerVergeDistrict, clearVergeDistricts,
 } from './city.js';
 import { NatureField } from './naturekit.js';
 import { pieceGeometryColored } from './citykit.js';
 import { fbm } from './terrain.js';
+// The settlement descriptor, for the two EXPORTED constants below only —
+// settlements.js is a leaf module, so this eval-time read adds no edge to the
+// city<->frontier cycle. Everything else this file needs from the descriptor
+// (wall extents, breach/cliff, the POI and band tables) is read through
+// this.city.spec INSIDE methods, so the Verge always describes the settlement
+// that owns it rather than a module-level twin.
+import { THRESHOLD } from './settlements.js';
 import { GATES } from '../game/config.js';
 
 // ---------------------------------------------------------------------------
@@ -49,8 +56,10 @@ import { GATES } from '../game/config.js';
 //    own owned lists; geometry and materials it BORROWS from naturekit are
 //    never disposed here. GPU leaks have shipped from this repo three times.
 
-/** How far out resolve() lets anything walk once the Verge exists. */
-export const VERGE_LIMIT = 258;
+/** How far out resolve() lets anything walk once the Verge exists. Exported
+ *  because city.resolve and tools/ read it; sourced from the descriptor so the
+ *  number is authored once. */
+export const VERGE_LIMIT = THRESHOLD.verge.limit;
 
 // The annulus, in whole lattice rings so every vertex is shared with the city
 // field. 6.8 m per ring: 23 -> 156.4 m, 25 -> 170.0 m (the city ground mesh's
@@ -66,28 +75,30 @@ const CENTRE_IX = 42;              // FRONTIER_HALF / FRONTIER_CELL
 // z-fight, and 8 cm is well under stepHeight (0.4 m) so nothing walks off it.
 const SINK = [1.2, 0.6, 0.08];     // indexed by (ringV - RING_IN) clamped
 
-// Where scatter may stand, as Chebyshev radius. The inner bound sits outside
-// the city ground mesh's rim so the Verge never dresses ground the town already
-// dressed; the outer one keeps everything inside the walk limit, because a tree
-// you can see but can never reach reads as a rendering bug.
-const SCATTER_IN = 152;
-const SCATTER_OUT = VERGE_LIMIT - 6;
+// Where scatter may stand, as Chebyshev radius: spec.verge.scatterIn to
+// (limit - 6), read where used. The inner bound sits outside the city ground
+// mesh's rim so the Verge never dresses ground the town already dressed; the
+// outer one keeps everything inside the walk limit, because a tree you can see
+// but can never reach reads as a rendering bug.
 
 // POIs (step 7) carve pads into THIS field only. Anything closer in than this
 // would flatten ground the city field also owns, and the two would disagree —
 // the stitch guarantees agreement for the undisturbed surface, not for flats.
-export const POI_MIN_R = 186;
+// Exported (tools/ reads it); descriptor-sourced like VERGE_LIMIT.
+export const POI_MIN_R = THRESHOLD.verge.poiMinR;
 
-const BREACH_Z = -126;             // mirrors city.js; the ash ring's centre
-const CLIFF_X = -88;
+// The breach centre, the cliff line and the wall used to be re-declared here
+// as "mirrors city.js" constants — the exact duplication the descriptor
+// extraction existed to kill. They are this.city.spec reads inside the
+// methods that need them now, so this file cannot drift from its owner.
 
-// THE ANNULUS STOPS WHERE THE CITY GROUND MESH ALREADY STOPPED, on the west
-// side only. Carrying it out to 278 m painted the void floor below the cliff
-// across 60% of the Overlook frame — a wide flat basin where the shipped game
-// has a 34 m drop and then sky. The cliff is the one place the world is meant
-// to visibly stop, so west of the city mesh's own rim the Verge simply is not
-// there and the view is bit-for-bit the one that already exists.
-const WEST_MESH_EDGE = -170;       // = -WORLD_HALF in city.js
+// THE ANNULUS STOPS WHERE THE CITY GROUND MESH ALREADY STOPPED
+// (-spec.wall.worldHalf), on the west side only. Carrying it out to 278 m
+// painted the void floor below the cliff across 60% of the Overlook frame — a
+// wide flat basin where the shipped game has a 34 m drop and then sky. The
+// cliff is the one place the world is meant to visibly stop, so west of the
+// city mesh's own rim the Verge simply is not there and the view is
+// bit-for-bit the one that already exists.
 
 const smoothstep = (a, b, x) => {
   if (b === a) return x < a ? 0 : 1;
@@ -111,16 +122,11 @@ function angDist(a, b) {
 // ---------------------------------------------------------------------------
 // Biome bands
 // ---------------------------------------------------------------------------
-// Arcs are the spec's, restated as centre + falloff so the ground palette can
-// cross-fade instead of drawing a hard pie-slice edge across open country. The
-// west wedge (az ~170-190) has no band on purpose: that is the cliff void, and
-// nothing stands on it.
-
-const BANDS = {
-  east_meadow: { centre: 0, soft: [55, 85], arc: [-60, 60] },
-  south_amberwood: { centre: 115, soft: [50, 80], arc: [60, 170] },
-  north_ashreach: { centre: 245, soft: [50, 85], arc: [190, 300] },
-};
+// The wedge table itself is settlement identity and lives on the descriptor as
+// spec.verge.bands (centre + falloff rather than hard pie-slices, so the
+// ground palette can cross-fade; the west wedge is deliberately absent — that
+// is the cliff void). The species table below names arcs by band KEY, so the
+// keys are part of this file's contract with the descriptor.
 
 /**
  * Species table.
@@ -216,63 +222,10 @@ const SPECIES = [
 // the radius where heightAt hands authority over. Hence: pad + feather <= 16 and
 // every centre at Chebyshev radius >= POI_MIN_R (186), which leaves 170 clear
 // with margin.
-const POI_FEATHER = 6;
-
-const POIS = [
-  {
-    id: 'verge_ruin_arch',
-    name: 'THE SUNKEN ARCH',
-    // Dead east on the east avenue's line (the street runs out along z = 0), so
-    // it is the thing you see through the east gate when you look out of it.
-    x: 206, z: 10, pad: 10, radius: 24, stamp: 'ruinArch',
-  },
-  {
-    id: 'camp_hunters_east',
-    name: "THE HUNTERS' CAMP",
-    // npcs/npcHunter are read by citizens.js after City.build has run both this
-    // file and the crowd (build order: frontier, then Citizens). They are the
-    // whole reason a camp is a camp rather than a prop cluster — the spec's own
-    // line is "fiction: other hunters stage here before gates", and a staging
-    // post with nobody in it answers the owner's "is anyone out here" with no.
-    x: 192, z: -104, pad: 10, radius: 24, stamp: 'campHunters', npcs: 2, npcHunter: true,
-  },
-  {
-    id: 'wildgate_e',
-    name: 'AN UNWATCHED GATE',
-    x: 198, z: 96, pad: 12, radius: 24, stamp: 'wildGate', rank: 'E',
-  },
-  {
-    id: 'camp_farmstead',
-    name: 'THE OUTFARM',
-    x: 150, z: 200, pad: 10, radius: 24, stamp: 'campFarmstead', npcs: 1,
-  },
-  {
-    id: 'verge_ruin_hall',
-    name: 'THE ROOFLESS HALL',
-    x: 40, z: 210, pad: 10, radius: 24, stamp: 'ruinHall',
-  },
-  {
-    id: 'wildgate_c',
-    name: 'A SEALED WILD GATE',
-    x: -62, z: 206, pad: 12, radius: 24, stamp: 'wildGate', rank: 'C',
-  },
-  {
-    id: 'verge_watchtower',
-    name: 'THE ASHREACH WATCH',
-    // North, on the Breach side: a tower on the skyline is the only landmark
-    // out here that reads from inside the walls.
-    x: -30, z: -208, pad: 10, radius: 24, stamp: 'watchtower',
-  },
-];
-
-// Rules from the spec's poiRules, as numbers so the validator and the harness
-// can share them.
-const POI_MIN_SEP = 55;          // metres between POI centres
-const POI_MIN_WALL = 30;         // metres outside the city wall (WALL_HALF 88)
-const POI_MIN_BREACH = 40;       // metres from the Breach ash ring's centre
-const POI_MAX_SLOPE = 0.3;
-const POI_SEAM_CLEAR = 170;      // = city.js BLEND_R1; pads must not reach it
-const WALL_HALF = 88;
+// The table itself (anchors, pads, npc counts) is spec.verge.pois, and the
+// rule numbers are spec.verge.poiRules / spec.verge.poiFeather — placement and
+// validation below read them through this.city.spec, so the harness, the
+// builder and the descriptor can never quote three different tables.
 
 // ---------------------------------------------------------------------------
 
@@ -446,7 +399,11 @@ export class Frontier {
       size: FRONTIER_HALF * 2,
       cell: FRONTIER_CELL,
       seed,
-      edge: VERGE_EDGE,
+      edge: city.spec.terrain.vergeEdge,
+      // The owner's descriptor, so both fields evaluate ONE settlement's
+      // surface — the same guarantee the shared groundBase already gives the
+      // maths, extended to the maths' parameters.
+      spec: city.spec,
     }).bake();
 
     // POIs BEFORE the ground mesh: each one carves a flat pad, and the mesh is
@@ -455,7 +412,7 @@ export class Frontier {
     this._placePois();
     for (const p of this.pois) {
       this.field.addFlat({
-        x: p.pos.x, z: p.pos.z, radius: p.pad, feather: POI_FEATHER,
+        x: p.pos.x, z: p.pos.z, radius: p.pad, feather: city.spec.verge.poiFeather,
         height: this.field.height(p.pos.x, p.pos.z),
       });
     }
@@ -526,6 +483,9 @@ export class Frontier {
     const f = this.field;
     const stride = f.stride;
     const seed = f.seed;
+    const BANDS = this.city.spec.verge.bands;
+    const BREACH_Z = this.city.spec.portals.breach.z;
+    const WEST_MESH_EDGE = -this.city.spec.wall.worldHalf;  // the city ground mesh's own west rim
 
     const meadow = new THREE.Color(0x6d8c4a);
     const meadowWarm = new THREE.Color(0x8f9c3e);
@@ -707,7 +667,7 @@ export class Frontier {
    */
   _placePois() {
     const rnd = this.rnd;
-    for (const def of POIS) {
+    for (const def of this.city.spec.verge.pois) {
       let x = def.x, z = def.z;
       // Up to eight seeded tries at a jittered spot, then the anchor — which is
       // authored to satisfy every rule, so placement can never fail outright.
@@ -747,23 +707,26 @@ export class Frontier {
    * POI list rather than trusting a comment.
    */
   _validatePlacement(def, x, z, ignoreId = null) {
+    const S = this.city.spec;
+    const V = S.verge;
+    const R = V.poiRules;
     const bad = [];
     const rc = Math.max(Math.abs(x), Math.abs(z));
-    if (rc < POI_MIN_R) bad.push('poi_min_r');
+    if (rc < V.poiMinR) bad.push('poi_min_r');
     // The pad must not reach the radius where City.heightAt hands authority
-    // from the city field to this one — see the note above POIS.
-    if (rc - (def.pad + POI_FEATHER) <= POI_SEAM_CLEAR) bad.push('pad_reaches_seam');
-    if (rc > SCATTER_OUT) bad.push('outside_walkable');
-    if (x <= CLIFF_X) bad.push('west_of_cliff');
-    if (Math.max(Math.abs(x), Math.abs(z)) - WALL_HALF < POI_MIN_WALL) bad.push('too_close_to_wall');
-    if (Math.hypot(x, z - BREACH_Z) < POI_MIN_BREACH) bad.push('breach_ash');
-    if (this.field && this.field.slope(x, z) > POI_MAX_SLOPE) bad.push('slope');
-    for (const other of POIS) {
+    // from the city field to this one — see the note above the pois table.
+    if (rc - (def.pad + V.poiFeather) <= R.seamClear) bad.push('pad_reaches_seam');
+    if (rc > V.limit - 6) bad.push('outside_walkable');
+    if (x <= S.wall.cliffX) bad.push('west_of_cliff');
+    if (Math.max(Math.abs(x), Math.abs(z)) - S.wall.half < R.minWall) bad.push('too_close_to_wall');
+    if (Math.hypot(x, z - S.portals.breach.z) < R.minBreach) bad.push('breach_ash');
+    if (this.field && this.field.slope(x, z) > R.maxSlope) bad.push('slope');
+    for (const other of V.pois) {
       if (other.id === def.id || other.id === ignoreId) continue;
       const p = this.pois.find((q) => q.id === other.id);
       const ox = p ? p.pos.x : other.x;
       const oz = p ? p.pos.z : other.z;
-      if (Math.hypot(x - ox, z - oz) < POI_MIN_SEP) { bad.push('separation'); break; }
+      if (Math.hypot(x - ox, z - oz) < R.minSep) { bad.push('separation'); break; }
     }
     return bad;
   }
@@ -1266,6 +1229,8 @@ export class Frontier {
 
   /** One candidate point in the species' band, on the square annulus. */
   _pick(spec, rnd) {
+    const V = this.city.spec.verge;
+    const SCATTER_IN = V.scatterIn, SCATTER_OUT = V.limit - 6;
     let az;
     if (spec.verge) {
       // Ground tufts hug the lines the town's four avenues point down — the
@@ -1277,7 +1242,7 @@ export class Frontier {
       const lane = lanes[Math.floor(rnd() * lanes.length)];
       az = lane + (rnd() * 2 - 1) * 11;
     } else if (spec.bands) {
-      const arc = BANDS[spec.bands[Math.floor(rnd() * spec.bands.length)]].arc;
+      const arc = V.bands[spec.bands[Math.floor(rnd() * spec.bands.length)]].arc;
       az = arc[0] + rnd() * (arc[1] - arc[0]);
     } else {
       // Bandless fallback — every species in the table today names its bands,
@@ -1301,10 +1266,11 @@ export class Frontier {
    * can actually hold.
    */
   _spotOk(x, z, clearance, spec) {
-    if (x < CLIFF_X + 8) return false;
+    const S = this.city.spec;
+    if (x < S.wall.cliffX + 8) return false;
     const rc = Math.max(Math.abs(x), Math.abs(z));
-    if (rc < SCATTER_IN || rc > SCATTER_OUT) return false;
-    if (Math.hypot(x, z - BREACH_Z) < 26) return false;
+    if (rc < S.verge.scatterIn || rc > S.verge.limit - 6) return false;
+    if (Math.hypot(x, z - S.portals.breach.z) < 26) return false;
     if (this.field.slope(x, z) > 0.4) return false;
     if (spec.high != null && this.field.height(x, z) < spec.high) return false;
     for (const o of this._solids) {
@@ -1443,7 +1409,7 @@ export class Frontier {
         discovered: p.discovered,
         npcAnchors: p.npcAnchors.length,
         violations: this._validatePlacement(
-          POIS.find((d) => d.id === p.id), p.pos.x, p.pos.z, p.id,
+          this.city.spec.verge.pois.find((d) => d.id === p.id), p.pos.x, p.pos.z, p.id,
         ),
       })),
       limit: VERGE_LIMIT,

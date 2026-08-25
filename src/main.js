@@ -8,6 +8,7 @@ import { loadItemModels, getItemMesh, itemModelStats } from './render/models.js'
 import { loadIconIndex } from './ui/icons.js';
 import { preloadCharacters, characterStats } from './game/entities.js';
 import { FrameClock } from './core/frameclock.js';
+import { PerfProbe } from './core/perfprobe.js';
 import { AppState } from './core/appstate.js';
 import { preloadCity } from './world/city.js';
 import { ShopUI } from './ui/shopui.js';
@@ -309,9 +310,17 @@ const bootTimer = setInterval(() => {
 // fires far faster than 60. FrameClock measures the real panel rate and paces
 // against it; the old inline accumulator here aliased 90 Hz down to 45 fps,
 // which the quality governor then read as a slow device.
+// On-device perf probe (src/core/perfprobe.js). OFF by default; ?perf=1 or
+// 5 rapid taps on the title's build stamp arm it. It rides the SAME onFrame
+// callback as the game — this is the project's one central per-frame tick, so
+// hooking here measures exactly the dt the game paced against, and the probe's
+// snapshot/persist timers accumulate that dt (no setInterval), so a
+// backgrounded tab stops sampling instead of logging idle noise. When off,
+// probe.frame is a single boolean check.
+const probe = new PerfProbe({ game });
 const clock = new FrameClock({
   targetFps: 60,
-  onFrame: (dt) => game.update(dt),
+  onFrame: (dt) => { game.update(dt); probe.frame(dt); },
 });
 // Keep the governor's thresholds on the same target the clock is pacing to.
 game.quality?.setTargetFps(clock.targetFps);

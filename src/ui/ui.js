@@ -33,7 +33,7 @@ const ARCHON_ULTIMATE = {
 // Injected once, on first use — ui.js owns no stylesheet, and these handful
 // of rules are not worth a styles.css merge seam (the cityui precedent).
 const ARCHON_CSS = `
-#archonPanel{z-index:70}
+#archonPanel{z-index:var(--z-archon)}
 #archonPanel .gate .aff{margin-left:auto;font-size:10px;letter-spacing:.12em;
   color:var(--gold);border:1px solid rgba(255,194,75,.45);border-radius:999px;
   padding:2px 8px;white-space:nowrap;align-self:center}
@@ -84,9 +84,7 @@ export class UI {
     click('btnHow', () => this.show('how'));
     click('btnHowClose', () => this.hide('how'));
     click('btnGatesBack', () => { this.hide('gates'); this.show('title'); });
-    click('btnReset', () => {
-      if (confirm('Erase all Breaker progress? This cannot be undone.')) this.onReset();
-    });
+    click('btnReset', () => this._showEraseConfirm());
 
     // Hunter body select. The contract with the combat layer is exactly
     // save.playerBody === 'male' | 'female'; entities.js picks the rig and
@@ -201,6 +199,70 @@ export class UI {
       }
       list.appendChild(el);
     });
+  }
+
+  // ------------------------------------------------------- erase confirm
+  //
+  // The ERASE BREAKER DATA gate used to be a native confirm(): the ONE piece
+  // of browser/OS chrome in the whole game, in the system font, and inside
+  // the Android WebView it looks like a permissions dialog rather than a game
+  // asking a question. This is the same .screen/.panel/.btn stack every other
+  // question uses. Built lazily — a save that never erases pays no DOM — and
+  // with createElement/textContent throughout: all strings are authored here,
+  // but a markup sink is a markup sink whatever we believe about its inputs
+  // today. Cancel is the styled default; the destructive button wears the
+  // danger colour and never .primary.
+  _ensureEraseConfirm() {
+    if (this._erasePanel) return this._erasePanel;
+    const screen = document.createElement('div');
+    screen.id = 'eraseConfirm';
+    screen.className = 'screen overlay hidden';
+    // A modal question lives on the ladder's modal rung, DECLARED — without
+    // this it would sit at .screen's --z-screen:20 and beat the equally-z'd
+    // title screen only by body-append order, a tie the next appended screen
+    // could flip.
+    screen.style.zIndex = 'var(--z-modal)';
+    const panel = document.createElement('div');
+    panel.className = 'panel';
+    const h = document.createElement('h2');
+    h.textContent = 'ERASE BREAKER DATA';
+    h.style.color = 'var(--danger)';
+    panel.appendChild(h);
+    const sub = document.createElement('p');
+    sub.className = 'panel-sub';
+    // The exact sentence the old confirm() asked — same decision, new chrome.
+    sub.textContent = 'Erase all Breaker progress? This cannot be undone.';
+    panel.appendChild(sub);
+    const keep = document.createElement('button');
+    keep.className = 'btn primary';
+    keep.id = 'eraseCancel';
+    keep.type = 'button';
+    keep.textContent = 'KEEP MY BREAKER';
+    keep.addEventListener('click', () => { this.audio.ui(); this.hide('eraseConfirm'); });
+    panel.appendChild(keep);
+    const erase = document.createElement('button');
+    erase.className = 'btn';
+    erase.id = 'eraseYes';
+    erase.type = 'button';
+    erase.textContent = 'ERASE EVERYTHING';
+    erase.style.borderColor = 'rgba(255,77,109,.6)';
+    erase.style.color = 'var(--danger)';
+    erase.addEventListener('click', () => {
+      this.audio.ui();
+      this.hide('eraseConfirm');
+      // Same wire as the old confirm()'s true branch: main.js owns the wipe.
+      this.onReset();
+    });
+    panel.appendChild(erase);
+    screen.appendChild(panel);
+    document.body.appendChild(screen);
+    this._erasePanel = screen;
+    return screen;
+  }
+
+  _showEraseConfirm() {
+    this._ensureEraseConfirm();
+    this.show('eraseConfirm');
   }
 
   showPause() {

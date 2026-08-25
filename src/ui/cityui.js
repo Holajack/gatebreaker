@@ -23,7 +23,11 @@ import {
 } from '../game/classes.js';
 
 const CSS = `
-#cityUi { position: fixed; inset: 0; pointer-events: none; z-index: 40;
+/* The blue-white --ui-city-* family lives in styles.css's :root token block
+   with the rest of the design tokens: this sheet is injected into the same
+   document, so var() resolves against the same :root, and the street palette
+   can no longer fork from the file that names it. */
+#cityUi { position: fixed; inset: 0; pointer-events: none; z-index: var(--z-city);
   font-family: inherit; }
 #cityUi.hidden { display: none; }
 
@@ -31,8 +35,8 @@ const CSS = `
   position: absolute; top: max(10px, env(safe-area-inset-top)); left: 50%;
   transform: translateX(-50%);
   padding: 5px 16px; border-radius: 999px;
-  background: rgba(6,9,18,0.52); border: 1px solid rgba(190,210,255,0.16);
-  color: #dce6ff; font-size: 12px; letter-spacing: 0.22em; font-weight: 700;
+  background: rgba(6,9,18,0.52); border: 1px solid var(--ui-city-border);
+  color: var(--ui-city-text); font-size: 12px; letter-spacing: 0.22em; font-weight: 700;
   text-transform: uppercase; white-space: nowrap;
   opacity: 0; transition: opacity 320ms ease;
 }
@@ -43,8 +47,8 @@ const CSS = `
   left: 50%; transform: translateX(-50%);
   display: flex; align-items: center; gap: 8px;
   padding: 4px 12px; border-radius: 999px;
-  background: rgba(6,9,18,0.42); border: 1px solid rgba(190,210,255,0.12);
-  color: #b9c6e8; font-size: 11px; letter-spacing: 0.14em;
+  background: rgba(6,9,18,0.42); border: 1px solid var(--ui-city-border-dim);
+  color: var(--ui-city-text-dim); font-size: 11px; letter-spacing: 0.14em;
   opacity: 0; transition: opacity 260ms ease;
 }
 #cityCompass.on { opacity: 1; }
@@ -55,9 +59,9 @@ const CSS = `
   max-width: min(46vw, 340px);
   padding: 9px 14px; border-radius: 12px;
   background: rgba(6,9,18,0.72);
-  border: 1px solid rgba(190,210,255,0.2);
+  border: 1px solid var(--ui-city-border-strong);
   border-left-width: 4px;
-  color: #eaf0ff; text-align: right;
+  color: var(--ui-city-text-bright); text-align: right;
   opacity: 0; transform: translateY(8px);
   transition: opacity 160ms ease, transform 160ms ease;
 }
@@ -65,8 +69,8 @@ const CSS = `
 #cityPrompt b { display: block; font-size: 14px; letter-spacing: 0.16em;
   text-transform: uppercase; }
 #cityPrompt small { display: block; margin-top: 2px; font-size: 11px;
-  letter-spacing: 0.08em; color: #97a4c8; }
-#cityPrompt.locked b { color: #ff9fb0; }
+  letter-spacing: 0.08em; color: var(--ui-city-sub); }
+#cityPrompt.locked b { color: var(--ui-city-locked); }
 
 #cityConfirm {
   position: absolute; right: 20px; bottom: 34px;
@@ -75,8 +79,8 @@ const CSS = `
   display: none; align-items: center; justify-content: center;
   flex-direction: column; gap: 1px;
   background: rgba(14,20,38,0.9);
-  border: 2px solid rgba(190,210,255,0.55);
-  color: #eaf0ff; font-size: 10px; letter-spacing: 0.14em; font-weight: 700;
+  border: 2px solid var(--ui-city-edge);
+  color: var(--ui-city-text-bright); font-size: 10px; letter-spacing: 0.14em; font-weight: 700;
   -webkit-tap-highlight-color: transparent; touch-action: manipulation;
   box-shadow: 0 0 18px rgba(0,0,0,0.5);
 }
@@ -199,7 +203,7 @@ export class CityUI {
       return;
     }
     const color = prompt.rank ? PORTAL_COLORS[prompt.rank] : null;
-    this.promptEl.style.borderLeftColor = color ? hex(color) : 'rgba(190,210,255,0.5)';
+    this.promptEl.style.borderLeftColor = color ? hex(color) : 'var(--ui-city-edge-soft)';
     this.promptTitle.textContent = prompt.label || '';
     // citymode still labels unbuilt doors "NOT YET OPEN", which reads as a dev
     // teaser for missing content. Until every district door leads somewhere,
@@ -211,7 +215,7 @@ export class CityUI {
 
     this.confirmCaption.textContent = prompt.locked ? 'LOCKED' : (prompt.kind === 'portal' ? 'ENTER' : 'OPEN');
     this.confirmEl.classList.toggle('locked', Boolean(prompt.locked));
-    this.confirmEl.style.borderColor = color && !prompt.locked ? hex(color) : 'rgba(190,210,255,0.55)';
+    this.confirmEl.style.borderColor = color && !prompt.locked ? hex(color) : 'var(--ui-city-edge)';
     this.confirmEl.classList.add('on');
   }
 
@@ -275,7 +279,7 @@ export class CityUI {
 // differs.
 
 const ASSAY_CSS = `
-#assayPanel { z-index: 60; }
+#assayPanel { z-index: var(--z-modal); }
 body.gb-assay #cityUi { display: none !important; }
 
 #assayPanel .assay-strip {

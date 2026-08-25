@@ -257,7 +257,7 @@ const CSS = `
 /* .screen is z-index 20 and #cityUi is 40, so without this the district
    banner and the live OPEN button render ON TOP of the panel and eat taps —
    the same fix #shop needed, for the same reason. */
-#inv { z-index: 60; }
+#inv { z-index: var(--z-modal); }
 body.gb-inv #cityUi { display: none !important; }
 /* The HUD sits BELOW #inv (z-index 10) and is pointer-events:none, so it
    never ate taps — but its health orb / joystick / minimap now have a

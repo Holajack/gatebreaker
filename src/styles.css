@@ -1,3 +1,58 @@
+/* ---------- design tokens ----------
+   The ONE place UI-wide values live. Six CSS sources share this document (this
+   file, index.html's <style> block, and the sheets cityui/shopui/inventoryui/
+   ui.js inject at runtime) — they all resolve var() against this same :root,
+   so a value named here is a value no injected sheet can silently fork. */
+:root{
+  /* -- menu chrome family: the purple/cyan/gold vocabulary every panel uses -- */
+  --bg:#05060d;
+  --ink:#e8ecff;
+  --dim:#8a93b8;
+  --accent:#7c5cff;
+  --accent2:#22d3ee;
+  --danger:#ff4d6d;
+  --gold:#ffc24b;
+  --panel:rgba(12,14,28,.92);
+  --edge:rgba(124,92,255,.35);
+
+  /* -- city street family: the cooler blue-white the diegetic overlay speaks
+        (cityui.js), deliberately apart from the menu purple so the street
+        reads as world, not menu. Values are exactly what cityui shipped. -- */
+  --ui-city-text:#dce6ff;          /* district banner text */
+  --ui-city-text-dim:#b9c6e8;      /* compass readout */
+  --ui-city-text-bright:#eaf0ff;   /* prompt title + confirm button */
+  --ui-city-sub:#97a4c8;           /* prompt sub-line */
+  --ui-city-locked:#ff9fb0;        /* locked prompt title */
+  --ui-city-border:rgba(190,210,255,.16);        /* district banner border */
+  --ui-city-border-dim:rgba(190,210,255,.12);    /* compass border */
+  --ui-city-border-strong:rgba(190,210,255,.2);  /* prompt card border */
+  --ui-city-edge:rgba(190,210,255,.55);          /* confirm ring / rankless border */
+  --ui-city-edge-soft:rgba(190,210,255,.5);      /* rankless prompt accent */
+
+  /* -- z-index ladder: one token per rung, EVERY stacked surface named. The
+        raw numbers grew per incident (see #toasts' history below); the ladder
+        makes the whole stack legible in one screen. New surfaces take a
+        token, never a bare number. -- */
+  --z-hud:10;       /* #hud — in-game chrome */
+  --z-flash:12;     /* #flash — damage vignette */
+  --z-dmg:15;       /* .dmg — floating damage numbers */
+  --z-screen:20;    /* .screen — boot/title/gates/pause/results/how/levelup */
+  --z-levelup:28;   /* .levelup-flash — the level-up moment, over any screen */
+  --z-city:40;      /* #cityUi — the city's diegetic overlay (cityui.js) */
+  --z-modal:60;     /* #inv / #shop / #assayPanel / .rotate-gate — full-screen
+                       modals that must beat #cityUi's live confirm button */
+  --z-toast:65;     /* #toasts — tops every --z-modal surface; only --z-archon sits above */
+  --z-archon:70;    /* #archonPanel — sits ON the results overlay (ui.js) */
+
+  --safe-b:env(safe-area-inset-bottom,0px);
+  --safe-t:env(safe-area-inset-top,0px);
+  /* The game is locked to landscape, so a phone's camera cutout lands on a LEFT
+     or RIGHT edge, not the top. Only top/bottom were handled, which put the HUD
+     under the notch on every cutout phone held in the usual orientation. */
+  --safe-l:env(safe-area-inset-left,0px);
+  --safe-r:env(safe-area-inset-right,0px);
+}
+
 /* Rajdhani, SIL Open Font License 1.1 — free to bundle and redistribute,
    including commercially. Self-hosted rather than pulled from Google Fonts
    because the APK must work with no network at all. Latin subset only:
@@ -14,25 +69,6 @@
 @font-face{
   font-family:"Rajdhani";font-style:normal;font-weight:700;font-display:swap;
   src:url("./fonts/rajdhani-700.woff2") format("woff2");
-}
-
-:root{
-  --bg:#05060d;
-  --ink:#e8ecff;
-  --dim:#8a93b8;
-  --accent:#7c5cff;
-  --accent2:#22d3ee;
-  --danger:#ff4d6d;
-  --gold:#ffc24b;
-  --panel:rgba(12,14,28,.92);
-  --edge:rgba(124,92,255,.35);
-  --safe-b:env(safe-area-inset-bottom,0px);
-  --safe-t:env(safe-area-inset-top,0px);
-  /* The game is locked to landscape, so a phone's camera cutout lands on a LEFT
-     or RIGHT edge, not the top. Only top/bottom were handled, which put the HUD
-     under the notch on every cutout phone held in the usual orientation. */
-  --safe-l:env(safe-area-inset-left,0px);
-  --safe-r:env(safe-area-inset-right,0px);
 }
 
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -54,7 +90,7 @@ kbd{
 
 /* ---------- screens ---------- */
 .screen{
-  position:fixed;inset:0;z-index:20;
+  position:fixed;inset:0;z-index:var(--z-screen);
   display:flex;align-items:center;justify-content:center;
   padding:calc(24px + var(--safe-t)) calc(20px + var(--safe-r)) calc(24px + var(--safe-b)) calc(20px + var(--safe-l));
 }
@@ -68,7 +104,11 @@ kbd{
 }
 .boot-mark{text-align:center}
 .boot-mark h1{font-size:clamp(30px,9vw,54px);letter-spacing:.22em;font-weight:800}
-.boot-mark .sub{color:var(--accent2);letter-spacing:.42em;font-size:clamp(10px,3vw,13px);margin-top:6px}
+/* "AN OPEN-WORLD GATE-HUNTING RPG" is 30 glyphs; at the old .42em tracking it
+   wanted roughly twice the title column. .18em keeps the subtitle on one line
+   down to the smallest phones. (Collapsed here from index.html's id-scoped
+   override so one file owns the value.) */
+.boot-mark .sub{color:var(--accent2);letter-spacing:.18em;font-size:clamp(10px,3vw,13px);margin-top:6px}
 .rune{
   width:74px;height:74px;margin:0 auto 20px;
   border:2px solid var(--accent);border-radius:50%;
@@ -105,7 +145,10 @@ kbd{
   -webkit-background-clip:text;background-clip:text;color:transparent;
   filter:drop-shadow(0 0 24px rgba(124,92,255,.55));
 }
-.game-sub{color:var(--accent2);letter-spacing:.44em;font-size:clamp(10px,3.2vw,14px);margin-bottom:14px}
+/* .18em, not the old .44em — same one-line-subtitle math as .boot-mark .sub
+   above; the value used to live in index.html's <style> block as an id-scoped
+   override and the base rule here silently lost. One file, one value. */
+.game-sub{color:var(--accent2);letter-spacing:.18em;font-size:clamp(10px,3.2vw,14px);margin-bottom:14px}
 .title-hunter{
   display:flex;justify-content:space-between;
   border:1px solid var(--edge);border-radius:10px;
@@ -177,7 +220,7 @@ kbd{
 .rank-SOVEREIGN{background:rgba(255,194,75,.28);color:var(--gold);letter-spacing:.02em}
 
 /* ---------- HUD ---------- */
-#hud{position:fixed;inset:0;z-index:10;pointer-events:none}
+#hud{position:fixed;inset:0;z-index:var(--z-hud);pointer-events:none}
 .hud-top{
   position:absolute;top:calc(10px + var(--safe-t));left:calc(12px + var(--safe-l));right:calc(12px + var(--safe-r));
   display:flex;gap:12px;align-items:flex-start;
@@ -303,7 +346,7 @@ kbd{
      so the two partially-transparent text layers double-exposed into an
      unreadable smear instead of the toast simply covering the bar briefly
      the way it does everywhere else in the game. */
-  z-index:65;pointer-events:none;display:flex;flex-direction:column;gap:6px;align-items:center;
+  z-index:var(--z-toast);pointer-events:none;display:flex;flex-direction:column;gap:6px;align-items:center;
 }
 .toast{
   padding:9px 18px;border-radius:9px;
@@ -318,7 +361,7 @@ kbd{
 @keyframes toastOut{to{opacity:0;transform:translateY(-10px)}}
 
 .dmg{
-  position:fixed;z-index:15;pointer-events:none;
+  position:fixed;z-index:var(--z-dmg);pointer-events:none;
   font-size:17px;font-weight:800;text-shadow:0 2px 6px #000,0 0 12px currentColor;
   animation:dmgFloat .85s ease-out forwards;
 }
@@ -331,7 +374,7 @@ kbd{
 }
 
 #flash{
-  position:fixed;inset:0;z-index:12;pointer-events:none;
+  position:fixed;inset:0;z-index:var(--z-flash);pointer-events:none;
   background:var(--danger);opacity:0;transition:opacity .12s ease;
 }
 
@@ -359,7 +402,7 @@ kbd{
 /* ---------- level-up moment ---------- */
 .levelup-flash{
   position:fixed;left:50%;top:38%;transform:translate(-50%,-50%);
-  z-index:28;pointer-events:none;text-align:center;
+  z-index:var(--z-levelup);pointer-events:none;text-align:center;
   animation:luFlash 1.7s ease-out forwards;
 }
 .levelup-flash b{
@@ -408,7 +451,7 @@ kbd{
 
 /* ---------- portrait gate ---------- */
 .rotate-gate{
-  position:fixed;inset:0;z-index:60;
+  position:fixed;inset:0;z-index:var(--z-modal);
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
   background:#05060d;color:var(--ink);text-align:center;
   padding:24px;letter-spacing:.2em;

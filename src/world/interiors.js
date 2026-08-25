@@ -40,20 +40,16 @@ import { pointSegDistance, segRectDistance } from './layoutrules.js';
 // quads on the city's OWN shared window material — so they ramp with the clock
 // for one extra draw call across all five buildings and zero extra materials.
 
-// Mirrors of city.js's own constants. Imported would be cleaner; city.js does
-// not export them, and reaching across the (deliberate, documented) import
-// cycle for four numbers is worse coupling than four numbers. frontier.js
-// mirrors the same three for the same reason.
-const WALL_HALF = 88;
-const PLAZA_R = 26;
-// The market street's stalls are placed unconditionally by city._buildProps —
-// they do not test this.boxes — so a shop dropped on the market strip gets a
-// stall standing in its front room. This is that strip, padded.
-const MARKET_ZONE = { x0: -18, x1: 10, z0: 24, z1: 68 };
-// city._layout places the spire FIRST, searching within 30 m of this point for
-// a free 2x2. Blocking cells near it is how you get a town with no landmark and
-// a failing validateLayout, so the plot search stays clear of it.
-const SPIRE_KEEP = { x: 16, z: -38, r: 11 };
+// The wall/plaza extents and the market/spire reservations used to be mirrors
+// of city.js constants ("four numbers is worse coupling than an import across
+// the cycle"). The settlement descriptor dissolved that trade: _plotOk reads
+// them through this.city.spec — the owner's own numbers, at call time, so the
+// cycle is still never touched at module eval and the mirror can never drift.
+// marketZone exists because city._buildProps places its stalls
+// unconditionally (they do not test this.boxes); spireKeep because
+// city._layout places the spire FIRST, searching within 30 m of that point
+// for a free 2x2, and blocking cells near it is how you get a town with no
+// landmark and a failing validateLayout.
 // Clearance from a street EDGE to a footprint. 1.5 m is a body's width plus
 // slack: enough that the doorstep is not in the gutter, small enough that a
 // shop still fronts its street.
@@ -69,9 +65,11 @@ const DOOR_GAP = 2.0;
 const WALL_T = 0.2;
 
 /**
- * The five. `prefer` is where the building WANTS to stand — the plot search
- * takes the nearest legal footprint to it, so a street or district constant
- * that moves later moves the building instead of burying it in a road.
+ * The five. WHERE each one wants to stand is settlement identity and lives on
+ * the descriptor (spec.interiors.prefer, keyed by id) — the plot search takes
+ * the nearest legal footprint to that point, so a street or district value
+ * that moves later moves the building instead of burying it in a road. What
+ * stays here is structure: footprint, wall style, dressing.
  *
  * `cells` is [width, depth] in 2 m kit cells. The spec's minimum viable
  * interior is 3x2; the smallest here is 3x3 (a 5.6 x 5.6 m room).
@@ -84,9 +82,9 @@ export const ENTERABLES = [
   {
     id: 'assay',
     name: 'THE ASSAY HALL',
-    // West of the north avenue, opposite the spire: the avenue runs straight
-    // through the Assay pad at x = 0, and the spire has claimed the east side.
-    prefer: { x: -14, z: -41 },
+    // Prefers west of the north avenue, opposite the spire: the avenue runs
+    // straight through the Assay pad at x = 0, and the spire has claimed the
+    // east side.
     cells: [5, 4],
     style: 'civic',
     dressing: 'assay',
@@ -94,7 +92,6 @@ export const ENTERABLES = [
   {
     id: 'ashworks',
     name: 'THE ASHWORKS',
-    prefer: { x: 44, z: 13 },
     cells: [4, 4],
     style: 'stone',
     dressing: 'ashworks',
@@ -102,11 +99,11 @@ export const ENTERABLES = [
   {
     id: 'exchange',
     name: 'THE EXCHANGE',
-    // EAST of the market street, not on it — see MARKET_ZONE. The west side is
-    // a 8.5 m slot between the market strip and the x = -32 cross street, which
-    // no legal 8 m footprint fits into on the 2 m grid; asking for it anyway
-    // slid the Exchange 40 m out of its own district before this was measured.
-    prefer: { x: 17, z: 42 },
+    // Prefers EAST of the market street, not on it — see spec.interiors
+    // .marketZone. The west side is a 8.5 m slot between the market strip and
+    // the x = -32 cross street, which no legal 8 m footprint fits into on the
+    // 2 m grid; asking for it anyway slid the Exchange 40 m out of its own
+    // district before this was measured.
     cells: [4, 3],
     style: 'stone',
     dressing: 'exchange',
@@ -117,7 +114,6 @@ export const ENTERABLES = [
     // the only NEW service this wave and that a proper name needs the owner's
     // sign-off; an unsigned-off name is harder to take back than no name.
     name: 'THE TAVERN',
-    prefer: { x: -46, z: 11 },
     cells: [4, 3],
     style: 'timber',
     dressing: 'tavern',
@@ -125,11 +121,11 @@ export const ENTERABLES = [
   {
     id: 'stash_annex',
     name: 'THE STASH',
-    // West of the market street, facing the Exchange across it. 3x2 — the
-    // spec's minimum viable footprint — because that slot is bounded by the
-    // market strip, the x = -32 cross street AND the 58 m ring road, and the
-    // 3x3 version failed the ring by 0.2 m and slid 30 m out of the district.
-    prefer: { x: -22, z: 41 },
+    // Prefers west of the market street, facing the Exchange across it. 3x2 —
+    // the spec's minimum viable footprint — because that slot is bounded by
+    // the market strip, the x = -32 cross street AND the 58 m ring road, and
+    // the 3x3 version failed the ring by 0.2 m and slid 30 m out of the
+    // district.
     cells: [3, 2],
     style: 'timber',
     dressing: 'stash',
@@ -448,14 +444,16 @@ export class Interiors {
     return false;
   }
 
-  /** The nearest legal footprint to `def.prefer`, or null. */
+  /** The nearest legal footprint to the descriptor's prefer point, or null. */
   _findPlot(def) {
     const [wc, dc] = def.cells;
+    const prefer = this.city.spec.interiors.prefer[def.id];
+    if (!prefer) return null;                    // a settlement without this service
     // Search the kit grid outward from the preferred cell. Deterministic: no
     // rng at all, so the five plots are a function of the street plan and the
     // terrain, and a re-run of the same seed puts them in the same place.
-    const pci = Math.round(def.prefer.x / KIT_CELL - (wc - 1) / 2);
-    const pcj = Math.round(def.prefer.z / KIT_CELL - (dc - 1) / 2);
+    const pci = Math.round(prefer.x / KIT_CELL - (wc - 1) / 2);
+    const pcj = Math.round(prefer.z / KIT_CELL - (dc - 1) / 2);
     const span = 12;                              // +/- 24 m of search
     let best = null, bestScore = Infinity;
     for (let dj = -span; dj <= span; dj++) {
@@ -463,7 +461,7 @@ export class Interiors {
         const ci = pci + di, cj = pcj + dj;
         const cx = (ci + (wc - 1) / 2) * KIT_CELL;
         const cz = (cj + (dc - 1) / 2) * KIT_CELL;
-        const score = Math.hypot(cx - def.prefer.x, cz - def.prefer.z);
+        const score = Math.hypot(cx - prefer.x, cz - prefer.z);
         if (score >= bestScore) continue;         // cheap reject before the work
         if (!this._plotOk(ci, cj, wc, dc)) continue;
         bestScore = score;
@@ -475,6 +473,8 @@ export class Interiors {
 
   _plotOk(ci, cj, wc, dc) {
     const city = this.city;
+    const { half: WALL_HALF, plazaR: PLAZA_R } = city.spec.wall;
+    const { marketZone: MARKET_ZONE, spireKeep: SPIRE_KEEP } = city.spec.interiors;
     const x0 = ci * KIT_CELL - KIT_CELL / 2;
     const x1 = (ci + wc - 1) * KIT_CELL + KIT_CELL / 2;
     const z0 = cj * KIT_CELL - KIT_CELL / 2;

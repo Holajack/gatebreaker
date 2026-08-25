@@ -11,12 +11,10 @@
        workstream owns. Every override below is id-scoped on purpose: in the
        BUILT page Vite hoists the compiled stylesheet link to the END of head,
        behind this block, so equal-specificity overrides win in dev and then
-       silently lose in production. Id specificity is order-proof. */
-
-    /* "AN OPEN-WORLD GATE-HUNTING RPG" is 30 glyphs; at styles.css's .44em
-       tracking it wants roughly twice the 420px title column. Tighter tracking
-       keeps the subtitle on one line down to the smallest phones. */
-    #title .game-sub, #boot .sub { letter-spacing: .18em; }
+       silently lose in production. Id specificity is order-proof.
+       (The subtitle letter-spacing override that used to open this block was
+       collapsed INTO styles.css's base rules — same-property duplicates across
+       the two files are exactly the silent-override hazard described above.) */
 
     /* Hunter body select: a two-segment control, thumb-sized on a phone. */
     .body-select { display: flex; gap: 8px; }
@@ -125,7 +123,7 @@
   <div id="title" class="screen hidden">
     <div class="title-inner">
       <h1 class="game-title">EMBERGATE</h1>
-      <span class="build-stamp">BUILD 2.2-heft</span>
+      <span class="build-stamp">BUILD 2.3-bedrock</span>
       <p class="game-sub">AN OPEN-WORLD GATE-HUNTING RPG</p>
       <div class="title-hunter">
         <span id="titleName">UNRANKED BREAKER</span>

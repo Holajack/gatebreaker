@@ -28,7 +28,7 @@ const CSS = `
    banner, the compass and — worse — the live OPEN button render ON TOP of the
    panel, and the button is the one node in cityui that takes pointer events.
    Raising the panel and hiding the city's overlay while it is up fixes both. */
-#shop { z-index: 60; }
+#shop { z-index: var(--z-modal); }
 body.gb-shop #cityUi { display: none !important; }
 
 #shop .shop-wallet {

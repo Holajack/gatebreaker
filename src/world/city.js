@@ -7,9 +7,10 @@ import {
 import { NatureField, loadNatureKit, natureKitStats } from './naturekit.js';
 import { Citizens } from './citizens.js';
 // Cyclic on purpose and safe: frontier.js imports terrain constants + HeightField
-// + groundBase from here, this file imports only the Frontier class and
-// VERGE_LIMIT, and both are read inside methods, never during module evaluation.
-import { Frontier, VERGE_LIMIT } from './frontier.js';
+// + groundBase from here, this file imports only the Frontier class, and it is
+// read inside build(), never during module evaluation. (The walk limit that
+// used to ride along as VERGE_LIMIT is spec.verge.limit now.)
+import { Frontier } from './frontier.js';
 // The five enterable service buildings. Cyclic in the same safe way frontier.js
 // is: interiors.js imports nothing from here at module scope, and this file
 // touches Interiors only inside build()/dispose().
@@ -21,6 +22,10 @@ import {
   LAYOUT_RULES, DISTRICT_PROFILES, districtOfPoint, silhouetteTuple,
   corridorCap, pointSegDistance, segParam, compareAlongStreet,
 } from './layoutrules.js';
+// The settlement descriptor — this town's identity as one data object. A LEAF
+// module (imports nothing), so reading it here at module-eval time is safe
+// even though this file sits inside the frontier/interiors import cycle.
+import { THRESHOLD } from './settlements.js';
 import { GLOW_LAYER } from '../render/glow.js';
 import { makeSky, updateSkyState } from '../render/sky.js';
 import { buildBiomeEnvironment } from '../render/env.js';
@@ -71,38 +76,35 @@ export const PORTAL_COLORS = {
   ANOMALY: 0xff7af0,
 };
 
-// Geometry of the town, in metres. Everything else derives from these.
-// 340 x 340 m of ground, of which 176 x 176 is inside the wall — the spec's
-// figure. The walled part is deliberately the smaller share: a hub you cross
-// in 25 seconds with something every 15 m beats a bigger one you cross in 50
-// seconds with nothing in between, and the Breach road spends the rest.
-const WALL_HALF = 88;           // walled interior spans -88..88 on x and z
-const WORLD_HALF = 170;         // heightfield half-extent (340 m square)
-const GROUND_CELL = 3.4;        // heightfield / ground-mesh resolution
-const PLAZA_R = 26;             // flagstone disc at the centre
-const PORTAL_RING = 22;         // where E..A stand
-const BREACH_Z = -126;          // the S portal, outside the north wall
-const CLIFF_X = -WALL_HALF;     // ground falls away west of here
-const BUILDING_BUDGET = 92;     // hard cap; see decision 3 above
-const WALK_LIMIT = 134;         // how far out resolve() lets anything walk
+// Geometry of the town, in metres — moved to THRESHOLD.wall in settlements.js
+// so a second town can exist without forking this file. Everything else still
+// derives from those numbers; every builder below reads them through this.spec
+// (or a spec parameter) INSIDE the function that needs them, because a
+// module-eval read of a per-City value is how a cloned descriptor would
+// silently build somebody else's town. The 340/176 sizing rationale rode along
+// to the descriptor; the walled part is deliberately the smaller share.
 
 // --- the frontier's half of the terrain contract ---------------------------
 // These live HERE, not in frontier.js, because city.js owns HeightField and the
 // shared analytic surface both fields sample. frontier.js imports them; the only
-// thing that flows the other way is the Frontier class itself and VERGE_LIMIT,
-// and both are read at call time, so the import cycle never touches a binding
-// during module evaluation.
+// thing that flows the other way is the Frontier class itself, read at call
+// time, so the import cycle never touches a binding during module evaluation.
 //
-// 6.8 is EXACTLY 2 x GROUND_CELL and 285.6 is EXACTLY 42 x 6.8, which is what
+// 6.8 is EXACTLY 2 x wall.groundCell and 285.6 is EXACTLY 42 x 6.8, which is what
 // makes the two lattices interlock: 170 = 25 x 6.8, so every second city vertex
 // lands on a frontier vertex and no seam vertex is ever orphaned.
-export const FRONTIER_CELL = GROUND_CELL * 2;   // 6.8
+// Exported CONSTANTS rather than this.spec reads, deliberately: they are the
+// terrain contract's public face (frontier.js and tools/ import them), and
+// deriving them from THRESHOLD here keeps one authoring point without changing
+// any importer. A future second settlement that wants a different lattice pays
+// for that refactor when it exists; today's descriptor clones share Threshold's.
+export const FRONTIER_CELL = THRESHOLD.wall.groundCell * 2;   // 6.8
 export const FRONTIER_HALF = FRONTIER_CELL * 42; // 285.6
 
 // Where the ground stops being ground and falls into sky. Without a frontier
-// this is the shipped 140..156 lip; with one it moves out past the walk limit.
-const CITY_EDGE = [140, 156];
-export const VERGE_EDGE = [264, 278];
+// this is the shipped 140..156 lip (THRESHOLD.terrain.cityEdge); with one it
+// moves out past the walk limit.
+export const VERGE_EDGE = THRESHOLD.terrain.vergeEdge;
 
 // heightAt authority: city field inside, frontier field outside, linear blend
 // between. Chebyshev radius (max(|x|,|z|)), matching the square lip and the
@@ -116,34 +118,20 @@ export const VERGE_EDGE = [264, 278];
 // sits wholly inside both fields' real data. It costs nothing: the stitch makes
 // the two fields identical from 155 outward, so the band is a formality either
 // way, and the frontier is authoritative from 170 where the city's data stops.
-export const BLEND_R0 = 162;
-export const BLEND_R1 = 170;
+export const BLEND_R0 = THRESHOLD.terrain.blend[0];
+export const BLEND_R1 = THRESHOLD.terrain.blend[1];
 
-// Where the city field stops being its own fine surface and becomes a resampled
-// copy of the frontier's coarse one. See HeightField.bake.
-const STITCH_R0 = 138;
-const STITCH_R1 = 155;
-
-// -Z is north. Angles below are measured with 0 = east and +ve toward north,
-// so the arc reads E..A left-to-right when the player walks in from the south.
-const PORTAL_ANGLES = { E: 198, D: 144, C: 90, B: 36, A: -18 };
-
-/**
- * The six districts of Threshold. `pos` is the interaction / arrival point,
- * `pad` is the radius of level ground carved under it.
- *
- * NOTE: the spec's export comment says "5 entries" but cityHub.districts lists
- * six. Six are built and six are exported — the Breach is a place you walk to,
- * not a footnote. Consume these by `id`, never by index.
- */
-const TOWN_DISTRICTS = [
-  { id: 'plaza',    name: 'THE GATE PLAZA', pos: { x: 0, z: 0 },       pad: PLAZA_R, service: null },
-  { id: 'assay',    name: 'THE ASSAY HALL', pos: { x: 0, z: -38 },     pad: 15, service: 'assay' },
-  { id: 'ashworks', name: 'THE ASHWORKS',   pos: { x: 44, z: 4 },      pad: 16, service: 'barracks' },
-  { id: 'exchange', name: 'THE EXCHANGE',   pos: { x: -4, z: 34 },     pad: 15, service: 'exchange' },
-  { id: 'row',      name: 'QUARTER ROW',    pos: { x: -52, z: 2 },     pad: 14, service: null },
-  { id: 'breach',   name: 'THE BREACH',     pos: { x: 0, z: BREACH_Z }, pad: 18, service: null },
-];
+// The stitch band (where the city field becomes a resampled copy of the
+// frontier's coarse surface — see HeightField.bake) is THRESHOLD.terrain.stitch,
+// read by build() where the field is constructed.
+//
+// Portal angles/ring, the six districts, the interactables table and both
+// biome palettes moved to the descriptor whole — they ARE the town's identity.
+// The notes that governed them (E..A reads left-to-right from the south; six
+// districts not five, consume by id never index; `open` gates the prompt, not
+// the record; assay at z = -32 to clear the C portal's prompt zone; the dusk
+// glow-wash postmortem behind the 15:00 palette) either rode along to
+// settlements.js or stayed at the consumption sites below.
 
 /**
  * The banner list. citymode._updateDistrict walks THIS array every frame and
@@ -160,8 +148,12 @@ const TOWN_DISTRICTS = [
  * the city heightfield and drive the layout occupancy grid, and a POI 200 m out
  * flattening the city field's clamped rim is exactly the seam bug BLEND_R0 was
  * moved to avoid. Generation and signage are deliberately different lists.
+ *
+ * Module-level and THRESHOLD-backed even though districts now live on the
+ * descriptor: citymode imports this binding, and the banner system is a
+ * per-app singleton until a second settlement actually exists.
  */
-export const DISTRICTS = TOWN_DISTRICTS.slice();
+export const DISTRICTS = THRESHOLD.districts.slice();
 
 /** Add a Verge POI to the banner list. Returns the entry so the caller can drop it. */
 export function registerVergeDistrict(entry) {
@@ -171,33 +163,12 @@ export function registerVergeDistrict(entry) {
 
 /** Truncate back to the town six. Idempotent — dispose paths run twice here. */
 export function clearVergeDistricts() {
-  DISTRICTS.length = TOWN_DISTRICTS.length;
+  DISTRICTS.length = THRESHOLD.districts.length;
 }
 
-// Doors the player can stand in front of. Radii are generous because a phone
-// player steers with a thumb, not a mouse.
-//
-// `open` gates the PROMPT, not the record. A door whose feature does not exist
-// yet must not stop the player and announce "NOT YET OPEN" — the playtest
-// called the stash prompt out as exactly that. The closed entries stay in
-// this.interactables (their districts, pads and layout all still stand, and
-// the ids are part of the module's contract), but interactAt() skips them, so
-// nothing in the world advertises a system that is not built. Flip `open` when
-// the feature ships — citymode's confirmPrompt already routes by id.
-//
-// assay sits at z = -32, not -30: at -30 its 4.5 m radius overlapped the C
-// portal's prompt zone (radius 5.2 + 2.2 slack from y = -22) and the two
-// systems fought over the same strip of pavement.
-const INTERACTABLES = [
-  { id: 'barracks', label: 'THE ASHWORKS',   pos: { x: 44, z: 12 },  radius: 4.5, open: false },
-  { id: 'assay',    label: 'THE ASSAY HALL', pos: { x: 0, z: -32 },  radius: 4.5, open: true },
-  { id: 'trial',    label: 'THE SEALED STAIR', pos: { x: -7, z: -38 }, radius: 3.5, open: false },
-  // OPEN as of the weapon shop: game/shop.js + ui/shopui.js are behind this
-  // prompt, and citymode.confirmPrompt routes 'exchange' to them. This is the
-  // `open` flip the comment above describes, not a new mechanism.
-  { id: 'exchange', label: 'THE EXCHANGE',   pos: { x: -4, z: 26 },  radius: 4.5, open: true },
-  { id: 'stash',    label: 'THE STASH',      pos: { x: 6, z: 34 },   radius: 3.5, open: false },
-];
+// The interactables table (doors the player can stand in front of) lives on
+// the descriptor as spec.interactables; the `open`-gates-the-PROMPT contract
+// is documented at _buildInteractables, which is its only consumer.
 
 // Late afternoon, not dusk.
 //
@@ -209,34 +180,26 @@ const INTERACTABLES = [
 // portals still pop in daylight because they are saturated primaries against a
 // muted stone-and-timber palette; a whole town you cannot see does not.
 //
-// GLOW_LAYER now carries the six portals and nothing else.
-const CITY_BIOME = {
-  fog: 0xb6c6dc, ground: 0x5d6a4c, accent: 0xffd9a8,
-  sky: 0x74a2da, pillar: 0x8a90a0, detail: 0xd8e0ee,
-};
-
-// The same palette pre-brightened for makeSky().
+// GLOW_LAYER now carries the six portals and nothing else. The palette itself
+// is spec.palettes.city.
+//
+// spec.palettes.sky is the same palette pre-brightened for makeSky().
 //
 // sky.js feeds its colours to a raw ShaderMaterial through
 // convertSRGBToLinear(), and three's ColorManagement has ALREADY converted the
 // hex on construction — so the sky shader receives linear(linear(c)) and
 // renders roughly one gamma step too dark. That is sky.js's convention and
 // every other biome in the game is authored against it; correcting it here
-// would silently re-tone six dungeons. Compensating locally is the change that
-// does not reach outside this file.
-const SKY_BIOME = {
-  fog: 0xdfe8f4, ground: 0x9aa885, accent: 0xffeccd,
-  sky: 0xb6d3f5, pillar: 0xc2c7d2, detail: 0xeef2f8,
-};
+// would silently re-tone six dungeons. Compensating locally (in the descriptor
+// data) is the change that does not reach outside this settlement.
 
 // --------------------------------------------------------------- day/night
 //
-// The shipped 15:00 fog distances. applyDayState scales BOTH by dayState
-// fogScale (1.0 by day, 0.88 at deep night) rather than re-authoring them per
-// keyframe: the near/far pair is a single "how far can you see" knob and
-// keeping one multiplier on it is what stops the two ends drifting apart.
-const FOG_NEAR = 130;
-const FOG_FAR = 430;
+// The shipped 15:00 fog distances are spec.palettes.fog. applyDayState scales
+// BOTH by dayState fogScale (1.0 by day, 0.88 at deep night) rather than
+// re-authoring them per keyframe: the near/far pair is a single "how far can
+// you see" knob and keeping one multiplier on it is what stops the two ends
+// drifting apart.
 
 // The lit-window quad and the lamp bulb each have ONE shared toneMapped:false
 // MeshBasicMaterial, so the whole day ramp is two colour writes per frame.
@@ -295,7 +258,14 @@ const lerp = (a, b, t) => a + (b - a) * t;
  * applied in sequence: lerping toward -46 twice squares the weight and lands
  * the shipped city 12 m lower than it renders today.
  */
-export function groundBase(x, z, seed, edge = CITY_EDGE) {
+export function groundBase(x, z, seed, edge = null, spec = THRESHOLD) {
+  // `spec` is trailing and defaulted so every existing caller — including the
+  // ones that pass an explicit edge — keeps its exact signature; HeightField
+  // threads its own spec through so a cloned descriptor's fields stay
+  // self-consistent. `edge` still defaults to the settlement's own city lip.
+  const CITY_EDGE = spec.terrain.cityEdge;
+  const CLIFF_X = spec.wall.cliffX;
+  if (!edge) edge = CITY_EDGE;
   const s = 1 / 96;
   let h = (fbm(x * s, z * s, seed, 3) - 0.5) * 5.2;
   h += (fbm(x * s * 3.1 + 17, z * s * 3.1 - 9, seed + 41, 2) - 0.5) * 1.6;
@@ -322,7 +292,7 @@ export function groundBase(x, z, seed, edge = CITY_EDGE) {
   h = lerp(-46, h, 1 - Math.max(worldEdge, westEdge));
 
   // The Breach approach climbs: walking out to the S gate is uphill.
-  const bd = Math.hypot(x, z - BREACH_Z);
+  const bd = Math.hypot(x, z - spec.portals.breach.z);
   h += smoothstep(62, 16, bd) * 7.5;
   return h;
 }
@@ -342,7 +312,7 @@ export class HeightField {
    * `stitch` (frontier builds only) makes this field resample itself onto a
    * coarser lattice near its rim. Non-null means { cell, r0, r1 }.
    */
-  constructor({ size, cell, seed, edge = CITY_EDGE, stitch = null }) {
+  constructor({ size, cell, seed, edge = null, stitch = null, spec = THRESHOLD }) {
     this.size = size;
     this.half = size / 2;
     this.cell = cell;
@@ -350,7 +320,12 @@ export class HeightField {
     this.stride = this.n + 1;
     this.h = new Float32Array(this.stride * this.stride);
     this.seed = seed >>> 0;
-    this.edge = edge;
+    // The settlement descriptor this field's surface belongs to; groundBase
+    // takes its cliff/breach/west-lip terms from it. Defaulted so a field
+    // built without one still evaluates Threshold's surface, exactly as the
+    // old module constants did.
+    this.spec = spec;
+    this.edge = edge || spec.terrain.cityEdge;
     this.stitch = stitch;
     this.flats = [];
   }
@@ -363,7 +338,7 @@ export class HeightField {
 
   /** The undisturbed shape at this field's own edge placement. */
   raw(x, z) {
-    return groundBase(x, z, this.seed, this.edge);
+    return groundBase(x, z, this.seed, this.edge, this.spec);
   }
 
   /**
@@ -389,13 +364,13 @@ export class HeightField {
     const u = x / c - ix, v = z / c - jz;
     const gx = ix * c, gz = jz * c;
     // Split on the a-c diagonal, exactly as height() does.
-    const ha = groundBase(gx, gz, this.seed, this.edge);
-    const hc = groundBase(gx + c, gz + c, this.seed, this.edge);
+    const ha = groundBase(gx, gz, this.seed, this.edge, this.spec);
+    const hc = groundBase(gx + c, gz + c, this.seed, this.edge, this.spec);
     if (u >= v) {
-      const hb = groundBase(gx + c, gz, this.seed, this.edge);
+      const hb = groundBase(gx + c, gz, this.seed, this.edge, this.spec);
       return ha + (hb - ha) * (u - v) + (hc - ha) * v;
     }
-    const hd = groundBase(gx, gz + c, this.seed, this.edge);
+    const hd = groundBase(gx, gz + c, this.seed, this.edge, this.spec);
     return ha + (hc - ha) * u + (hd - ha) * (v - u);
   }
 
@@ -498,30 +473,36 @@ const _n = { x: 0, y: 1, z: 0 };
 // road pieces: paving that IS the ground can never step, float or disagree
 // with heightAt, and it costs zero draw calls and zero triangles.
 
-function buildStreets() {
+function buildStreets(spec = THRESHOLD) {
   const seg = (x1, z1, x2, z2, w) => ({ x1, z1, x2, z2, w });
+  const { half: WALL_HALF, plazaR: PLAZA_R, cliffX: CLIFF_X } = spec.wall;
+  const BREACH_Z = spec.portals.breach.z;
+  const ST = spec.streets;
   const s = [
-    // Four avenues out of the plaza.
-    seg(0, -PLAZA_R, 0, -WALL_HALF + 2, 6),
-    seg(0, PLAZA_R, 0, WALL_HALF - 2, 6),
-    seg(PLAZA_R, 0, WALL_HALF - 2, 0, 6),
-    seg(-PLAZA_R, 0, CLIFF_X + 4, 0, 6),
+    // Four avenues out of the plaza (the west one ends at the overlook).
+    seg(0, -PLAZA_R, 0, -WALL_HALF + ST.avenueStop, ST.avenueW),
+    seg(0, PLAZA_R, 0, WALL_HALF - ST.avenueStop, ST.avenueW),
+    seg(PLAZA_R, 0, WALL_HALF - ST.avenueStop, 0, ST.avenueW),
+    seg(-PLAZA_R, 0, CLIFF_X + ST.overlookStop, 0, ST.avenueW),
     // The Breach road, outside the north gate.
-    seg(0, -WALL_HALF, 0, BREACH_Z + 14, 4.5),
+    seg(0, -WALL_HALF, 0, BREACH_Z + ST.breachRoad.stop, ST.breachRoad.w),
   ];
-  // Ring road at 58 m, as a 20-gon so it stays cheap to rasterise.
-  const R = 58, N = 20;
+  // Ring road, as an N-gon so it stays cheap to rasterise (Threshold: 58 m, 20 sides).
+  const { r: R, sides: N } = ST.ring;
   for (let i = 0; i < N; i++) {
     const a0 = (i / N) * Math.PI * 2;
     const a1 = ((i + 1) / N) * Math.PI * 2;
-    s.push(seg(Math.cos(a0) * R, -Math.sin(a0) * R, Math.cos(a1) * R, -Math.sin(a1) * R, 4.5));
+    s.push(seg(Math.cos(a0) * R, -Math.sin(a0) * R, Math.cos(a1) * R, -Math.sin(a1) * R, ST.ring.w));
   }
-  // Cross streets, so no block is more than ~20 m from a way through.
+  // Cross streets, so no block is more than ~20 m from a way through. Each
+  // entry is mirrored across both axes AND both signs — segment order per k
+  // (x-street then z-street, inner pair then outer) matches the old literal
+  // list exactly, because street order feeds the paint pass.
   for (const k of [-1, 1]) {
-    s.push(seg(k * 32, -WALL_HALF + 5, k * 32, WALL_HALF - 5, 4));
-    s.push(seg(-WALL_HALF + 5, k * 32, WALL_HALF - 5, k * 32, 4));
-    s.push(seg(k * 66, -68, k * 66, 68, 3.4));
-    s.push(seg(-68, k * 66, 68, k * 66, 3.4));
+    for (const c of ST.cross) {
+      s.push(seg(k * c.off, -c.span, k * c.off, c.span, c.w));
+      s.push(seg(-c.span, k * c.off, c.span, k * c.off, c.w));
+    }
   }
   return s;
 }
@@ -660,7 +641,21 @@ export function buildPortalVisual(parent, {
 // ---------------------------------------------------------------------------
 
 export class City {
-  constructor(scene, renderer, camera, quality) {
+  /**
+   * `spec` is the settlement descriptor (default: Threshold). It is stored,
+   * never copied and never written: every builder reads this.spec inside its
+   * own body, so a City built from a clone ({ ...THRESHOLD, slug: 'x' })
+   * shares zero mutable state with the module — the load-time probe below the
+   * class holds that seam open for the second town this wave does not build.
+   */
+  constructor(scene, renderer, camera, quality, spec = THRESHOLD) {
+    // Fail at construction, not mid-build: a descriptor missing a section
+    // would otherwise surface as a NaN heightfield three builders later.
+    for (const key of ['wall', 'terrain', 'streets', 'districts', 'portals',
+      'interactables', 'palettes', 'interiors', 'verge']) {
+      if (!spec[key]) throw new Error(`[city] settlement '${spec.slug}' descriptor missing '${key}'`);
+    }
+    this.spec = spec;
     this.scene = scene;
     this.renderer = renderer;
     this.camera = camera;
@@ -678,7 +673,7 @@ export class City {
     this.obstacles = [];      // { pos:{x,z}, radius } — round props
     this.boxes = [];          // { x, z, w, d, rot } — buildings and walls
     this.fields = [];         // KitField instances
-    this.districts = TOWN_DISTRICTS;
+    this.districts = spec.districts;
     this.streets = [];
     this.built = false;
     // The retained _layout output — a few KB of plain objects, kept because
@@ -779,19 +774,26 @@ export class City {
     // ground and the Verge's are one continuous surface rather than two that
     // nearly agree. Without a frontier both arguments fall back to the shipped
     // values and this line builds byte-for-byte the field it always did.
+    const T = this.spec.terrain;
     this.field = new HeightField({
-      size: WORLD_HALF * 2,
-      cell: GROUND_CELL,
+      size: this.spec.wall.worldHalf * 2,
+      cell: this.spec.wall.groundCell,
       seed,
-      edge: wantFrontier ? VERGE_EDGE : CITY_EDGE,
-      stitch: wantFrontier ? { cell: FRONTIER_CELL, r0: STITCH_R0, r1: STITCH_R1 } : null,
+      edge: wantFrontier ? T.vergeEdge : T.cityEdge,
+      // Stitch cell derived, not imported: 2 x groundCell is the lattice
+      // contract itself, and for Threshold it is bit-equal to FRONTIER_CELL
+      // (doubling only bumps the exponent).
+      stitch: wantFrontier
+        ? { cell: this.spec.wall.groundCell * 2, r0: T.stitch[0], r1: T.stitch[1] }
+        : null,
+      spec: this.spec,
     });
     for (const d of this.districts) {
       this.field.addFlat({ x: d.pos.x, z: d.pos.z, radius: d.pad, feather: 12, height: d.id === 'plaza' ? 0 : null });
     }
     this.field.bake();
 
-    this.streets = buildStreets();
+    this.streets = buildStreets(this.spec);
 
     // 1b. The five enterable service buildings CLAIM THEIR PLOTS FIRST.
     //
@@ -963,6 +965,10 @@ export class City {
   // ------------------------------------------------------------ sky + light
 
   _buildSkyAndLight() {
+    // Palettes are settlement data now; same names as the old module
+    // constants so the notes below keep reading true.
+    const { city: CITY_BIOME, sky: SKY_BIOME } = this.spec.palettes;
+    const { near: FOG_NEAR, far: FOG_FAR } = this.spec.palettes.fog;
     // Captured as one object, including the nulls. Storing them as three
     // "or null" fields and then restoring only the non-null ones leaves the
     // city's fog and environment behind on the scene after dispose(), which
@@ -1017,6 +1023,8 @@ export class City {
     const f = this.field;
     const n = f.n, stride = f.stride;
     const verts = stride * stride;
+    const { half: WALL_HALF, plazaR: PLAZA_R } = this.spec.wall;
+    const BREACH_Z = this.spec.portals.breach.z;
 
     // No convertSRGBToLinear anywhere in this file: ColorManagement is on, so
     // new THREE.Color(hex) is already in the linear working space and a second
@@ -1205,7 +1213,8 @@ export class City {
   // ------------------------------------------------------------- city wall
 
   _buildCityWall() {
-    const H = WALL_HALF;
+    const H = this.spec.wall.half;
+    const CLIFF_X = this.spec.wall.cliffX;
     const parts = [];
     const push = (x0, x1, y0, y1, z0, z1, hex) => {
       const g = new THREE.BoxGeometry(x1 - x0, y1 - y0, z1 - z0);
@@ -1365,6 +1374,7 @@ export class City {
    *                  opens into a neighbour's wall fails a test.
    */
   _layout(rnd) {
+    const { half: WALL_HALF, plazaR: PLAZA_R, buildingBudget: BUILDING_BUDGET } = this.spec.wall;
     const cellsHalf = Math.floor((WALL_HALF - 6) / KIT_CELL);
     const dim = cellsHalf * 2 + 1;
     const occ = new Uint8Array(dim * dim);
@@ -1942,6 +1952,8 @@ export class City {
   // ------------------------------------------------------------------ props
 
   _buildProps(rnd, buildings) {
+    const { half: WALL_HALF, plazaR: PLAZA_R, cliffX: CLIFF_X, walkLimit: WALK_LIMIT } = this.spec.wall;
+    const BREACH_Z = this.spec.portals.breach.z;
     const density = this._buildDensity;
     const add = (key, capacity) => {
       const f = new KitField(key, Math.max(1, Math.ceil(capacity)), { name: key });
@@ -2160,6 +2172,7 @@ export class City {
    * _natureSpotOk reads this.portals.
    */
   _buildNature(rnd) {
+    const WALL_HALF = this.spec.wall.half;
     const density = this._buildDensity;
 
     // n is the count at density 1 (~430 instances, ~90k triangles — the grass
@@ -2266,6 +2279,8 @@ export class City {
    * plots, existing props — and never on rock-steep faces or past the lip.
    */
   _natureSpotOk(x, z, clearance) {
+    const { plazaR: PLAZA_R, cliffX: CLIFF_X, walkLimit: WALK_LIMIT } = this.spec.wall;
+    const BREACH_Z = this.spec.portals.breach.z;
     if (x < CLIFF_X + 3) return false;
     if (Math.max(Math.abs(x), Math.abs(z)) > WALK_LIMIT - 6) return false;
     if (Math.hypot(x, z) < PLAZA_R + 3) return false;
@@ -2293,6 +2308,8 @@ export class City {
   // ---------------------------------------------------------------- portals
 
   _buildPortals(rnd, save) {
+    const { ring: PORTAL_RING, angles: PORTAL_ANGLES } = this.spec.portals;
+    const BREACH_Z = this.spec.portals.breach.z;
     const level = Number(save?.level) || 1;
 
     // Geometry shared across all six portals AND the Verge's wild gates: six
@@ -2361,7 +2378,7 @@ export class City {
 
   /** A cracked ruin platform under the S portal, outside the city's protection. */
   _buildBreachPlatform(rnd) {
-    const cx = 0, cz = BREACH_Z;
+    const cx = 0, cz = this.spec.portals.breach.z;
     // ruin_floor_squarelarge is 118 triangles; ruin_floor_standard is 1,304 for
     // the same 2 m tile, and 69 of them was a quarter of the city's entire
     // triangle budget spent on a platform nobody stands closer than 3 m to.
@@ -2423,6 +2440,7 @@ export class City {
    * reserved for the portals themselves.
    */
   _buildFlags(rnd) {
+    const { half: WALL_HALF, plazaR: PLAZA_R } = this.spec.wall;
     const plaza = this.portals.filter((p) => Math.hypot(p.pos.x, p.pos.z) < PLAZA_R + 4);
     const away = this.portals.filter((p) => !plaza.includes(p));
     const flags = [];       // { fly, x, z, topY, w, h, yaw, phase, color }
@@ -2652,8 +2670,20 @@ export class City {
     oval.material.opacity = p.locked ? 0.18 : 0.44;
   }
 
+  // The descriptor's interactables become live records here. `open` gates the
+  // PROMPT, not the record: a door whose feature does not exist yet must not
+  // stop the player and announce "NOT YET OPEN" — the playtest called the
+  // stash prompt out as exactly that. Closed entries stay in
+  // this.interactables (their districts, pads and layout all still stand, and
+  // the ids are part of the contract), but interactAt() skips them, so nothing
+  // in the world advertises a system that is not built. Flip `open` in the
+  // descriptor when the feature ships — citymode's confirmPrompt routes by id.
+  //
+  // assay sits at z = -32, not -30: at -30 its 4.5 m radius overlapped the C
+  // portal's prompt zone (radius 5.2 + 2.2 slack from y = -22) and the two
+  // systems fought over the same strip of pavement.
   _buildInteractables() {
-    for (const it of INTERACTABLES) {
+    for (const it of this.spec.interactables) {
       this.interactables.push({
         id: it.id,
         label: it.label,
@@ -2796,8 +2826,8 @@ export class City {
     const fog = this.scene.fog;
     if (fog) {
       fog.color.copy(state.fogColor);
-      fog.near = FOG_NEAR * state.fogScale;
-      fog.far = FOG_FAR * state.fogScale;
+      fog.near = this.spec.palettes.fog.near * state.fogScale;
+      fog.far = this.spec.palettes.fog.far * state.fogScale;
     }
     // v1 keeps the single afternoon PMREM and modulates its contribution.
     // Rebuilding the environment per keyframe is 4 x PMREM per city and is
@@ -2980,7 +3010,7 @@ export class City {
     // away, so the edge of the world is a view rather than a pit. With the Verge
     // built that lip is 124 m further out, and this is the line that lets the
     // player leave town at all.
-    const lim = (this.frontier ? VERGE_LIMIT : WALK_LIMIT) - radius;
+    const lim = (this.frontier ? this.spec.verge.limit : this.spec.wall.walkLimit) - radius;
     if (pos.x > lim) { pos.x = lim; slide(-1, 0); }
     // WEST IS DIFFERENT. The ground falls 34 m away west of CLIFF_X, and the
     // parapet at line ~630 only spans the walled stretch (|z| < WALL_HALF).
@@ -2992,7 +3022,7 @@ export class City {
     // line continues as a frontier fence north and south of the wall" means: the
     // Verge opens the map to 258 m on the other three sides but the drop stays
     // the drop for its whole length, all the way out to the Verge's own bound.
-    const westLim = CLIFF_X + 1 + radius;
+    const westLim = this.spec.wall.cliffX + 1 + radius;
     if (pos.x < westLim) { pos.x = westLim; slide(1, 0); }
     if (pos.z > lim) { pos.z = lim; slide(0, -1); }
     if (pos.z < -lim) { pos.z = -lim; slide(0, 1); }
@@ -3018,6 +3048,13 @@ export class City {
     if (!this.field) return 0;
     const f = this.frontier;
     if (!f) return this.field.height(x, z);
+    // Shadow the module exports with this settlement's own band: for Threshold
+    // they are the same numbers, and a cloned descriptor keeps its seam local.
+    // Indexed reads, not destructuring — heightAt is the hottest world query
+    // (foot placement for the player and every citizen, every frame) and the
+    // iterator protocol has no business on it.
+    const blend = this.spec.terrain.blend;
+    const BLEND_R0 = blend[0], BLEND_R1 = blend[1];
     const r = Math.max(Math.abs(x), Math.abs(z));
     if (r <= BLEND_R0) return this.field.height(x, z);
     if (r >= BLEND_R1) return f.heightAt(x, z);
@@ -3033,7 +3070,8 @@ export class City {
     // surface, and this feeds foot placement, not lighting. The surfaces are
     // identical here (see heightAt), so the switch is continuous in practice.
     const f = this.frontier;
-    if (f && Math.max(Math.abs(x), Math.abs(z)) > (BLEND_R0 + BLEND_R1) / 2) {
+    const blend = this.spec.terrain.blend;   // indexed, hot path — see heightAt
+    if (f && Math.max(Math.abs(x), Math.abs(z)) > (blend[0] + blend[1]) / 2) {
       return f.groundNormal(x, z, o);
     }
     return this.field.normal(x, z, o);
@@ -3106,7 +3144,7 @@ export class City {
     // does — push the stick forward — walks him into a wall a metre away.
     // From here the plaza opens ahead and the fountain is a landmark to his
     // left rather than a roadblock.
-    const nominal = { x: 7, z: PLAZA_R - 5 };
+    const nominal = { x: 7, z: this.spec.wall.plazaR - 5 };
     const clear = (x, z) => {
       if (!this._hash) return true;
       const p = new THREE.Vector3(x, 0, z);
@@ -3147,14 +3185,15 @@ export class City {
   get navGrid() { return this._navGrid; }
 
   get navBlockers() {
+    const { worldHalf, cliffX } = this.spec.wall;
     return {
       boxes: this.boxes,
       circles: this.obstacles,
       cell: KIT_CELL,
-      originX: -WORLD_HALF,
-      originZ: -WORLD_HALF,
-      size: WORLD_HALF * 2,
-      walkable: (x, z) => this.field.slope(x, z) < 0.45 && x > CLIFF_X - 1,
+      originX: -worldHalf,
+      originZ: -worldHalf,
+      size: worldHalf * 2,
+      walkable: (x, z) => this.field.slope(x, z) < 0.45 && x > cliffX - 1,
     };
   }
 
@@ -3171,7 +3210,7 @@ export class City {
     // city's navgrid at runtime yet (citizens steer with resolve()) and no test
     // had ever baked one — WORLD_SPEC step 9's "NPCs can path inside" assert is
     // what finally did. Same expression as navBlockers.walkable, deliberately.
-    grid.blockOutside?.((x, z) => this.field.slope(x, z) < 0.45 && x > CLIFF_X - 1);
+    grid.blockOutside?.((x, z) => this.field.slope(x, z) < 0.45 && x > this.spec.wall.cliffX - 1);
     grid.bake?.();
     return grid;
   }
@@ -3216,6 +3255,29 @@ export class City {
       interiors: this.interiors ? this.interiors.stats : null,
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// settlement seam proof
+// ---------------------------------------------------------------------------
+// Constructing a City from a spread-cloned descriptor must work and must not
+// touch module state — that is the whole point of the extraction, and it is
+// the seam a second town will enter through. Proven at load rather than
+// asserted by comment: the probe costs one throwaway Scene/Group once per app
+// boot, builds nothing, and throws (a build failure, not a graceful anything)
+// the moment a constructor edit starts reading THRESHOLD directly or writing
+// through spec into shared data. Deliberately NOT a second settlement: the
+// clone shares Threshold's numbers, it just refuses to share its bindings.
+{
+  const probeScene = new THREE.Scene();
+  const probe = new City(probeScene, null, null, null, { ...THRESHOLD, slug: 'seam-probe' });
+  if (probe.spec.slug !== 'seam-probe') {
+    throw new Error('[city] settlement seam: constructor did not keep its own descriptor');
+  }
+  if (THRESHOLD.slug !== 'threshold' || DISTRICTS.length !== THRESHOLD.districts.length) {
+    throw new Error('[city] settlement seam: constructing a cloned descriptor touched module state');
+  }
+  probeScene.remove(probe.group);
 }
 
 // ---------------------------------------------------------------------------
