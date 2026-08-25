@@ -11,12 +11,13 @@
 // paths would ship worse than the head-started SHADOW, and it is the shape of
 // all three GPU leaks this project has already shipped.
 //
-// NO PATH USES THIS MODULE YET. The spec is explicit: STEP 6 lands the
-// substrate, STEP 7 lands ascension with zero path mechanics, and STEPS 8-10
-// configure it. Nothing in src/ imports this file today; tools/classes-test.mjs
-// drives it headless (StatusTable / ResourceMeter / tintForStacks are
-// THREE-data-free enough for bare node) and in the browser (ArchonPool's
-// one-draw-call and dispose-to-baseline asserts).
+// THIS MODULE IS LIVE. (Its header claimed "no path uses this yet" long after
+// steps 8-10 shipped — stale load-bearing doc, audit finding, fixed.) game.js
+// imports ARCHON_PATHS / StatusTable / ArchonPool / ResourceMeter /
+// tintForStacks / TINT_TARGETS and runs every path's combat machinery;
+// tools/classes-test.mjs still drives it headless (StatusTable /
+// ResourceMeter / tintForStacks are THREE-data-free enough for bare node) and
+// in the browser (ArchonPool's one-draw-call and dispose-to-baseline asserts).
 //
 // HARD RULES, enforced here and asserted by the test:
 //   * NO EMISSIVE, NO RIM. Enemies and the player are living characters;
