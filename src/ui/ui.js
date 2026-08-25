@@ -666,7 +666,15 @@ export class UI {
     // The archon meter + contextual Bind tag (CLASSES_SPEC step 7).
     this._updateArchonHud(s);
 
-    if (game.bossActive && game.boss) {
+    if (game._classTrial) {
+      // THE SEALED STAIR (Wave F.2): the clock IS the score — no kill
+      // counter, no "x / y" clear condition, because the trial has neither.
+      // M:SS off runTime, the same unscaled clock awardClassTier will read,
+      // so what the hunter watches is exactly what the stair judges.
+      // [strings] migrate the title when strings.js is free.
+      const t = Math.floor(game.runTime);
+      this.setObjective('THE STAIR', `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`);
+    } else if (game.bossActive && game.boss) {
       this.setObjective(game.boss.base.name, `${Math.ceil((game.boss.hp / game.boss.maxHp) * 100)}%`);
     } else {
       // Clamp: the boss kill increments `killed` past gate.enemies, and in a

@@ -315,7 +315,13 @@ export const THRESHOLD = {
   interactables: [
     { id: 'barracks', label: 'THE ASHWORKS',   pos: { x: 44, z: 12 },  radius: 4.5, open: false },
     { id: 'assay',    label: 'THE ASSAY HALL', pos: { x: 0, z: -32 },  radius: 4.5, open: true },
-    { id: 'trial',    label: 'THE SEALED STAIR', pos: { x: -7, z: -38 }, radius: 3.5, open: false },
+    // OPEN as of Wave F.2 (the level-40 class trial): the stair's prompt is
+    // save-dependent — citymode._trialSub reads sealed / ready / done off the
+    // save, and confirmPrompt routes 'trial' to game.enterClassTrial(). The
+    // door is always promptable so a sub-40 hunter READS the sealed line
+    // instead of walking past an unmarked slab (`open` gates the PROMPT, and
+    // a diegetic "not yet" line is the whole point of having one).
+    { id: 'trial',    label: 'THE SEALED STAIR', pos: { x: -7, z: -38 }, radius: 3.5, open: true },
     // OPEN as of the weapon shop: game/shop.js + ui/shopui.js are behind this
     // prompt, and citymode.confirmPrompt routes 'exchange' to them.
     { id: 'exchange', label: 'THE EXCHANGE',   pos: { x: -4, z: 26 },  radius: 4.5, open: true },

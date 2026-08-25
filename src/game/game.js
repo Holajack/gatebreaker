@@ -39,6 +39,11 @@ import {
   grantXp, shadowFieldCapacity, extractionChance,
   MAX_EXTRACT_ATTEMPTS, CORPSE_WINDOW,
   tickDaily, claimDaily, dailyState, DAILY_TARGET,
+  // THE SEALED STAIR (Wave F.2): both halves of the trial contract shipped in
+  // progression.js with ZERO callers — classTrialAvailable gates the door and
+  // enterClassTrial below; awardClassTier is fired exactly once, by
+  // _endClassTrial, and is what finally makes classes.canAscend reachable.
+  classTrialAvailable, awardClassTier,
 } from './progression.js';
 import { DAILY_CONTRACT_POINTS } from './config.js';
 // The quest ledger (Wave C): events ride the game's existing single funnels
@@ -164,6 +169,37 @@ const WEAPON_DROP_CHANCE = 0.06;
 // run is 44-60 trash (mean 52), 52 x 0.10 ≈ 5 pieces per run.
 const ARMOR_DROP_CHANCE = 0.10;
 const tierWeightOf = (e) => (e.isBoss ? 'boss' : TIER_WEIGHT[e.key] || 'trash');
+
+// --- THE SEALED STAIR (Wave F.2, the level-40 class trial) ------------------
+// Survival-time scoring per EXPANSION_SPEC progression.classTrial: <60 s =
+// base, 60-149 s = advanced, >=150 s = sovereign (awardClassTier owns the
+// thresholds; these constants only shape the pressure that makes them earned).
+//
+// The trial ends ITSELF at 180 s: sovereign locks at 150, so holding the
+// field past 180 proves nothing — and an endless spawner on a throttling
+// phone is a battery test, not a trial.
+const TRIAL_MAX_SECONDS = 180;
+// Live-enemy ceiling. The shipped S arena runs ~9-12 live bodies inside the
+// skinned-body ledger's budget; 14 is the trial's "escalating pressure" told
+// through cadence and level, never through a crowd the renderer can't afford.
+const TRIAL_MAX_LIVE = 14;
+// Enemy level ramp: opens at 34 (a fair fight for the level-40 hunter the
+// trial admits — the A gate's 37 band, shaded down for a solo run) and climbs
+// +2 every 15 s to +20, so by the 150 s sovereign line the field IS the
+// S-gate roster (34 + 20 = 54, GATES.S.enemyLevel exactly). "Enemies draw
+// from high-rank rosters as time climbs", as the spec words it.
+const TRIAL_LEVEL_BASE = 34;
+const TRIAL_LEVEL_STEP_SECONDS = 15;
+const TRIAL_LEVEL_CLIMB_MAX = 20;
+// Wave cadence: 4 bodies every 5.5 s at the top of the stair, growing one
+// per 30 s toward the S gate's own waveSize 9 while the interval tightens
+// to a 2.4 s floor — pressure climbs on both axes at once.
+const TRIAL_WAVE_BASE = 4;
+const TRIAL_WAVE_STEP_SECONDS = 30;
+const TRIAL_WAVE_MAX = 9;
+const TRIAL_INTERVAL_START = 5.5;
+const TRIAL_INTERVAL_FLOOR = 2.4;
+const TRIAL_INTERVAL_DECAY = 0.02;   // seconds shaved per second survived
 
 // The hand axe's bleed (RPG_SPEC weaponFamilies.axe): every connecting axe hit
 // opens a 3 s damage-over-time that "does not stack past 3 applications".
@@ -599,8 +635,10 @@ export class Game {
       enemies: null,
       // Bound ONCE (no per-frame closure); reads this.world dynamically so
       // mode swaps need no rebind. Flat kinds return 0 — arrow ground tests
-      // stay byte-identical there (tower wiring).
-      heightAt: (x, z) => this.world.heightAt(x, z),
+      // stay byte-identical there (tower wiring). Optional-called because the
+      // ARENA world has no heightAt and its floor IS y = 0 (see
+      // _spawnProjectile's identical guard — same latent forceOpen crash).
+      heightAt: (x, z) => this.world.heightAt?.(x, z) ?? 0,
       onHitPlayer: (rec) => this._damagePlayer(rec.damage, rec.pos),
       onHitEnemy: (rec, e) => {
         this._damageEnemy(e, rec.damage, {
@@ -1130,6 +1168,11 @@ export class Game {
    * screen stack and the mounted mode disagree.
    */
   enterCity({ spawnAt = null, atPortal = null } = {}) {
+    // Belt-and-braces against a trial flag surviving into the hub (the
+    // normal ends — _endClassTrial, quit(), any enterGate — all clear it;
+    // this covers any direct-to-city dev route). No-op on the post-ceremony
+    // return, where the flag is already down.
+    this._classTrial = false;
     // Prefer the exact portal the player entered through (stable id, set by
     // beginRun) over the rank, which is ambiguous once wild gates share ranks
     // with plaza gates. Legacy rank payloads still work — _spawnVector falls
@@ -1143,7 +1186,7 @@ export class Game {
    * crawl rank (DUNGEON_SPEC worldJsArenasFate — old tests and screenshot
    * baselines still exercise the arena through it).
    */
-  enterGate(rank, { forceBiome = null, forceOpen = false, wild = false, portalId = null } = {}) {
+  enterGate(rank, { forceBiome = null, forceOpen = false, wild = false, portalId = null, trial = false } = {}) {
     const index = Math.max(0, GATES.findIndex((g) => g.rank === rank));
     const resolved = GATES[index].rank;
     this.lastGateRank = resolved;
@@ -1154,6 +1197,13 @@ export class Game {
     // (citymode._updatePrompt stamps it from portal.wild; wired in the 3-B1
     // integration pass).
     this._wildRun = Boolean(wild);
+    // THE SEALED STAIR (Wave F.2): the class-trial flag rides the Game
+    // exactly like _wildRun and for the same reason — DungeonMode.enter's
+    // destructure sheds unknown payload keys, so a payload flag would die at
+    // the mode boundary. Default false on every entry, so walking any normal
+    // portal is what CLEARS a flag a torn-down trial might have left behind.
+    // Only enterClassTrial passes true.
+    this._classTrial = Boolean(trial);
     if (this.appState) return this.appState.go('run', { rank: resolved, gateIndex: index, forceBiome, forceOpen, portalId });
     return this.beginRun({ rank: resolved, gateIndex: index, forceBiome, forceOpen, portalId });
   }
@@ -1178,6 +1228,37 @@ export class Game {
   /** Compat wrapper for the gate-list menu, which still speaks in indices. */
   startGate(index) {
     return this.enterGate(GATES[index]?.rank ?? GATES[0].rank);
+  }
+
+  /**
+   * THE SEALED STAIR (Wave F.2) — the level-40 class trial, the one missing
+   * caller of progression.awardClassTier and therefore the keystone that makes
+   * the whole already-built Archon endgame (classTier quality multipliers,
+   * canAscend, THE REACH, the five paths) reachable in real play.
+   *
+   * The trial is the S-gate ARENA under a flag, not a new dungeon: forceOpen
+   * is the sanctioned arena mount for any rank (DUNGEON_SPEC
+   * worldJsArenasFate — DungeonMode routes to _arenaWorld and _beginGate runs
+   * the shipped wave machinery), and every trial rule is a game.js-side guard
+   * on this._classTrial: solo (no fielding), endless escalating waves, the
+   * clock as the only score, death sanctioned (_fail reroutes, no roster
+   * cull), self-ending at TRIAL_MAX_SECONDS. forceBiome pins the S palette so
+   * the stair never rolls an anomaly — the trial should look the same every
+   * time a hunter descends. LIVE dice on purpose: the trial is a survival
+   * run scored by endurance, not a rebuildable gate, so its waves ride the
+   * run's own seeded-per-entry streams like any other arena entry.
+   *
+   * Availability is progression.classTrialAvailable (level >= 40, no
+   * classTier) — the trial fires ONCE, and this is the single entry point
+   * (citymode's stair confirm), so the check here is the whole gate.
+   */
+  enterClassTrial() {
+    if (!classTrialAvailable(this.save)) return false;
+    // portalId 'trial-stair' from the START (review nit): only _endClassTrial
+    // stamped it, so QUIT-from-pause routed atPortal to the bare rank 'S' and
+    // an abandoning hunter spawned at the Breach, across town from the stair
+    // they just walked down. beginRun stamps it; citymode owns the alias.
+    return this.enterGate('S', { forceOpen: true, forceBiome: 'archonreach', trial: true, portalId: 'trial-stair' });
   }
 
   // ------------------------------------------------------------- gate setup
@@ -1381,15 +1462,25 @@ export class Game {
     // ally consuming the entire allowance (its spawn refuses while any other
     // soldier stands, and _spawnShadow refuses while it does), so the roster
     // stays home. With no pact yet, the path plays its shipped army verbatim.
-    const cap = this.fieldCapacity();
-    const pact = this.save.archon === 'beast' ? this._activePact() : null;
-    if (pact && cap > 0) {
-      setDeployed(this.save, []);
-      this._spawnPactBeast(pact, true);
+    // THE SEALED STAIR (Wave F.2): the trial is SOLO — it tests the hunter,
+    // not the army. FIELDING alone is suppressed (this skip plus the
+    // _trySummon guard); the Bind ROSTER is never read or written, so the
+    // company a hunter walks in with is the company they walk out with,
+    // to the record. (A trial save can't be a beast archon — classTier gates
+    // ascension — so the pact branch is unreachable here by construction.)
+    if (this._classTrial) {
+      // deliberately field nothing
     } else {
-      autoDeploy(this.save, cap);
-      for (const rec of deployedRecords(this.save)) {
-        this._spawnShadow(this.world.randomSpawn(this.rnd, this.player.pos, 4), true, rec);
+      const cap = this.fieldCapacity();
+      const pact = this.save.archon === 'beast' ? this._activePact() : null;
+      if (pact && cap > 0) {
+        setDeployed(this.save, []);
+        this._spawnPactBeast(pact, true);
+      } else {
+        autoDeploy(this.save, cap);
+        for (const rec of deployedRecords(this.save)) {
+          this._spawnShadow(this.world.randomSpawn(this.rnd, this.player.pos, 4), true, rec);
+        }
       }
     }
 
@@ -1401,7 +1492,12 @@ export class Game {
     // menu transition. The arena path keeps both inline, byte-identical.
     if (!this.world.encounterDriven) {
       this.ui.showHud(true);
-      this.ui.toast(`${gate.rank}-GRADE RIFT — ${gate.name}`, 'gold');
+      // The trial's entry card names the stair, not the S gate it borrows —
+      // "S-GRADE RIFT" would promise a boss and a clear condition the trial
+      // does not have. [strings] migrate when free.
+      this.ui.toast(this._classTrial
+        ? 'THE SEALED STAIR — SURVIVE'
+        : `${gate.rank}-GRADE RIFT — ${gate.name}`, 'gold');
     }
     this._spawnWave();
   }
@@ -1429,10 +1525,36 @@ export class Game {
     // through the room director — _beginGate calls this directly, and
     // unguarded it dumps the opening wave into rooms that must stay dormant.
     if (this.world.encounterDriven) return;
+    // THE SEALED STAIR (Wave F.2): the trial has no gate.enemies budget and
+    // no boss — its waves escalate off the clock instead. _beginGate's
+    // closing call lands here too, so the opening wave and every timed wave
+    // run the same code.
+    if (this._classTrial) { this._spawnTrialWave(); return; }
     const gate = this.gate;
     const remaining = gate.enemies - this.spawned;
     if (remaining <= 0) return;
     const n = Math.min(gate.waveSize, remaining);
+    for (let i = 0; i < n; i++) this._spawnEnemy();
+  }
+
+  /**
+   * One trial wave (Wave F.2). Size grows with time survived, the reschedule
+   * interval shrinks, and _spawnEnemy's trial branch raises the level band —
+   * three independent pressure axes, all reusing the shipped spawn machinery
+   * (mesh build, rise-in, AI, loot) untouched. Rescheduling lives HERE, not
+   * in _updateSpawns, so _beginGate's opening call also arms the first timer
+   * and the two callers cannot drift.
+   */
+  _spawnTrialWave() {
+    this.spawnTimer = Math.max(
+      TRIAL_INTERVAL_FLOOR, TRIAL_INTERVAL_START - this.runTime * TRIAL_INTERVAL_DECAY,
+    );
+    const room = TRIAL_MAX_LIVE - this.enemies.length;
+    if (room <= 0) return;   // the field is already at the renderer's budget
+    const size = Math.min(
+      TRIAL_WAVE_MAX, TRIAL_WAVE_BASE + Math.floor(this.runTime / TRIAL_WAVE_STEP_SECONDS),
+    );
+    const n = Math.min(room, size);
     for (let i = 0; i < n; i++) this._spawnEnemy();
   }
 
@@ -1452,7 +1574,19 @@ export class Game {
     }
 
     const base = ENEMY_TYPES[key];
-    const level = gate.enemyLevel + Math.floor(this.rnd() * 3);
+    // THE SEALED STAIR (Wave F.2): the trial's level band climbs off the
+    // clock instead of reading the S gate's flat 54 — a level-40 hunter must
+    // be ABLE to stand the opening minute (the base tier is a floor, not a
+    // taunt), and by the sovereign line the band has climbed to the S
+    // roster's own number. The archetype skew above stays the S gate's
+    // (gateIndex is the S index), so the nastier silhouettes arrive with the
+    // rank the fiction promises. Everything else — mesh, rise-in, bar, AI —
+    // is the shipped path, byte for byte, for every non-trial entry.
+    const level = this._classTrial
+      ? TRIAL_LEVEL_BASE
+        + Math.min(TRIAL_LEVEL_CLIMB_MAX, Math.floor(this.runTime / TRIAL_LEVEL_STEP_SECONDS) * 2)
+        + Math.floor(this.rnd() * 3)
+      : gate.enemyLevel + Math.floor(this.rnd() * 3);
     const s = scaleEnemy(base, level);
     pos = pos || this.world.randomSpawn(this.rnd, this.player.pos, 12);
 
@@ -3583,6 +3717,11 @@ export class Game {
     const p = this.player;
     const sk = SKILLS.summon;
     if (p.cds.summon > 0) return;
+    // THE SEALED STAIR (Wave F.2): the trial is SOLO — fielding is suppressed
+    // for the run (the roster itself is untouched; see _beginGate's skip).
+    // Guarded here, the one mid-run fielding verb, so the Bind button says
+    // why instead of silently eating the tap. [strings] migrate when free.
+    if (this._classTrial) return this.ui.toast('THE STAIR ADMITS ONE');
     // WILD FORM: no skills (step 10) — Bind included; the form fights alone.
     if (this._wildT > 0) return this.ui.toast('THE BEAST KNOWS NO SKILLS');
     if (this.save.level < sk.unlockLevel) return this.ui.toast(`BIND UNLOCKS AT LEVEL ${sk.unlockLevel}`);
@@ -3714,7 +3853,12 @@ export class Game {
     // is 0 in every flat kind, so this is float-identical there and correct
     // on a B-rank upper terrace, where the old absolute 1.6 put every bolt
     // underground and ranged fire was dead in both directions.
-    _projFrom.copy(from).setY(this.world.heightAt(from.x, from.z) + PROJECTILE_Y);
+    // OPTIONAL because the ARENA world (src/game/world.js) carries no
+    // heightAt at all — its floor is y = 0 by construction, so ?? 0 IS its
+    // floor. The tower wiring silently killed every caster in a forceOpen
+    // arena run (the dev override, and now the Sealed Stair trial): the
+    // first S-rank volley threw here. Found by tools/trial-test.mjs.
+    _projFrom.copy(from).setY((this.world.heightAt?.(from.x, from.z) ?? 0) + PROJECTILE_Y);
     _projDir.copy(target).sub(_projFrom).setY(0).normalize();
     const rec = this.pool.spawn({
       from: _projFrom, dir: _projDir, speed, damage, color, life: 4, kind: 'bolt',
@@ -6054,7 +6198,9 @@ export class Game {
         s.pos.copy(this.player.pos);
         s.pos.x += Math.sin(a) * 2.0;
         s.pos.z += Math.cos(a) * 2.0;
-        s.pos.y = this.world.heightAt(s.pos.x, s.pos.z);
+        // Optional: the arena world has no heightAt; its floor is y = 0
+        // (the same forceOpen guard _spawnProjectile documents).
+        s.pos.y = this.world.heightAt?.(s.pos.x, s.pos.z) ?? 0;
         this.world.resolve(s.pos, s.radius, s.vel);
         s.vel.set(0, 0, 0);
         // 50% HP is the cycle's price: the detonation traded the army's
@@ -6442,6 +6588,22 @@ export class Game {
     // DUNGEON_SPEC EDIT 1(a): the wave timer is the arena's spawn driver; the
     // crawl's encounter director meters spawns room by room instead.
     if (this.world.encounterDriven) return;
+    // No driver runs over a finished run (review nit): _endClassTrial clears
+    // the trial flag mid-frame, and the death sites precede this call — so a
+    // death frame could fall through to the NORMAL S driver for one tick and
+    // spawn a level-54 wave (or, at the budget edge, a boss with entrance
+    // music) behind THE STAIR JUDGES ceremony.
+    if (this.state !== 'playing') return;
+    // THE SEALED STAIR (Wave F.2): the clock is the score and the only end
+    // conditions are death (_fail's reroute) and this cap — no boss, no
+    // gate.enemies budget, so the shipped driver below never runs. The wave
+    // reschedule lives in _spawnTrialWave (one writer for both callers).
+    if (this._classTrial) {
+      if (this.runTime >= TRIAL_MAX_SECONDS) { this._endClassTrial(); return; }
+      this.spawnTimer -= dt;
+      if (this.spawnTimer <= 0) this._spawnTrialWave();
+      return;
+    }
     if (this.bossActive) return;
     if (this.spawnTimer > 0) {
       this.spawnTimer -= dt;
@@ -6778,6 +6940,14 @@ export class Game {
   }
 
   _fail() {
+    // THE SEALED STAIR (Wave F.2): falling in the trial is the trial ENDING,
+    // not a defeat — the descent is sanctioned by the Guild, so none of the
+    // fail consequences below apply: no deaths++, and above all no
+    // releaseWeakest roster cull (losing a quarter of the company to a rite
+    // the game itself invited you into would be the fastest way to make no
+    // one ever take the stair). One guard here covers BOTH death sites
+    // (_damagePlayer's and the VANGUARD pool's) because both call _fail.
+    if (this._classTrial) { this._endClassTrial(); return; }
     this.state = 'over';
     this.save.deaths++;
     this._commitShadowKills();
@@ -6811,6 +6981,59 @@ export class Game {
     });
   }
 
+  /**
+   * THE STAIR JUDGES (Wave F.2) — the class trial's one exit, reached from
+   * both ends of the run: the player falling (via _fail's reroute, so the
+   * death sites need no knowledge of the trial) and the 180 s cap in
+   * _updateSpawns. Fires progression.awardClassTier — the +8 points and
+   * save.classTier — which is THE write that turns classes.canAscend from a
+   * dead branch into the live 55+ endgame: the S gate's REACH line, the
+   * archon offer, the class-quality multiplier CityUI already prints.
+   * classTrialAvailable goes false the moment classTier lands, so the stair
+   * can never fire twice; the ceremony rows are inline copy ([strings]
+   * migrate when free).
+   */
+  _endClassTrial() {
+    if (!this._classTrial) return;
+    this._classTrial = false;
+    this.state = 'over';
+    // No shadows fielded, but the sweep is idempotent and keeps this exit
+    // structurally identical to _clearGate's bookkeeping order.
+    this._commitShadowKills();
+    const secs = Math.floor(this.runTime);
+    const tier = awardClassTier(this.save, secs);
+    this.onSave();
+    this.audio.music(false);
+    // The clear sting, not the game-over one: even a sub-60 s run WALKS OUT
+    // WITH A TIER — the trial has no losing outcome, only smaller verdicts.
+    this.audio.gateClear();
+    this.ui.showHud(false);
+    // The return address: the stair is IN the Assay Hall, not on the portal
+    // ring, so the results CONTINUE (main.js passes lastGatePortalId as
+    // atPortal unchanged) must land beside the door, not at the S gate.
+    // citymode._spawnVector owns the 'trial-stair' alias.
+    this.lastGatePortalId = 'trial-stair';
+    this.appState?.replace('results', { rank: this.gate?.rank ?? 'S', cleared: true });
+    this.ui.showResults({
+      title: 'THE STAIR JUDGES',
+      cleared: true,
+      levelsGained: this.levelsGained,
+      rows: [
+        ['Time survived', `${Math.floor(secs / 60)}m ${secs % 60}s`],
+        // Gold for the verdict itself, whatever it is — the row IS the
+        // ceremony. showResults injects row values as markup by contract
+        // (this file authors every row), and var(--gold) is the same token
+        // THE REACH's gate-list line already reads.
+        ['Tier earned', `<span style="color:var(--gold)">${tier.toUpperCase()}</span>`],
+        ['Stat points earned', '+8'],
+        // The consequence, said out loud: classTier multiplies every class
+        // card from here on (CLASS_QUALITY — CityUI's strip prints the
+        // multiplier the moment the hunter walks back up).
+        ['Your class', 'YOUR CLASS BURNS BRIGHTER'],
+      ],
+    });
+  }
+
   pause(on) {
     if (this.state === 'over' || this.state === 'idle') return;
     this.state = on ? 'paused' : 'playing';
@@ -6820,6 +7043,11 @@ export class Game {
   /** Unmount whatever is running and leave an empty scene (title screen). */
   quit() {
     this.onSave();
+    // A trial abandoned from the pause menu is a trial NOT taken: no
+    // awardClassTier (classTrialAvailable stays true, the stair re-opens),
+    // and the flag must not survive into whatever mounts next — enterGate
+    // re-stamps it per entry, but quit() can hand straight to the title.
+    this._classTrial = false;
     this._setMode(null);
     this.state = 'idle';
     this.clearEntities();

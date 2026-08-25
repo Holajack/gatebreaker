@@ -12,6 +12,10 @@ import { GATES } from '../config.js';
 // save-dependent the way the Assay Hall door did in step 5 — the trial offer
 // must be visible AT THE GATE, and this prompt is the S gate's doorstep.
 import { canAscend } from '../classes.js';
+// THE SEALED STAIR (Wave F.2): the level-40 class trial's one door. The
+// availability read lives in progression.js (level >= 40, no classTier) so
+// this mode, game.enterClassTrial and the trial-test all agree by construction.
+import { classTrialAvailable } from '../progression.js';
 import { makeDayState } from '../../render/daynight.js';
 // B3 "honest venues": the sealed doors' lines come from the strings module —
 // its first live consumer, per its own "migrate opportunistically" rule.
@@ -284,6 +288,21 @@ export class CityMode extends GameMode {
   _spawnVector(spawnAt, atPortal) {
     const city = this.city;
     if (spawnAt) return _v.copy(spawnAt).clone();
+    // The class trial's return address (Wave F.2): the stair is IN the Assay
+    // Hall, not on the portal ring, so the trial's end stamps this sentinel
+    // into game.lastGatePortalId and the results CONTINUE (main.js passes
+    // lastGatePortalId as atPortal, unchanged) lands the judged hunter back
+    // beside the door they descended through. Checked before the portal
+    // lookup because no portal will ever carry this id; falls through to the
+    // normal resolution if the town somehow has no trial door.
+    if (atPortal === 'trial-stair') {
+      const stair = city.interactables?.find((i) => i.id === 'trial');
+      if (stair) {
+        const x = stair.pos.x;
+        const z = stair.pos.z + stair.radius + 1.2;   // a stride out of the doorway
+        return new THREE.Vector3(x, city.heightAt(x, z), z);
+      }
+    }
     if (atPortal) {
       // atPortal is a stable portal id ('plaza-e', 'gate-d', 'wild-...') or,
       // from legacy callers, a bare rank. Id match first — it is exact — then
@@ -532,7 +551,9 @@ export class CityMode extends GameMode {
         // still lead nowhere; the two that DO lead somewhere say what is
         // behind them. The Assay Hall's line is save-dependent (STEP 5): from
         // level 20 the assayer's desk is where classes are sworn.
-        sub: it.id === 'assay' ? this._assaySub() : (INTERACT_SUB[it.id] || 'NOT YET OPEN'),
+        sub: it.id === 'assay' ? this._assaySub()
+          : it.id === 'trial' ? this._trialSub()
+            : (INTERACT_SUB[it.id] || 'NOT YET OPEN'),
       });
       return;
     }
@@ -554,6 +575,24 @@ export class CityMode extends GameMode {
     const s = this.game.save;
     if ((s?.level || 0) < 20) return INTERACT_SUB.assay;
     return s.className ? 'CLASSES · RIFT CONTRACTS' : 'YOUR CLASS AWAITS';
+  }
+
+  /**
+   * What the Sealed Stair promises (Wave F.2, the level-40 class trial —
+   * EXPANSION_SPEC progression.classTrial). Three states off the save, the
+   * same save-dependent-door pattern as _assaySub:
+   *   below 40            — the shipped sealed line (strings.js, [BIBLE]).
+   *   40+, no classTier   — the trial is OPEN; confirm descends.
+   *   classTier set       — the trial fired once and never again
+   *                         (classTrialAvailable owns both gates).
+   * The ready/done lines are inline: strings.js is owned by another workflow
+   * right now. [strings] migrate the two literals when the file is free.
+   */
+  _trialSub() {
+    const s = this.game.save;
+    if (s?.classTier) return 'THE STAIR REMEMBERS YOUR STEPS.';
+    if (classTrialAvailable(s)) return 'THE SEALED STAIR WAITS. GO DOWN AS YOU ARE.';
+    return INTERACT_SUB.trial;
   }
 
   _updateDistrict() {
@@ -802,6 +841,20 @@ export class CityMode extends GameMode {
       if (g.assayUI?.open()) return { action: 'open', id: 'assay' };
       g.appState?.go('gates', { from: 'city' });
       return { action: 'open', id: 'assay' };
+    }
+    if (prompt.id === 'trial') {
+      // THE SEALED STAIR (Wave F.2): the one route into the class trial.
+      // Availability is re-checked at the confirm, not trusted from the
+      // prompt — a level-up between _updatePrompt and the tap must open the
+      // door, and a stale prompt must never descend a sub-40 hunter.
+      if (classTrialAvailable(g.save)) {
+        g.enterClassTrial();
+        return { action: 'enterTrial', id: 'trial' };
+      }
+      // Sealed (below 40) or already judged: the door SAYS why instead of
+      // failing silently — the same rule the locked-portal toast follows.
+      g.ui.toast(this._trialSub());
+      return null;
     }
     g.ui.toast(`${prompt.label} IS NOT OPEN YET`);
     return { action: 'open', id: prompt.id };
