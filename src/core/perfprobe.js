@@ -171,7 +171,13 @@ export class PerfProbe {
       geometries: info?.memory?.geometries ?? null,
       textures: info?.memory?.textures ?? null,
       heap,
-      dpr: (typeof devicePixelRatio !== 'undefined') ? devicePixelRatio : null,
+      // What the game actually RENDERS at (tier-capped, game.js's
+      // setPixelRatio), not the browser's raw ratio: the owner's first S25U
+      // capture read "dpr 3.75" and sent the analysis chasing a resolution
+      // problem that didn't exist — the renderer was at its ultra cap of 2.0
+      // the whole time. deviceDpr keeps the raw number for context.
+      dpr: g?.renderer?.getPixelRatio?.() ?? null,
+      deviceDpr: (typeof devicePixelRatio !== 'undefined') ? devicePixelRatio : null,
       mode: g?.mode?.name ?? null,
       rank: g?.gate?.rank ?? null,
       tier: g?.quality?.current?.name ?? null,

@@ -60,6 +60,8 @@ try {
   await page.click('#btnPlay');
   await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 25000 })
     .catch(() => {});
+  // RETARGET 2026-08-26: dismiss the first-arrival welcome (see _harness.dismissDialog)
+  await page.evaluate(() => { const d = window.__game?.dialog; for (let i = 0; d?.open && i < 12; i++) d.advance(); });
   await page.waitForTimeout(600);
   const city = await evalGame(page, (g) => ({
     mode: g.mode?.name || null,

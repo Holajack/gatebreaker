@@ -124,6 +124,9 @@ ok(boot.armorStash.length === 5, 'the armour/trinket records rode along untouche
 // ------------------------------------------------------------------ in city
 await page.click('#btnPlay');
 await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 30000 });
+// RETARGET 2026-08-26: tap through the first-arrival welcome overlay
+// (save.welcomed) — it owns every click while open. See _harness.dismissDialog.
+await page.evaluate(() => { const d = window.__game?.dialog; for (let i = 0; d?.open && i < 12; i++) d.advance(); });
 await page.waitForTimeout(2200);
 
 ok(await page.locator('#btnInventory').isVisible(), 'the HUD carries an inventory button in the city');
@@ -749,6 +752,8 @@ await page2.addInitScript((save) => {
 await gotoGame(page2);
 await page2.click('#btnPlay');
 await page2.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 30000 });
+// RETARGET 2026-08-26: first-arrival welcome — same dismissal as page 1.
+await page2.evaluate(() => { const d = window.__game?.dialog; for (let i = 0; d?.open && i < 12; i++) d.advance(); });
 await page2.waitForTimeout(1200);
 
 const live = await page2.evaluate(() => {

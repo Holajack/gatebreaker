@@ -70,7 +70,13 @@ const SWIFTSHADER = argv.includes('--swiftshader');
 // four-mesh visual on the shared geometry set) and +4 draw groups (dais /
 // oval / ring / marker — portals are deliberately not instanced, each
 // animates its own materials). 432622 -> 432862; 108 -> 112.
-const BASELINE = { triangles: 432862, drawGroups: 112 };
+//
+// Re-recorded at Foundation Wave 0 (2026-08-26 playtest: "no actual road
+// versus sidewalk"): City._buildStreetSurfaces adds ONE merged sidewalk/curb
+// mesh along every street edge — +2528 triangles, +1 draw group, urban
+// (non-'green') settlements only. The street-graph carve (_carveStreets)
+// changes heights, not counts. 432862 -> 435390; 112 -> 113.
+const BASELINE = { triangles: 435390, drawGroups: 113 };
 // The Verge roughly doubles the world, and STEP 7's POI stamps add ~100k on top
 // of step 6's scatter. This ratio is an inventory guard against an accidental
 // blowup, NOT the per-frame cost: POI stamps are merged meshes with tight
@@ -748,6 +754,8 @@ try {
     await forceOpenGates(gpage);            // arena for E — faster and deterministic
     await gpage.click('#btnPlay');
     await gpage.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 30000 });
+    // RETARGET 2026-08-26: dismiss the first-arrival welcome (see _harness.dismissDialog)
+    await gpage.evaluate(() => { const d = window.__game?.dialog; for (let i = 0; d?.open && i < 12; i++) d.advance(); });
     await gpage.waitForTimeout(900);
 
     const atGate = await gpage.evaluate(() => {

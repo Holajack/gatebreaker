@@ -142,6 +142,22 @@ export async function gotoGame(page, { path: route = '/', waitMs = 2400 } = {}) 
 // tool gets there without walking a thumbstick across a plaza. Tools that want
 // to test the WALKED route should drive city.portals themselves; see
 // tools/flow-test.mjs.
+// RETARGET 2026-08-26 (first-arrival welcome): a fresh save's first city entry
+// now opens the welcome dialog (save.welcomed), whose full-viewport overlay
+// owns every click while open — exactly what a first-time player sees and
+// taps through. Suites do the same: advance it closed. onDone persists
+// welcomed=true, so later city returns in the same run stay clean. Safe to
+// call when no dialog is up (the loop no-ops); loop-capped so a stuck script
+// cannot hang a suite.
+export async function dismissDialog(page) {
+  await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 20000 })
+    .catch(() => {});
+  await page.evaluate(() => {
+    const d = window.__game?.dialog;
+    for (let i = 0; d?.open && i < 12; i++) d.advance();
+  });
+}
+
 export async function enterGate(page, { rank = null, waitMs = 2200 } = {}) {
   await page.click('#btnPlay');
   // Give the city a moment to mount, then jump to the fast-travel list.
@@ -150,8 +166,9 @@ export async function enterGate(page, { rank = null, waitMs = 2200 } = {}) {
     null, { timeout: 15000 },
   ).catch(() => {});
   if (!(await page.locator('#gateList .gate').count())) {
-    await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 20000 })
-      .catch(() => {});
+    // Tap through the first-arrival welcome the way a player would (and
+    // persist welcomed=true so a later city return in this run is clean).
+    await dismissDialog(page);
     await page.evaluate(() => window.__app?.go('gates'));
   }
   await page.waitForSelector('#gateList .gate', { timeout: 10000 });

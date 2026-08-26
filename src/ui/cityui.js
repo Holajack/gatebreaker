@@ -102,6 +102,12 @@ const CSS = `
    the pause button and the vitals stay. */
 body.gb-city #hud .skills { display: none !important; }
 body.gb-city #hud .objective { display: none !important; }
+/* Hiding .objective removes the flex:1 spacer that right-aligns the icon
+   buttons in .hud-top, so without this they collapse toward screen centre
+   next to the level/rank readout — the arrangement the owner rejected.
+   margin-right:auto on the first flex item absorbs the freed space and pins
+   every injected button to the top-right edge, matching the dungeon. */
+body.gb-city #hud .vitals { margin-right: auto; }
 body.gb-city #btnQuit { display: none !important; }
 `;
 

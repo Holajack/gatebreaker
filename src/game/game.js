@@ -2810,9 +2810,13 @@ export class Game {
     // target that walks INTO the arc between two frames. Arm-frame targets
     // are seeded into the sweep's already-hit list, so the two passes can
     // never double-bill one swing.
-    const hits = isRadial(step)
+    // Occlusion runs on the RESULT of the shipped instant test (never inside
+    // _coneTargets — weapon-feel-test pins that exact call): a pillar between
+    // the swing and the body eats the hit. See _meleeBlocked.
+    const hits = (isRadial(step)
       ? this.enemies.filter((e) => tmpV2.copy(e.pos).sub(p.pos).setY(0).length() <= range + e.radius)
-      : this._coneTargets(p.pos, p.yaw, range, arc);
+      : this._coneTargets(p.pos, p.yaw, range, arc)
+    ).filter((e) => !this._meleeBlocked(p.pos.x, p.pos.z, p.pos.y, e.pos.x, e.pos.z));
     // chargeMul is 1 on every step without a charge clause (all shipped
     // tables), so the sword's byte-equality contract is untouched. On the
     // greatsword finisher it is 1 -> 2.1 with the hold.
@@ -2858,7 +2862,10 @@ export class Game {
       // alone staggers. Stagger only: the damage cone above is untouched.
       if (w.rule?.fx.staggerOnMiss && stagger > 0) {
         for (const e of this._coneTargets(p.pos, p.yaw, range * 1.5, arc)) {
-          if (!hits.includes(e) && e.hp > 0) e.stagger = Math.max(e.stagger, stagger);
+          if (!hits.includes(e) && e.hp > 0
+              && !this._meleeBlocked(p.pos.x, p.pos.z, p.pos.y, e.pos.x, e.pos.z)) {
+            e.stagger = Math.max(e.stagger, stagger);
+          }
         }
       }
       // (VIGIL ASCENDANT's dash reset moved into _swingConnect — it keys on
@@ -2888,7 +2895,13 @@ export class Game {
           // blast can never eat ANSWER's queued basic-attack crit.
           const ar = MASTERY.aftershock.radius;
           [...this.enemies].forEach((e) => {
-            if (e.hp > 0 && tmpV2.copy(e.pos).sub(p.pos).setY(0).length() <= ar + e.radius) {
+            // Wall-honesty (review 2026-08-26): the aftershock is the
+            // player's radial — same rule as the boss slam, a pillar takes
+            // the blow. Without this a Breaker finisher whose own cone was
+            // just refused through a pillar would land 40% atk through it
+            // anyway, reproducing the exact playtest complaint.
+            if (e.hp > 0 && tmpV2.copy(e.pos).sub(p.pos).setY(0).length() <= ar + e.radius
+                && !this._meleeBlocked(p.pos.x, p.pos.z, p.pos.y, e.pos.x, e.pos.z)) {
               this._damageEnemy(e, this.derived.atk * MASTERY.aftershock.atkFrac, {
                 from: p.pos, knockback: 4, origin: 'skill',
               });
@@ -3077,7 +3090,12 @@ export class Game {
         const dist = Math.hypot(dx, dz);
         const inside = dist <= _pSwing.range + (e.radius || 0)
           && (dist < 0.001 || _pSwing.radial
-            || (dx * fwdX + dz * fwdZ) / dist > halfCos);
+            || (dx * fwdX + dz * fwdZ) / dist > halfCos)
+          // Wall-honesty at connect time (see _meleeBlocked): a covered body
+          // falls into the else branch below, is spliced from `already`, and
+          // stays hittable if it steps clear while the window is open —
+          // identical semantics to the sector clamp.
+          && !this._meleeBlocked(p.pos.x, p.pos.z, p.pos.y, e.pos.x, e.pos.z);
         if (inside) {
           // _sweepOut is a snapshot: _swingConnect can kill (splicing
           // this.enemies), and the collector is not mid-iteration here.
@@ -3860,7 +3878,10 @@ export class Game {
     p.skillSwing = 0.3;
     this._faceNearest(sk.range);
 
-    const hits = this._coneTargets(p.pos, p.yaw, sk.range, sk.arc);
+    const hits = this._coneTargets(p.pos, p.yaw, sk.range, sk.arc)
+      // Wall-honesty (see _meleeBlocked): the cleave is a melee arc, not a
+      // through-wall pulse.
+      .filter((e) => !this._meleeBlocked(p.pos.x, p.pos.z, p.pos.y, e.pos.x, e.pos.z));
     // origin:'skill' — skill damage never consumes ANSWER's queued crit
     // (that charge belongs to the next BASIC attack, per the mastery text).
     hits.forEach((e) => this._damageEnemy(e, this.derived.atk * sk.dmg * this.derived.skillMul * plan.mul, {
@@ -4776,6 +4797,7 @@ export class Game {
       flinch: p.hurt > 0 ? (p.flinchSide || 0) : 0,
       airborne: !p.body.grounded,
       riseRate: p.vel.y,
+      airFlip: this._airFlipFor(p.body),
       // The time-scaled dt, so hit-stop and level-up dilation slow the
       // AnimationMixer too. Without it the mixer reads wall-clock and skinned
       // characters keep moving at full speed through a freeze frame.
@@ -4810,6 +4832,52 @@ export class Game {
           { feetY: e.pos.y + PROJECTILE_Y }));
     }
     return a.losBlocked;
+  }
+
+  /**
+   * Wall-honesty for MELEE, both directions (playtest: "I can hit an enemy
+   * through the wall" — the gate pillars). Every ranged path already pays for
+   * walls (projectile flight, bow/staff lock validation, caster standoff LOS
+   * above); this is the same lineBlocked probe asked at connect time for
+   * swings, cleaves and enemy patterns. feetY = attacker floor + 1.2, the
+   * torso-plane precedent, so full-height pillars and walls block while
+   * ankle-high scatter does not. Pure static-geometry query — deterministic,
+   * no RNG — and the count===0 early-out keeps empty arenas free. City mode
+   * has no obstacleField, so the optional chain makes it a no-op there.
+   * Probes fire only at connect instants, never per-frame across the field —
+   * with one bounded exception: a sweep whose covered target is BLOCKED
+   * un-spends its token (the pop-guards below), so it re-probes each covered
+   * frame for the rest of that one window (~0.3-0.5 s, <=8 broadphase
+   * lookups each, one attacker). That is the price of "step out of cover
+   * mid-window and the blade can still find you", and it is paid only while
+   * a wall is actually between two fighters.
+   */
+  _meleeBlocked(ax, az, ay, bx, bz) {
+    const f = this.world?.obstacleField;
+    return Boolean(f && f.lineBlocked(ax, az, bx, bz, { radius: 0.2, feetY: ay + 1.2 }));
+  }
+
+  /**
+   * Normalized flip progress for the player's airborne somersault — 0..1
+   * across 90% of PREDICTED flight (airTime + flightRemaining) so the Roll
+   * clip stands up just before touchdown; -1 holds the braced air pose (no
+   * flip). The 0.62 s threshold sits BETWEEN the shortest physical tap
+   * (~0.56 s) and a held jump (~0.72 s) — review 2026-08-26 caught the first
+   * cut's 0.55 sitting below the tap floor, which made "taps don't flip"
+   * dead code. Latched monotonic while airborne: a mid-air ground change
+   * (a ledge lip rising under the arc) re-times the prediction, but a flip
+   * in progress never snaps back to the crouch and never scrubs backward.
+   * Player-only state (one latch per Game); resets on any grounded frame.
+   * Purely body-derived — deterministic, no RNG.
+   */
+  _airFlipFor(body) {
+    if (body.grounded) { this._airFlipLatch = -1; return -1; }
+    const total = body.airTime + body.flightRemaining();
+    let v = total >= 0.62 ? Math.min(1, body.airTime / (total * 0.9)) : -1;
+    const prev = this._airFlipLatch ?? -1;
+    if (prev >= 0) v = Math.max(prev, v);
+    this._airFlipLatch = v;
+    return v;
   }
 
   /**
@@ -5067,12 +5135,20 @@ export class Game {
         advanceSweep(e.sweep, edt, e.pos.x, e.pos.z, e.yaw);
         const spat = e._sweepPat;
         if (spat && sweepHitsPoint(e.sweep, p.pos.x, p.pos.z, 0.4)) {
-          // Folded multi-hit, unchanged from stage 2 (dmg x hits in one
-          // application): _damagePlayer's 0.42 s i-frames still eat any
-          // honest second tap, and the stalker's pressure ledger
-          // (ENEMY_RHYTHM's gcd derivation) is balanced against the fold.
-          // Unfolding waits for the poise stage to reshape player i-frames.
-          this._damagePlayer(e.atk * (spat.dmg ?? 1) * (spat.hits || 1), e.pos, e);
+          if (this._meleeBlocked(e.pos.x, e.pos.z, e.pos.y, p.pos.x, p.pos.z)) {
+            // Wall between blade and player: un-spend the token
+            // sweepHitsPoint just pushed (always the last element) so a
+            // player who leaves cover while the window is open can still be
+            // struck — the window is not consumed by a blocked probe.
+            e.sweep.already.pop();
+          } else {
+            // Folded multi-hit, unchanged from stage 2 (dmg x hits in one
+            // application): _damagePlayer's 0.42 s i-frames still eat any
+            // honest second tap, and the stalker's pressure ledger
+            // (ENEMY_RHYTHM's gcd derivation) is balanced against the fold.
+            // Unfolding waits for the poise stage to reshape player i-frames.
+            this._damagePlayer(e.atk * (spat.dmg ?? 1) * (spat.hits || 1), e.pos, e);
+          }
         }
         if (!e.sweep.live) {
           // RETREAT (the lancer's hop-back) moved from the arm frame to the
@@ -5492,7 +5568,8 @@ export class Game {
     const d = tmpV.copy(p.pos).sub(e.pos).setY(0);
     if (d.length() < range) {
       const fwd = this._forward(e.yaw);
-      if (d.normalize().dot(fwd) > 0.2) {
+      if (d.normalize().dot(fwd) > 0.2
+          && !this._meleeBlocked(e.pos.x, e.pos.z, e.pos.y, p.pos.x, p.pos.z)) {
         // The striker rides along so the damage pipeline can ask its tier —
         // the ossuary 5pc cares whether this was trash (grunt/stalker).
         this._damagePlayer(e.atk, e.pos, e);
@@ -5615,9 +5692,15 @@ export class Game {
     // wardpulse now genuinely RIPPLES outward across its 0.14 s instead of
     // detonating; the enemy-loop advance carries the rest of the window.
     if (sweepHitsPoint(sw, p.pos.x, p.pos.z, 0.4)) {
-      // Folded multi-hit — see the method note. The striker rides along so
-      // the damage pipeline can ask its tier (ossuary 5pc cares).
-      this._damagePlayer(e.atk * (pat.dmg ?? 1) * (pat.hits || 1), e.pos, e);
+      if (this._meleeBlocked(e.pos.x, e.pos.z, e.pos.y, p.pos.x, p.pos.z)) {
+        // Wall-honesty pop-guard — mirror of the enemy-loop continuation:
+        // un-spend the just-pushed token so cover doesn't consume the window.
+        sw.already.pop();
+      } else {
+        // Folded multi-hit — see the method note. The striker rides along so
+        // the damage pipeline can ask its tier (ossuary 5pc cares).
+        this._damagePlayer(e.atk * (pat.dmg ?? 1) * (pat.hits || 1), e.pos, e);
+      }
     }
     if (sh.shape === PATTERN_SHAPE.CIRCLE) {
       // A radial resolve reads as a shockwave, whatever hit: the ring IS the
@@ -5787,7 +5870,13 @@ export class Game {
     if (b._slam && b.telegraph <= 0) {
       b._slam = false;
       const r = 11;
-      if (this.player.pos.distanceTo(b.pos) < r) this._damagePlayer(b.atk * 1.4, b.pos, b);
+      // Wall-honesty: the radius-11 slam no longer reaches through boss-room
+      // pillars (see _meleeBlocked). The visual ring/shake still fire — the
+      // ground shook, the pillar took the blow.
+      if (this.player.pos.distanceTo(b.pos) < r
+          && !this._meleeBlocked(b.pos.x, b.pos.z, b.pos.y, this.player.pos.x, this.player.pos.z)) {
+        this._damagePlayer(b.atk * 1.4, b.pos, b);
+      }
       this.fx.ring(b.pos, TELL_DANGER_COLOR, r * 1.1, 0.5);
       this.fx.burst(b.pos.clone().setY(0.6), 60, b.base.glow, { speed: 16, up: 4, life: 0.9, spread: 2 });
       this.fx.addShake(1.0);

@@ -247,6 +247,9 @@ try {
   // ------------------------------------------------------------ 1. Threshold
   await page.click('#btnPlay');
   await waitForSlug('threshold');
+  // RETARGET 2026-08-26: tap through the first-arrival welcome overlay
+  // (save.welcomed) — it owns every click while open. See _harness.dismissDialog.
+  await page.evaluate(() => { const d = window.__game?.dialog; for (let i = 0; d?.open && i < 12; i++) d.advance(); });
   await page.waitForTimeout(800);
   const home = await snapshot();
   report.home = home;

@@ -90,6 +90,12 @@ export function freshSave() {
     //                An absent value reads as ['threshold'].
     settlement: 'threshold',
     visited: ['threshold'],
+    //   welcomed   — the first-arrival welcome overlay has been shown and
+    //                dismissed (citymode.enter is the single writer). Absent
+    //                reads as false, which IS the migration: an existing
+    //                player sees the welcome once after this update — a
+    //                one-time re-greeting, not a bug.
+    welcomed: false,
     // --- The four CLASSES_SPEC fields. All additive, all defaulting to "the
     // system does not exist for this save", which is exactly the state every
     // profile written before Wave 3-B is in — so, on the shop/worldTime
@@ -378,6 +384,7 @@ function withClassFields(out, raw) {
   // spreads above can carry hand-edited garbage for either.
   out.settlement = sanitiseSettlement(raw.settlement);
   out.visited = sanitiseVisited(raw.visited);
+  out.welcomed = Boolean(raw.welcomed);
   return out;
 }
 

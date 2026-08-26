@@ -66,6 +66,9 @@ async function walkTo(page_, tx, tz, { timeoutMs = 25000, stopWithin = 1.0 } = {
 async function enterCityUi(page_, { waitMs = 900 } = {}) {
   await page_.click('#btnPlay');
   await page_.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 30000 });
+  // RETARGET 2026-08-26: tap through the first-arrival welcome overlay
+  // (save.welcomed) — it owns every click while open. See _harness.dismissDialog.
+  await page_.evaluate(() => { const d = window.__game?.dialog; for (let i = 0; d?.open && i < 12; i++) d.advance(); });
   await page_.waitForTimeout(waitMs);
 }
 
@@ -85,6 +88,8 @@ try {
 
   await page.click('#btnPlay');
   await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 30000 });
+  // RETARGET 2026-08-26: first-arrival welcome — see enterCityUi above.
+  await page.evaluate(() => { const d = window.__game?.dialog; for (let i = 0; d?.open && i < 12; i++) d.advance(); });
   await page.waitForTimeout(900);
 
   const arrived = await evalGame(page, (g) => ({

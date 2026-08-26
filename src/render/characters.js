@@ -1050,7 +1050,7 @@ class CharacterInstance {
    */
   animate({
     moving = false, speed = 0, attackPhase = 0, attackContact = 0.5,
-    combo = 0, dashPhase = 0, hurt = 0, airborne = false, dt = null,
+    combo = 0, dashPhase = 0, hurt = 0, airborne = false, airFlip = -1, dt = null,
   } = {}) {
     const d = dt == null ? this._wallDt() : Math.min(0.05, Math.max(0, dt));
 
@@ -1121,7 +1121,24 @@ class CharacterInstance {
         this.play('hurt', { fade: 0.05, once: true });
         this._hurtT = Math.max(0.2, this.clipDuration('hurt')) * 0.8;
       } else if (airborne) {
+        // 'jump' is the pack's Roll somersault standing in for a jump clip.
+        // Free-running it never fit: the clip is 1.3 s, a full jump ~0.72 s,
+        // so every jump landed mid-tumble (the playtest's broken flip). Scrub
+        // it by the caller's predicted-flight progress instead — the same
+        // pattern the dash uses above. airFlip 0..1 paces the tumble to stand
+        // up just before touchdown; airFlip -1 (short hop / kerb drop / a
+        // caller that doesn't compute it) holds the ROLL_IN crouch as a
+        // braced air pose, no somersault. If the pack ever loses Roll, the
+        // 'jump' state falls back to Run and this freezes a stride pose —
+        // acceptable degradation.
         this.play('jump', { fade: 0.12 });
+        const a = this._cur;
+        if (a) {
+          a.paused = true;
+          const dur = a.getClip().duration;
+          const t = airFlip >= 0 ? Math.min(1, airFlip) : 0;
+          a.time = dur * (ROLL_IN + (ROLL_OUT - ROLL_IN) * t);
+        }
       } else if (moving) {
         this.play(speed > this.runSpeed ? 'run' : 'walk', { fade: 0.15 });
       } else {

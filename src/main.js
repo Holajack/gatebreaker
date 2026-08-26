@@ -75,6 +75,12 @@ const app = new AppState({
     // a gate-paused sim never unpaused (review finding). Closing here keeps
     // flag, classList and pause in one story on every path.
     if (screen !== 'map' && game.mapUI?.isOpen) game.mapUI.close();
+    // Same reconcile for the dialogue overlay: a router transition away from
+    // the city (death auto-replace, a tool's __app.go) would otherwise strand
+    // body.gb-dialog + open=true, hijacking hardware-back on the next screen.
+    // close() discards without firing onDone — leaving mid-read never counts
+    // as "read".
+    if (screen !== 'city' && game.dialog?.open) game.dialog.close();
     switch (screen) {
       case 'title':
         game.quit();

@@ -216,6 +216,8 @@ try {
   await gotoGame(page);
   await page.click('#btnPlay');
   await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 30000 });
+  // RETARGET 2026-08-26: dismiss the first-arrival welcome (see _harness.dismissDialog)
+  await page.evaluate(() => { const d = window.__game?.dialog; for (let i = 0; d?.open && i < 12; i++) d.advance(); });
   await page.waitForTimeout(800);
 
   // Fund the wallet and rank him up so the shelf has something worth buying.
@@ -377,6 +379,8 @@ try {
   // And the row is still marked bought when he walks back in.
   await page.click('#btnPlay');
   await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 30000 });
+  // RETARGET 2026-08-26: dismiss the first-arrival welcome (see _harness.dismissDialog)
+  await page.evaluate(() => { const d = window.__game?.dialog; for (let i = 0; d?.open && i < 12; i++) d.advance(); });
   await page.waitForTimeout(600);
   const reopened = await page.evaluate(() => {
     window.__game.shopUI.open();

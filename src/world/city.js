@@ -569,6 +569,16 @@ function buildStreets(spec = THRESHOLD) {
   return { streets, tracks };
 }
 
+// Deterministic hash — mulberry-style integer mix over grid indices, so
+// paint jitter and slab tones are stable for a given seed and cost no state.
+// Module-level because both _buildGround (face jitter) and
+// _buildStreetSurfaces (slab alternation) draw from it.
+function hashGrid(ix2, jz2, seed) {
+  let h = (ix2 * 374761393 + jz2 * 668265263 + seed) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
 function distToSegment(x, z, s) {
   const dx = s.x2 - s.x1, dz = s.z2 - s.z1;
   const l2 = dx * dx + dz * dz;
@@ -977,10 +987,12 @@ export class City {
     // in town has an interior, so nothing else noticed.
     this.interiors.levelPlots();
     this.field.bake();
+    this._carveStreets();
 
     // 3. Geometry.
     this._buildSkyAndLight();
     this._buildGround();
+    this._buildStreetSurfaces();
     // B4a: the wall is OPTIONAL (wall.built === false skips it — Emberfall).
     // A wall-less settlement's boundary is the Verge blend itself: resolve()'s
     // walk limit still fences the player, and nothing else consumes the wall
@@ -1175,6 +1187,58 @@ export class City {
 
   // ----------------------------------------------------------------- ground
 
+  /**
+   * Sink a dished roadbed (16 cm) into the baked heightfield under every
+   * street, so roads are a SURFACE, not just paint — the owner's playtest
+   * verdict on the flat town was "it doesn't look like there's roads…
+   * there's no elevation difference." Runs strictly AFTER field.bake() and
+   * BEFORE any geometry or prop placement: the mesh (gpos y), heightAt and
+   * every later field.height() reader all see the carved bed, so lanterns,
+   * benches and citizens follow automatically and the city-test mesh/heightAt
+   * agreement holds by construction. The layout RNG ran before this;
+   * downstream rnd-consuming passes (props, nature scatter, citizens) DO
+   * read carved heights — which is exactly why the carve lives entirely
+   * INSIDE the carriageway (zero at d = s.w): street-verge scatter
+   * candidates at s.w+0.5.. read the same slopes they always did, so the
+   * carve cannot flip an accept/reject and shift the seeded stream
+   * (citylife-test's byte-pinned npc positions are the fence).
+   *
+   * The band ramps from full depth at s.w−1.4 to ZERO at the kerb line
+   * (s.w) — the road is dished like a real cambered lane, and the ground at
+   * and beyond the kerb keeps its exact grade, so the sidewalk slabs of
+   * _buildStreetSurfaces sit flush with the walkable field (no float).
+   *
+   * Gates: never past wall.half (the r 138+ stitch band to the Verge must
+   * stay byte-identical — carving it would crack the city/frontier seam),
+   * never on tracks (feet-worn paths have no engineered bed), and faded out
+   * across the plaza rim so the plaza slab keeps its own grade. Ramp slope
+   * 0.16/1.4 ≈ 0.11 — under every prop slope gate (0.42) and far under
+   * stepHeight 0.4, so movement just walks it.
+   */
+  _carveStreets() {
+    const f = this.field;
+    const { half: WALL_HALF, plazaR: PLAZA_R } = this.spec.wall;
+    const DEPTH = 0.16;
+    for (let jz = 0; jz <= f.n; jz++) {
+      const z = -f.half + jz * f.cell;
+      for (let ix = 0; ix <= f.n; ix++) {
+        const x = -f.half + ix * f.cell;
+        if (Math.max(Math.abs(x), Math.abs(z)) >= WALL_HALF) continue;
+        let sink = 0;
+        for (const s of this.streets) {
+          const d = distToSegment(x, z, s);
+          if (d >= s.w) continue;
+          sink = Math.max(sink, 1 - smoothstep(s.w - 1.4, s.w, d));
+          if (sink >= 1) break;
+        }
+        if (sink <= 0) continue;
+        sink *= smoothstep(PLAZA_R, PLAZA_R + 2.5, Math.hypot(x, z));
+        if (sink <= 0) continue;
+        f.h[jz * f.stride + ix] -= DEPTH * sink;
+      }
+    }
+  }
+
   _buildGround() {
     const f = this.field;
     const n = f.n, stride = f.stride;
@@ -1228,13 +1292,8 @@ export class City {
     const c2 = new THREE.Color();
     const seed = f.seed;
 
-    // Deterministic hash — mulberry-style integer mix over grid indices, so
-    // the jitter is stable for a given seed and costs no state.
-    const hash2 = (ix2, jz2) => {
-      let h = (ix2 * 374761393 + jz2 * 668265263 + seed) | 0;
-      h = Math.imul(h ^ (h >>> 13), 1274126177);
-      return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
-    };
+    // Deterministic hash over grid indices — see module-level hashGrid.
+    const hash2 = (ix2, jz2) => hashGrid(ix2, jz2, seed);
 
     // PASS 1 — zone colour and "worked stone" weight per grid vertex.
     // No jitter here: jitter is per FACE in pass 2, because a per-vertex
@@ -1386,8 +1445,18 @@ export class City {
             mr += vcol[k * 3]; mg += vcol[k * 3 + 1]; mb += vcol[k * 3 + 2];
             ms += vstone[k];
           }
-          const amp = ms > 1.5 ? 0.035 : 0.10;
-          const jit = (1 + (hash2(ix * 2 + t, jz * 2 + 1013) - 0.5) * 2 * amp) / 3;
+          // Owner playtest 2026-08-26: the ±10% per-TRIANGLE jitter overshot —
+          // "you can tell they're just triangles, different shadings, not the
+          // same colour." Two changes, paint-only: (1) the hash key drops the
+          // `+ t` / doubled lattice so BOTH triangles of a quad share one
+          // jitter — the patchwork reads as 3.4 m tiles, not triangle confetti;
+          // (2) any face touching pavement (ms > 0.4, not just fully-paved
+          // ms > 1.5) counts as worked stone, so road-EDGE faces stop flashing
+          // grass-amplitude noise right where the eye follows the street line.
+          // Amplitudes pulled down (0.035→0.008 stone, 0.10→0.06 grass): the
+          // surfaces still patchwork, they just stop shouting.
+          const amp = ms > 0.4 ? 0.008 : 0.06;
+          const jit = (1 + (hash2(ix, jz) - 0.5) * 2 * amp) / 3;
           mr *= jit; mg *= jit; mb *= jit;
           for (let v = 0; v < 3; v++) {
             const k = corners[v];
@@ -1420,6 +1489,126 @@ export class City {
     this._ownedGeometries.push(geo);
     this._ownedMaterials.push(mat);
     this._triangles += triCount;
+  }
+
+  /**
+   * Crisp sidewalk slabs + vertical curb faces along every street edge — the
+   * visible answer to "there's no actual road versus sidewalk". The CARVED
+   * bed (see _carveStreets) is the carriageway; this mesh draws the raised
+   * lip that makes the 10 cm drop legible: a ~1.8 m stone slab band at street
+   * grade and a curb face down to the bed. One merged non-indexed mesh, one
+   * material, +1 draw call, a few thousand triangles.
+   *
+   * Urban settlements only: a 'green'-plaza settlement (Emberfall's lanes,
+   * Birchreach's forest tracks) keeps kerbless packed earth — that contrast
+   * IS the village identity, and it keeps village/forest baselines untouched.
+   *
+   * Purely visual and derived from the already-built street list + baked
+   * field: no RNG draws (slab tone alternation is the stateless hash2), no
+   * collision records (a 10 cm lip is under stepHeight 0.4 — feet just walk
+   * it), and heightAt keeps reading the ground mesh, which city-test raycasts
+   * by name ('city_ground'), so the agreement check never sees this mesh.
+   * Slabs clip at other streets' mouths (a curb never runs across a junction)
+   * and stop at the plaza rim and the wall band.
+   */
+  _buildStreetSurfaces() {
+    if (this.spec.wall.plazaStyle === 'green') return;
+    if (!this.streets.length) return;
+    const f = this.field;
+    const { half: WALL_HALF, plazaR: PLAZA_R } = this.spec.wall;
+    const LIFT = 0.02;            // clears the ground skin, far under z-fight scale on slopes
+    // The sidewalk is RAISED — a 5.5 cm lip above grade, the way real curbs
+    // are — because the carve is zero AT the kerb line (see _carveStreets):
+    // there is no recess at d = s.w for a sunken face to drop into. The
+    // player's feet sink at most CURB_H into the slab visually (tapering to
+    // LIFT at the grass edge) — far under stepHeight and invisible at the
+    // game camera — and the read across the kerb is CURB_H up + the 16 cm
+    // dish falling away beyond it: an unmistakable street.
+    const CURB_H = 0.055;
+    const WALK_W = 1.8;           // slab band width
+    const GRADE_AT = 0.4;         // sample street-side grade just past the kerb (uncarved)
+    const STEP = 3;               // station spacing along the street, metres
+    // Slab tones sit well LIGHTER than the carriageway paint (road 0xbbb29a /
+    // roadWorn 0x958a67) so sidewalk vs road separates in colour as well as
+    // height — review 2026-08-26 measured the first cut within ~8% of the
+    // street paint, which read as one surface from the game camera.
+    const slabA = new THREE.Color(0xc6bda3);
+    const slabB = new THREE.Color(0xb6ac8d);
+    const curbC = new THREE.Color(0x7e7660);
+
+    const pos = [];
+    const col = [];
+    const quad = (ax, ay, az, bx, by, bz, cx2, cy, cz2, dx2, dy, dz2, c) => {
+      // two triangles a-b-c, a-c-d; DoubleSide material makes winding moot
+      pos.push(ax, ay, az, bx, by, bz, cx2, cy, cz2, ax, ay, az, cx2, cy, cz2, dx2, dy, dz2);
+      for (let v = 0; v < 6; v++) col.push(c.r, c.g, c.b);
+    };
+
+    for (let si = 0; si < this.streets.length; si++) {
+      const s = this.streets[si];
+      const dx = s.x2 - s.x1, dz = s.z2 - s.z1;
+      const len = Math.hypot(dx, dz);
+      if (len < STEP) continue;
+      const ux = dx / len, uz = dz / len;
+      const px = -uz, pz = ux;
+      const count = Math.max(2, Math.ceil(len / STEP) + 1);
+      const step = len / (count - 1);
+      for (const sgn of [-1, 1]) {
+        let prev = null;
+        for (let i = 0; i < count; i++) {
+          const t = i * step;
+          const cx = s.x1 + ux * t, cz = s.z1 + uz * t;
+          const ex = cx + px * sgn * s.w, ez = cz + pz * sgn * s.w;
+          const ox = cx + px * sgn * (s.w + WALK_W), oz = cz + pz * sgn * (s.w + WALK_W);
+          let ok = Math.max(Math.abs(ox), Math.abs(oz)) < WALL_HALF - 1
+            && Math.hypot(ex, ez) > PLAZA_R + 1.5;
+          if (ok) {
+            for (let oi = 0; oi < this.streets.length; oi++) {
+              if (oi === si) continue;
+              if (distToSegment(ex, ez, this.streets[oi]) < this.streets[oi].w + 0.35) { ok = false; break; }
+            }
+          }
+          if (!ok) { prev = null; continue; }
+          const gx = cx + px * sgn * (s.w + GRADE_AT), gz = cz + pz * sgn * (s.w + GRADE_AT);
+          // Curb foot at ground grade on the kerb line; slab top CURB_H above
+          // the just-past-kerb grade; outer edge feathers back to near-grade
+          // so the slab meets the grass without a seam.
+          const yTop = f.height(gx, gz) + LIFT + CURB_H;
+          const yBot = f.height(ex, ez) + 0.005;
+          const yOut = f.height(ox, oz) + LIFT;
+          const st = { ex, ez, ox, oz, yTop, yBot, yOut };
+          if (prev) {
+            const tone = hashGrid(si * 7 + (sgn > 0 ? 3 : 0), i, f.seed) < 0.5 ? slabA : slabB;
+            // curb face: bed level up to slab level along the street edge
+            quad(prev.ex, prev.yBot, prev.ez, st.ex, st.yBot, st.ez,
+              st.ex, st.yTop, st.ez, prev.ex, prev.yTop, prev.ez, curbC);
+            // slab band: street edge out to the grass line
+            quad(prev.ex, prev.yTop, prev.ez, st.ex, st.yTop, st.ez,
+              st.ox, st.yOut, st.oz, prev.ox, prev.yOut, prev.oz, tone);
+          }
+          prev = st;
+        }
+      }
+    }
+    if (!pos.length) return;
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(col), 3));
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    const mat = new THREE.MeshStandardMaterial({
+      vertexColors: true, flatShading: true, roughness: 0.95, metalness: 0.0,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.name = 'city_streets';
+    mesh.receiveShadow = true;
+    mesh.castShadow = false;
+    this.group.add(mesh);
+    this._ownedGeometries.push(geo);
+    this._ownedMaterials.push(mat);
+    this._triangles += pos.length / 9;
   }
 
   // ------------------------------------------------------------- city wall

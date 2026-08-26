@@ -742,7 +742,10 @@ export class Frontier {
           const k = corners[v];
           mr += vcol[k * 3]; mg += vcol[k * 3 + 1]; mb += vcol[k * 3 + 2];
         }
-        const jit = (1 + (hash2(ix * 2 + t, jz * 2 + 977) - 0.5) * 0.2) / 3;
+        // Mirrors the city ground's playtest calm-down (city.js pass 2): one
+        // jitter per QUAD (no `+ t`), amplitude ±10% → ±6%, so the frontier
+        // stops reading as triangle confetti while keeping the patchwork.
+        const jit = (1 + (hash2(ix, jz + 977) - 0.5) * 0.12) / 3;
         mr *= jit; mg *= jit; mb *= jit;
         for (let v = 0; v < 3; v++) {
           const k = corners[v];

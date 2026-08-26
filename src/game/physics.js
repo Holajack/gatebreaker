@@ -317,6 +317,31 @@ export class CharacterBody {
   heightAboveGround() { return this.pos.y - this.groundY; }
 
   /**
+   * Seconds until this body reaches the ground under current ballistics —
+   * 0 when grounded. Read-only kinematics over live state (height above
+   * ground, vel.y, the rise/fall gravity pair), so a mid-rise jump-cut is
+   * reflected the frame it happens. Drives the air-flip scrub in
+   * CharacterInstance.animate: total predicted flight = airTime + this,
+   * letting the somersault be paced to land exactly on touchdown instead of
+   * playing the 1.3 s Roll clip free-running through a 0.7 s jump — the
+   * playtest's "the flip doesn't complete before hitting the ground".
+   * Deterministic, no state, no side effects; ignores mid-air ground changes
+   * (a ledge sliding under the feet), which only re-times a cosmetic scrub.
+   */
+  flightRemaining() {
+    if (this.grounded) return 0;
+    const h = Math.max(0, this.pos.y - this.groundY);
+    const g = this.gravity;
+    const gf = g * this.fallGravityScale;
+    const vy = this.vel.y;
+    if (vy > 0) {
+      // rise to apex at g, then fall (h + rise height) at the fall gravity
+      return vy / g + Math.sqrt(2 * (h + (vy * vy) / (2 * g)) / gf);
+    }
+    return (vy + Math.sqrt(vy * vy + 2 * gf * h)) / gf;
+  }
+
+  /**
    * Initial impulse speed that carries this body `distance` units before it
    * settles back to a walk — so dashes and knockbacks are authored in world
    * units instead of magic force numbers:

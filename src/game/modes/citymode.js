@@ -17,6 +17,7 @@ import { canAscend } from '../classes.js';
 // this mode, game.enterClassTrial and the trial-test all agree by construction.
 import { classTrialAvailable } from '../progression.js';
 import { makeDayState } from '../../render/daynight.js';
+import { makeTalkMarker } from '../../render/talkmarker.js';
 // B3 "honest venues": the sealed doors' lines come from the strings module —
 // its first live consumer, per its own "migrate opportunistically" rule.
 // C-TALK adds tLines (dialogue bodies are arrays) and the quest ledger's
@@ -274,6 +275,19 @@ export class CityMode extends GameMode {
     }
     this.city.build(this._seed, g.save);
     this.refreshPortalLocks();
+    // Talk markers over the door personas (playtest 2026-08-26: conversable
+    // NPCs were invisible until the 2.2 m prompt bubble). Bodiless door zones
+    // get a floating speech-bubble sprite at the door; sprites parent to
+    // city.group so teardown detaches them with the town (the shared marker
+    // material is module-owned and survives — see talkmarker.js). Zero RNG.
+    this._talkMarkers = [];
+    for (const it of (this.city.interactables || [])) {
+      if (!TALK_DOORS[it.id]) continue;
+      const mk = makeTalkMarker(0.9);
+      mk.position.set(it.pos.x, this.city.heightAt(it.pos.x, it.pos.z) + 3.1, it.pos.z);
+      this.city.group.add(mk);
+      this._talkMarkers.push({ sprite: mk, baseY: mk.position.y, phase: this._talkMarkers.length * 1.7 });
+    }
     // Region grade (Wave B6): the descriptor's palette row drives the glow
     // composite's grade uniforms — re-applied per build because setGrade
     // persists nothing. Threshold carries no row yet (null = shipped look);
@@ -324,6 +338,24 @@ export class CityMode extends GameMode {
     // hour here so arriving at midnight does not flash one afternoon frame.
     this._applyDay();
     this._syncHud();
+
+    // FIRST-ARRIVAL WELCOME (playtest 2026-08-26: "no initial welcome
+    // screen"). Once per save, through the existing dialogue overlay — no
+    // new panel, no new button. onDone persists the flag, so a dungeon
+    // round-trip or a router exit mid-read (which close() discards without
+    // firing onDone) simply re-offers it next arrival. Functional copy only;
+    // see strings.js 'welcome.lines'. THRESHOLD ONLY (review 2026-08-26):
+    // the copy names Threshold's own doors, and the welcomed-absent
+    // migration means a pre-update save parked in Emberfall would otherwise
+    // be greeted with the wrong town — the flag simply waits until the
+    // player next stands in Threshold, where every fresh save begins.
+    if (g.save && !g.save.welcomed && g.dialog && spec.slug === 'threshold') {
+      g.dialog.show({
+        speaker: t('welcome.speaker'),
+        lines: tLines('welcome.lines'),
+        onDone: () => { g.save.welcomed = true; g.onSave?.(); },
+      });
+    }
   }
 
   _spawnVector(spawnAt, atPortal) {
@@ -410,6 +442,9 @@ export class CityMode extends GameMode {
     // makes the race impossible rather than merely unlikely.
     this.city?.interiors?.setInside(null);
     this._insideId = null;
+    // Marker sprites detach with city.group below; drop the handles so a
+    // stale list can never bob a disposed town's sprites.
+    this._talkMarkers = null;
     this.city?.dispose();
     // Hand the body back to the arena environment so a gate does not start the
     // player standing on a heightfield that no longer exists.
@@ -447,6 +482,14 @@ export class CityMode extends GameMode {
     const input = g.input;
     const body = p.body;
 
+    // Gentle bob on the door talk markers — visual-only, driven off g.time
+    // (no RNG, no sim state).
+    if (this._talkMarkers) {
+      for (const mk of this._talkMarkers) {
+        mk.sprite.position.y = mk.baseY + Math.sin(g.time * 2 + mk.phase) * 0.12;
+      }
+    }
+
     body.maxSpeed = g.derived.speed;
     if (input.consume('jump')) body.jump();
     body.setJumpHeld(input.isHeld('jump'));
@@ -475,6 +518,10 @@ export class CityMode extends GameMode {
       attackPhase: 0, hurt: 0,
       airborne: !body.grounded,
       riseRate: p.vel.y,
+      // Same airtime-paced flip scrub as gate mode — one home, one latch
+      // (game._airFlipFor): full jumps complete the somersault just before
+      // landing, taps and kerb drops (-1) hold the braced pose.
+      airFlip: g._airFlipFor(body),
       dt,
     });
 

@@ -102,6 +102,19 @@ export class DialogUI {
     document.body.classList.add('gb-dialog');
   }
 
+  /**
+   * Router-driven teardown: hide, drop the body class, discard the script
+   * WITHOUT firing onDone — a transition away from the city (death mid-read,
+   * a tool driving __app.go) must not count as "read"; the script re-offers
+   * on the next natural trigger. advance() stays the only completing path.
+   * Mirrors MapUI.close()'s reconcile contract in main.js.
+   */
+  close() {
+    this._script = null;
+    this._root?.classList.add('hidden');
+    document.body.classList.remove('gb-dialog');
+  }
+
   /** Tap / hardware-back: next line, or close after the last. */
   advance() {
     if (!this._script) return;

@@ -262,6 +262,9 @@ ok(boot.rule === null, 'an epic carries no rule');
 
 await page.click('#btnPlay');
 await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 30000 });
+// RETARGET 2026-08-26: tap through the first-arrival welcome overlay
+// (save.welcomed) — it owns every click while open. See _harness.dismissDialog.
+await page.evaluate(() => { const d = window.__game?.dialog; for (let i = 0; d?.open && i < 12; i++) d.advance(); });
 await page.waitForTimeout(2200);
 
 // The sheet, weapon slot -> the ASCENSION block. The V3 paper-doll port

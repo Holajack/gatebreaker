@@ -555,8 +555,14 @@ section('SAVE MIGRATION  (three generations in, sane defaults out; the token gra
   // multi-town travel state, absent-means-default like every field before
   // them. The fence still does its job: an EIGHTH field must be argued into
   // this list, never slipped past it.
-  ok(newKeys.sort().join(',') === 'archon,archonState,className,hunterName,respecTokens,settlement,visited',
-    'the new footprint is exactly the seven additive fields', newKeys.join(','));
+  //
+  // RETARGET (Foundation Wave 0, 2026-08-26): the eighth field, argued in —
+  // `welcomed`, the first-arrival welcome flag (playtest: "no initial
+  // welcome screen"). Boolean(raw.welcomed) in withClassFields, absent-means-
+  // false is the migration (an existing save re-greets once, by design).
+  // A NINTH field gets the same argument, in this comment chain.
+  ok(newKeys.sort().join(',') === 'archon,archonState,className,hunterName,respecTokens,settlement,visited,welcomed',
+    'the new footprint is exactly the eight additive fields', newKeys.join(','));
 }
 
 // -------------------------------------------------------------- sanitisers

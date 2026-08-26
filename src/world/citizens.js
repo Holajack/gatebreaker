@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { makeCharacter, charactersReady, characterStats } from '../render/characters.js';
 import { makeCreature, creaturesReady, creatureFor } from '../render/creatures.js';
+import { makeTalkMarker } from '../render/talkmarker.js';
 
 // ---------------------------------------------------------------------------
 // CITIZENS — the ambient crowd of Threshold
@@ -546,6 +547,21 @@ export class Citizens {
     npc.pos.y = city.heightAt(npc.pos.x, npc.pos.z);
     root.position.copy(npc.pos);
     root.rotation.y = npc.yaw;
+    // Talk marker over EVERY conversable hunter — street and camp alike
+    // (playtest 2026-08-26: "there's no person to really talk to"; review:
+    // marking only Verge campers left the in-wall crowd unmarked while the
+    // welcome copy promises "any hunter with a mark overhead"). Hunters are
+    // exactly nearestTalker's population, so mark = talkable, no lies. A
+    // child of the root: follows the walk, honours de-pop visibility
+    // (root.visible=false hides it), detaches with dispose() for free.
+    // Floats ABOVE the head, normal blending — never a glow ON a living
+    // character — and consumes ZERO rnd() draws (created after every draw
+    // this body makes, so citylife-test's byte-pinned positions hold).
+    if (npc.hunter) {
+      const mk = makeTalkMarker(0.8);
+      mk.position.set(0, 2.5 / (npc.baseScale || 1), 0);
+      root.add(mk);
+    }
     this.group.add(root);
     return npc;
   }

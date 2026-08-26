@@ -49,6 +49,8 @@ const { page, errors } = await newPhonePage(browser, { width: 892, height: 412, 
 await gotoGame(page);
 await page.click('#btnPlay');
 await page.waitForFunction(() => window.__game?.mode?.name === 'city', null, { timeout: 30000 });
+// RETARGET 2026-08-26: dismiss the first-arrival welcome (see _harness.dismissDialog)
+await page.evaluate(() => { const d = window.__game?.dialog; for (let i = 0; d?.open && i < 12; i++) d.advance(); });
 await page.waitForTimeout(2500);
 
 await page.evaluate(() => {

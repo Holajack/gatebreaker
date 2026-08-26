@@ -15,7 +15,9 @@ import { ARCHONS, canAscend } from '../game/classes.js';
 // The band unlocks (Wave F.3): the levelup panel's unlock list grows three
 // rows for the 18/30/42 riders, named for the save's class once one is
 // sworn. Row labels come from strings.js like every other new surface line.
-import { bandsOf, BAND_LEVELS } from '../game/classes.js';
+import {
+  bandsOf, BAND_LEVELS, BAND_TECHNIQUES, BAND_ATTUNEMENTS, BAND_OATHS, CLASS_LIST,
+} from '../game/classes.js';
 import { t } from '../game/strings.js';
 
 const $ = (id) => document.getElementById(id);
@@ -456,13 +458,55 @@ export class UI {
       const label = document.createElement('span');
       label.textContent = rider ? `${t(`band.row.${key}`)} · ${rider.name}` : t(`band.row.${key}`);
       const status = document.createElement('b');
-      status.style.color = has ? '#4ade80' : '#8a93b8';
-      status.textContent = has ? 'UNLOCKED' : `LV ${lvl}`;
+      // Green UNLOCKED only when the rider actually EXISTS (level + sworn
+      // class): the shipped render flipped TECHNIQUE green at 18 on an
+      // unclassed save while holding dash did nothing — an unusable ability
+      // presented as owned (playtest 2026-08-26). Level-reached-but-unsworn
+      // now points at the Assay Hall in the panel's gold.
+      const live = Boolean(rider) && has;
+      if (live) {
+        status.style.color = '#4ade80';
+        status.textContent = 'UNLOCKED';
+      } else if (has) {
+        status.style.color = 'var(--gold)';
+        status.textContent = t('band.row.needsClass');
+      } else {
+        status.style.color = '#8a93b8';
+        status.textContent = `LV ${lvl}`;
+      }
       row.appendChild(label);
       row.appendChild(status);
       box.appendChild(row);
     }
     grid.appendChild(box);
+
+    // The PATH view (playtest 2026-08-26: "why is it not letting me choose
+    // the path or telling me what that path is?"). Unsworn saves only — a
+    // sworn save's class summary + named band rows above already answer it,
+    // and the classed panel stays pixel-identical. Appended LAST: acceptance
+    // 6b reads the FIRST '#statGrid .readout b' and must keep matching the
+    // direction header. Built with createElement/textContent (markup-sink
+    // rule). Resonant classes sort first, same idiom as the Assay roster.
+    if (!CLASSES[this.save.className]) {
+      const pathBox = document.createElement('div');
+      pathBox.className = 'readout';
+      pathBox.style.marginTop = '6px';
+      const headLine = document.createElement('b');
+      headLine.textContent = t('path.head.unsworn', { lv: this.save.level });
+      headLine.style.color = 'var(--gold)';
+      pathBox.appendChild(headLine);
+      const roster = CLASS_LIST.slice().sort(
+        (a, b) => Number(b.affinity.includes(dir)) - Number(a.affinity.includes(dir)),
+      );
+      for (const c of roster) {
+        const line = document.createElement('small');
+        line.textContent = `${c.name} (${c.affinity.join('+').toUpperCase()}) — `
+          + `18 ${BAND_TECHNIQUES[c.key].name} · 30 ${BAND_ATTUNEMENTS[c.key].name} · 42 ${BAND_OATHS[c.key].name}`;
+        line.style.cssText = 'display:block;font-size:11px;color:var(--dim)';
+        pathBox.appendChild(line);
+      }
+      grid.appendChild(pathBox);
+    }
   }
 
   showResults(result) {

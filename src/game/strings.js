@@ -77,20 +77,38 @@ export const STRINGS = {
   // The summit arena's collapse beat (encounters.js arena-phase seam).
   'gate.arena.collapse': 'THE RIM GIVES WAY — THE CIRCLE TIGHTENS',
 
+  // ---- first-arrival welcome (playtest 2026-08-26) -----------------------
+  // "There was no initial welcome screen." Shown once per save
+  // (save.welcomed) through the dialogue overlay on the first city entry.
+  // FUNCTIONAL copy only — the story bible is REJECTED, so these lines state
+  // what the town is and where the controls live; no lore, not [BIBLE].
+  'welcome.speaker': 'THRESHOLD',
+  'welcome.lines': [
+    'This is Threshold, the hunters’ town. The lit arches through the districts are GATES — walk into one and confirm to fight.',
+    'People here talk. Step up to the Assay Hall desk, the Exchange counter, the barracks door — or any hunter with a mark overhead — and press TALK.',
+    'Your map, contracts and bag are the buttons at the top right. SETTINGS lives in PAUSE. Good hunting.',
+  ],
+
   // ---- band unlocks (Wave F.3: the 18/30/42 dead-zone riders) ------------
   // Ceremony toasts fired on the level crossing (game._grantXp). The rider
   // name arrives in ctx when the save has a sworn class; without one the line
   // points at the Assay Hall instead of naming a rider that does not exist
   // yet — both shapes are mechanical copy, so neither is [BIBLE]-gated.
+  // Unclassed branches retargeted (playtest 2026-08-26): "IT WAITS ON A
+  // SWORN CLASS" never said WHERE or WHEN, which is exactly what confused
+  // the owner ("why is it not letting me choose the path?"). Now every
+  // stir names the Assay Hall and level 20 — fulfilling game.js's own
+  // documented 'Assay-Hall pointer line' intent. Key names unchanged
+  // (classes-test pins key presence, not values).
   'band.unlock.technique': (c) => (c.name
     ? `TECHNIQUE  ·  ${c.name} — HOLD DASH`
-    : 'A TECHNIQUE STIRS — IT WAITS ON A SWORN CLASS'),
+    : 'A TECHNIQUE STIRS — SWEAR A CLASS AT THE ASSAY HALL · LV 20'),
   'band.unlock.attunement': (c) => (c.name
     ? `ATTUNEMENT  ·  ${c.name} — NOVA BEARS YOUR COLOUR`
-    : 'AN ATTUNEMENT STIRS — IT WAITS ON A SWORN CLASS'),
+    : 'AN ATTUNEMENT STIRS — SWEAR A CLASS AT THE ASSAY HALL · LV 20'),
   'band.unlock.oathwork': (c) => (c.name
     ? `OATHWORK  ·  ${c.name} — HOLD BIND AFIELD`
-    : 'AN OATHWORK STIRS — IT WAITS ON A SWORN CLASS'),
+    : 'AN OATHWORK STIRS — SWEAR A CLASS AT THE ASSAY HALL · LV 20'),
   // The stance's own two lines (game._tryOath).
   'band.oath.begin': (c) => `${c.name}  ·  ${c.seconds}S`,
   'band.oath.notReady': 'THE OATH IS SPENT — IT RETURNS IN TIME',
@@ -99,6 +117,17 @@ export const STRINGS = {
   'band.row.technique': 'TECHNIQUE — HOLD DASH',
   'band.row.attunement': 'ATTUNEMENT — NOVA TWIST',
   'band.row.oathwork': 'OATHWORK — HOLD BIND',
+  // Status cell for a band the LEVEL has reached but no sworn class powers:
+  // the old render said UNLOCKED while holding dash did nothing — an
+  // unusable ability presented as owned (playtest 2026-08-26).
+  'band.row.needsClass': 'AWAITS YOUR OATH · ASSAY HALL',
+
+  // ---- the Path view (levelup panel, unsworn saves) ----------------------
+  // Mechanical copy, not [BIBLE]-gated: it states the rule the game already
+  // enforces (canChooseClass: level >= 20, sworn at the Assay Hall) and
+  // previews each class's 18/30/42 riders so "what is the path" has an
+  // answer BEFORE level 20, on the one screen every level-up opens.
+  'path.head.unsworn': (c) => `A CLASS IS SWORN AT THE ASSAY HALL · LV 20 — YOU ARE LV ${c.lv}`,
 
   // ---- the ladder past 53 (Wave F.4: weekly hunt + streaks) --------------
   // All mechanical copy (contracts, payouts, counters) — none is [BIBLE]-
