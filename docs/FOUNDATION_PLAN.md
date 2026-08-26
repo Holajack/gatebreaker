@@ -36,7 +36,13 @@ Nothing is wrong with the systems; the game skipped the **vertical slice** and t
 
 ## The program
 
-### Wave 0 — CLARITY (feel + UX bugs; quick, high-confidence)
+### Wave 0 — CLARITY ✅ SHIPPED 2026-08-26 as 3.1-clarity / versionCode 16
+Full battery green (classes 684, acceptance 52, soak 11.79M); adversarially
+reviewed, all findings fixed (welcome Threshold-gated, markers on every
+hunter, carve zero-at-kerb + raised slabs, flip threshold 0.62 + latch,
+aftershock wall-gated). Also landed: streets-as-surfaces from Wave 1's list
+(jitter calm, dished roadbed, sidewalk slabs) and the PerfProbe dpr honesty
+fix from Wave P.
 Maps to: "icons in the center", "strange settings/button layout", "flip doesn't
 complete", "hit an enemy through the wall", "why do I have Bind abilities", "no
 welcome screen", "no person to talk to".
